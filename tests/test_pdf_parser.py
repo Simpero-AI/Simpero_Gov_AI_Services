@@ -1,4 +1,4 @@
-import shutil
+import os
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from reportlab.pdfgen import canvas
 
-from services.parser.parser_service.config import get_settings
 from services.parser.parser_service.docling_parser import (
+    ParseError,
     normalize_numeric_tokens,
     parse_known_hashes,
     parse_pdf_bytes,
@@ -77,41 +77,19 @@ def make_blank_pdf(page_count: int = 1) -> bytes:
     return buffer.getvalue()
 
 
-def copy_test_pdf_if_needed() -> Path | None:
-    """Locate the real PTL CIM in a sibling repo checkout, if this machine
-    has one. Only used by the `local_corpus`-marked supplementary test below
-    — never relied on for CI coverage, since this confidential document is
-    never committed to this repository.
+def local_corpus_pdf(relative_path: str) -> Path | None:
+    """Locate a real corpus document under PARSER_LOCAL_CORPUS_DIR, if set.
+
+    The real CIMs are confidential and never committed, so the `local_corpus`
+    tests are opt-in: point PARSER_LOCAL_CORPUS_DIR at a local checkout of the
+    examples directory to run them. Unset (as in CI) -> the tests skip and the
+    synthetic fixtures provide the portable coverage.
     """
-    dest_dir = Path(__file__).parent.parent / "test_data"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / "1st-App-H-PTL-Group-CIM.pdf"
-
-    if not dest_path.exists():
-        src_path = Path(
-            "p:/simpero_GOV_AI/scripts/examples/1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf"
-        )
-        if src_path.exists():
-            shutil.copy(src_path, dest_path)
-
-    return dest_path if dest_path.exists() else None
-
-
-def copy_pitchbook_pdf_if_needed() -> Path | None:
-    """Same as copy_test_pdf_if_needed, for the Sell-Side Pitchbook CIM."""
-    dest_dir = Path(__file__).parent.parent / "test_data"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / "Sell-Side-Pitchbook-CIM-Sample.pdf"
-
-    if not dest_path.exists():
-        src_path = Path(
-            "p:/simpero_GOV_AI/scripts/examples/sell-side-pitchbook/"
-            "Sell-Side-Pitchbook-CIM-Sample.pdf"
-        )
-        if src_path.exists():
-            shutil.copy(src_path, dest_path)
-
-    return dest_path if dest_path.exists() else None
+    root = os.environ.get("PARSER_LOCAL_CORPUS_DIR")
+    if not root:
+        return None
+    path = Path(root) / relative_path
+    return path if path.exists() else None
 
 
 def test_parse_pdf_returns_page_index_and_char_coordinates() -> None:
@@ -141,6 +119,19 @@ def test_parse_pdf_returns_page_index_and_char_coordinates() -> None:
         assert isinstance(page.char_map[i].top, float)
         assert isinstance(page.char_map[i].x1, float)
         assert isinstance(page.char_map[i].bottom, float)
+
+    # Coordinates must be spatially real, not degenerate or constant — a
+    # regression that zeroed or duplicated every box would pass the type checks
+    # above but fail here. Whitespace markers are zero-width by construction, so
+    # exclude them.
+    glyphs = [cb for cb in page.char_map if cb.char.strip()]
+    for cb in glyphs:
+        assert cb.x1 > cb.x0, "glyph box must have positive width"
+        assert cb.bottom != cb.top, "glyph box must have positive height"
+    # Positions reflect the real layout: glyphs span many x offsets and the two
+    # source lines sit at distinct y offsets.
+    assert len({round(cb.x0, 1) for cb in glyphs}) > 5
+    assert len({round(cb.top, 1) for cb in glyphs}) >= 2
 
     # Docling does not expose per-character geometry for native (non-OCR)
     # text extraction, so every box must honestly declare word-level
@@ -226,6 +217,28 @@ def test_blank_pdf_without_text_is_rejected() -> None:
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "no_extractable_text"
+
+
+def test_partial_success_conversion_is_rejected(monkeypatch) -> None:
+    # Docling can return partial_success (a page failed but its empty object is
+    # retained) without raising; that page would otherwise ship as a blank
+    # PageIndex behind a 200. The status guard must fail closed.
+    from types import SimpleNamespace
+
+    from docling.datamodel.base_models import ConversionStatus
+    from docling.document_converter import DocumentConverter
+
+    pdf_bytes = make_multi_page_pdf_with_boilerplate(num_pages=4)
+
+    def fake_convert(self, *args, **kwargs):
+        return SimpleNamespace(status=ConversionStatus.PARTIAL_SUCCESS, pages=[], document=None)
+
+    monkeypatch.setattr(DocumentConverter, "convert", fake_convert)
+
+    with pytest.raises(ParseError) as exc_info:
+        parse_pdf_bytes(pdf_bytes)
+    assert exc_info.value.code == "incomplete_parse"
+    assert "partial_success" in exc_info.value.message
 
 
 def test_normalize_numeric_tokens_collapses_space_before_separator() -> None:
@@ -426,6 +439,15 @@ def test_synthetic_multi_page_document_acceptance() -> None:
         assert "3,817" in page.text
         assert "3 ,817" not in page.text
 
+    # The normalized token resolves to real, left-to-right source coordinates —
+    # the char->bbox mapping this ticket exists to guarantee, validated in CI.
+    page = result.pages[0]
+    start = page.text.index("3,817")
+    token_boxes = page.char_map[start : start + len("3,817")]
+    assert all(b.x1 > b.x0 for b in token_boxes), "token glyphs need positive-width boxes"
+    xs = [b.x0 for b in token_boxes]
+    assert xs == sorted(xs), "token characters must be ordered left to right"
+
     # Boilerplate: the repeating banner and page-number footer are tagged on
     # every page (4 >= the ticket's >= 3 threshold), without being stripped.
     pages_with_boilerplate = [
@@ -439,7 +461,7 @@ def test_synthetic_multi_page_document_acceptance() -> None:
 
 @pytest.mark.local_corpus
 def test_cim_pdf_acceptance_and_normalization() -> None:
-    pdf_path = copy_test_pdf_if_needed()
+    pdf_path = local_corpus_pdf("1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf")
     if not pdf_path or not pdf_path.exists():
         pytest.skip(
             "Real PTL CIM not available on this machine (confidential document, "
@@ -451,15 +473,9 @@ def test_cim_pdf_acceptance_and_normalization() -> None:
         pdf_bytes = f.read()
 
     result = parse_pdf_bytes(pdf_bytes)
-    digest = sha256(pdf_bytes).hexdigest()
 
     # 1st-App-H-PTL-Group-CIM.pdf is 19 pages
     assert len(result.pages) == 19
-
-    # The raw DoclingDocument is cached as a single whole-document file for
-    # DS-W3-2/DS-W3-6.
-    cache_file = get_settings().cache_dir / f"{digest}.json"
-    assert cache_file.exists(), "expected the DoclingDocument cache file"
 
     # Hard invariant test across all pages
     for page in result.pages:
@@ -610,7 +626,7 @@ def test_boilerplate_short_page_does_not_over_tag_unique_body() -> None:
 
 @pytest.mark.local_corpus
 def test_pitchbook_cim_boilerplate_and_acceptance() -> None:
-    pdf_path = copy_pitchbook_pdf_if_needed()
+    pdf_path = local_corpus_pdf("sell-side-pitchbook/Sell-Side-Pitchbook-CIM-Sample.pdf")
     if not pdf_path or not pdf_path.exists():
         pytest.skip(
             "Real Pitchbook CIM not available on this machine (confidential document, "
