@@ -1,13 +1,16 @@
 from hashlib import sha256
 from io import BytesIO
+import os
+from pathlib import Path
+import shutil
 
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from reportlab.pdfgen import canvas
 
 from services.parser.parser_service.main import app
-from services.parser.parser_service.pdf_parser import parse_pdf_bytes
-
+from services.parser.parser_service.docling_parser import parse_pdf_bytes, ParseError
+from services.parser.parser_service.schemas import PageIndex
 
 client = TestClient(app)
 
@@ -32,7 +35,20 @@ def make_blank_pdf(page_count: int = 1) -> bytes:
     return buffer.getvalue()
 
 
-def test_parse_pdf_returns_page_paragraph_and_char_offsets() -> None:
+def copy_test_pdf_if_needed() -> Path | None:
+    dest_dir = Path(__file__).parent.parent / "test_data"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / "1st-App-H-PTL-Group-CIM.pdf"
+    
+    if not dest_path.exists():
+        src_path = Path("p:/simpero_GOV_AI/scripts/examples/1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf")
+        if src_path.exists():
+            shutil.copy(src_path, dest_path)
+            
+    return dest_path if dest_path.exists() else None
+
+
+def test_parse_pdf_returns_page_index_and_char_coordinates() -> None:
     pdf_bytes = make_text_pdf(
         [
             "Revenue increased to $10 million.",
@@ -43,13 +59,22 @@ def test_parse_pdf_returns_page_paragraph_and_char_offsets() -> None:
     result = parse_pdf_bytes(pdf_bytes)
 
     assert result.sha256 == sha256(pdf_bytes).hexdigest()
-    assert len(result.chunks) == 2
-    assert result.chunks[0].page == 1
-    assert result.chunks[0].paragraph == 1
-    assert result.chunks[0].text == "Revenue increased to $10 million."
-    assert result.chunks[0].char_start == 0
-    assert result.chunks[0].char_end == len(result.chunks[0].text)
-    assert result.chunks[1].char_start > result.chunks[0].char_end
+    assert len(result.pages) == 1
+    page = result.pages[0]
+    
+    assert page.page == 1
+    assert "Revenue increased to $10 million." in page.text
+    assert "EBITDA margin was 25%." in page.text
+    
+    # Assert hard invariants
+    assert len(page.text) == len(page.char_map)
+    for i, char in enumerate(page.text):
+        assert char == page.char_map[i].char
+        # Bbox coordinates should be valid floats
+        assert isinstance(page.char_map[i].x0, float)
+        assert isinstance(page.char_map[i].top, float)
+        assert isinstance(page.char_map[i].x1, float)
+        assert isinstance(page.char_map[i].bottom, float)
 
 
 def test_parse_endpoint_accepts_pdf_bytes() -> None:
@@ -63,7 +88,11 @@ def test_parse_endpoint_accepts_pdf_bytes() -> None:
 
     assert response.status_code == 200
     assert response.headers["X-Content-SHA256"] == sha256(pdf_bytes).hexdigest()
-    assert response.json()[0]["text"] == "The company serves enterprise customers."
+    
+    pages = response.json()
+    assert len(pages) == 1
+    assert "The company serves enterprise customers." in pages[0]["text"]
+    assert len(pages[0]["text"]) == len(pages[0]["char_map"])
 
 
 def test_zero_byte_pdf_is_rejected() -> None:
@@ -117,11 +146,46 @@ def test_page_limit_guard_rejects_over_110_pages() -> None:
 
 
 def test_blank_pdf_without_text_is_rejected() -> None:
+    # A completely blank PDF generated without any text cells
     response = client.post(
         "/parse",
-        content=make_blank_pdf(),
+        content=make_blank_pdf(page_count=1),
         headers={"Content-Type": "application/pdf"},
     )
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "no_extractable_text"
+
+
+def test_cim_pdf_acceptance_and_normalization() -> None:
+    pdf_path = copy_test_pdf_if_needed()
+    if not pdf_path or not pdf_path.exists():
+        # Skip if CIM PDF not found in local workspace or sibling repo
+        return
+
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    result = parse_pdf_bytes(pdf_bytes)
+    digest = sha256(pdf_bytes).hexdigest()
+
+    # 1st-App-H-PTL-Group-CIM.pdf is 19 pages
+    assert len(result.pages) == 19
+    
+    # Assert cache file is created
+    cache_file = Path("services/parser/cache") / f"{digest}.json"
+    assert cache_file.exists()
+
+    # Hard invariant test across all pages
+    for page in result.pages:
+        assert len(page.text) == len(page.char_map)
+        for i, char in enumerate(page.text):
+            assert char == page.char_map[i].char
+
+    # PDF Page index 11 (0-indexed page 10) is the income statement page.
+    # In 1st-App-H-PTL-Group-CIM.pdf, page index 11 has the value 3,817 which originally renders as "3 ,817"
+    page_11 = result.pages[10]
+    
+    # Verify the space has been collapsed and normalized
+    assert "3,817" in page_11.text
+    assert "3 ,817" not in page_11.text

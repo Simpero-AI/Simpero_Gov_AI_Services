@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 
-from .pdf_parser import ParseError, parse_known_hashes, parse_pdf_bytes
-from .schemas import ParsedParagraph
+from .docling_parser import ParseError, parse_known_hashes, parse_pdf_bytes
+from .schemas import PageIndex
 
 app = FastAPI(
     title="Simpero Parser Service",
@@ -15,13 +15,13 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok", "service": "parser"}
 
 
-@app.post("/parse", response_model=list[ParsedParagraph])
+@app.post("/parse", response_model=list[PageIndex])
 async def parse_pdf(
     request: Request,
     response: Response,
     x_known_sha256: str | None = Header(default=None),
     x_known_sha256s: str | None = Header(default=None),
-) -> list[ParsedParagraph]:
+) -> list[PageIndex]:
     known_hashes = parse_known_hashes(x_known_sha256) | parse_known_hashes(x_known_sha256s)
     pdf_bytes = await request.body()
 
@@ -34,4 +34,4 @@ async def parse_pdf(
         ) from exc
 
     response.headers["X-Content-SHA256"] = result.sha256
-    return result.chunks
+    return result.pages

@@ -1,9 +1,17 @@
 from pydantic import BaseModel, Field
 
 
-class ParsedParagraph(BaseModel):
+class CharBox(BaseModel):
+    char: str
+    x0: float
+    top: float
+    x1: float
+    bottom: float
     page: int = Field(ge=1)
-    paragraph: int = Field(ge=1)
+
+
+class PageIndex(BaseModel):
+    page: int = Field(ge=1)
     text: str
-    char_start: int = Field(ge=0)
-    char_end: int = Field(ge=0)
+    char_map: list[CharBox]
+
