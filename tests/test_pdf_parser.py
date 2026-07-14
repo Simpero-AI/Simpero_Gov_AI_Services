@@ -39,7 +39,9 @@ def copy_test_pdf_if_needed() -> Path | None:
     dest_path = dest_dir / "1st-App-H-PTL-Group-CIM.pdf"
 
     if not dest_path.exists():
-        src_path = Path("p:/simpero_GOV_AI/scripts/examples/1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf")
+        src_path = Path(
+            "p:/simpero_GOV_AI/scripts/examples/1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf"
+        )
         if src_path.exists():
             shutil.copy(src_path, dest_path)
 

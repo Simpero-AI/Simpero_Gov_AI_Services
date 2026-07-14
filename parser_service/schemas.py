@@ -14,4 +14,3 @@ class PageIndex(BaseModel):
     page: int = Field(ge=1)
     text: str
     char_map: list[CharBox]
-

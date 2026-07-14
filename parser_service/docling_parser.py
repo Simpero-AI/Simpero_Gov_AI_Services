@@ -117,9 +117,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
         pipeline_options.do_ocr = False
 
         converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-            }
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
         )
 
         result = converter.convert(tmp_path)
@@ -210,7 +208,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                                 top=float(bbox.t),
                                 x1=float(bbox.l + (j + 1) * char_w),
                                 bottom=float(bbox.b),
-                                page=page_no
+                                page=page_no,
                             )
                         )
 
@@ -223,7 +221,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                             top=float(prev_bbox.t),
                             x1=float(bbox.l),
                             bottom=float(prev_bbox.b),
-                            page=page_no
+                            page=page_no,
                         )
                         line_text_parts.append(" ")
                         line_char_map.append(space_box)
@@ -240,7 +238,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                         top=float(prev_line_last_bbox.t),
                         x1=float(prev_line_last_bbox.r),
                         bottom=float(prev_line_last_bbox.b),
-                        page=page_no
+                        page=page_no,
                     )
                     page_text_parts.append("\n")
                     page_char_map.append(newline_box)
@@ -273,11 +271,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                     )
 
             page_indices.append(
-                PageIndex(
-                    page=page_no,
-                    text=normalized_text,
-                    char_map=normalized_char_map
-                )
+                PageIndex(page=page_no, text=normalized_text, char_map=normalized_char_map)
             )
 
         # `result.pages` is non-empty even for a blank page (Docling still emits a
