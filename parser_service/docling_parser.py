@@ -7,7 +7,7 @@ from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
-from docling.datamodel.base_models import InputFormat
+from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.base_models import Page as DoclingPage
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -16,6 +16,7 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 from .config import get_settings
+from .document_cache import get_document_cache
 from .normalize import kept_indices
 from .schemas import CharBox, PageIndex
 
@@ -354,6 +355,18 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
 
         result = converter.convert(tmp_path)
 
+        # Docling returns partial_success when a page fails internally but its
+        # (empty) page object is still present — convert() only raises on total
+        # failure. Such a page would pass the count check below and ship as a
+        # silently-blank PageIndex, so fail closed on any non-success status.
+        if result.status != ConversionStatus.SUCCESS:
+            raise ParseError(
+                "incomplete_parse",
+                f"Docling conversion status was {result.status.value}; "
+                "one or more pages failed during processing.",
+                422,
+            )
+
         if len(result.pages) != page_count:
             raise ParseError(
                 "incomplete_parse",
@@ -362,13 +375,12 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                 422,
             )
 
-        # Raw DoclingDocument cached for DS-W3-2/DS-W3-6, which need the full
-        # structure rather than the flat PageIndex. Optional (settings.enable_cache):
-        # these documents may contain confidential financial content and this cache
-        # is not encrypted at rest at the application level — see config.py.
-        if settings.enable_cache:
-            settings.cache_dir.mkdir(parents=True, exist_ok=True)
-            result.document.save_as_json(settings.cache_dir / f"{digest}.json")
+        # Cache the raw DoclingDocument for DS-W3-2/DS-W3-6. Backed by object
+        # storage (encrypted at rest); a no-op until Spaces is configured, so no
+        # confidential content is written to local disk. Best-effort, never fatal.
+        document_cache = get_document_cache()
+        if document_cache.enabled:
+            document_cache.put_json(f"{digest}.json", result.document.export_to_dict())
 
         page_indices = [_build_page_index(page, page.page_no) for page in result.pages]
         tag_boilerplate(page_indices)

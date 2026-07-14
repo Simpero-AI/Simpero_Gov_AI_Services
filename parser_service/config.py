@@ -1,5 +1,4 @@
 from functools import lru_cache
-from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,37 +13,32 @@ class ParserSettings(BaseSettings):
     # accidentally-huge uploads, not a hard technical ceiling.
     max_pages: int = 110
 
-    # Root directory for the cached raw DoclingDocument JSON (kept for
-    # DS-W3-2/DS-W3-6, which need the full structure, not just the flat
-    # PageIndex). Must be an absolute path — the service's working directory
-    # is not guaranteed by uvicorn or by container orchestration, so a
-    # relative path here would silently write wherever the process happened
-    # to be launched from.
-    #
-    # Defaults under /tmp, matching this service's existing HF_HOME/TORCH_HOME
-    # convention (Dockerfile) — guaranteed writable without special permissions
-    # in any container or CI runner, unlike e.g. /var/lib, which typically
-    # requires root. /tmp is not persistent across container restarts; a real
-    # deployment that needs the cache to survive restarts should override
-    # PARSER_CACHE_DIR to a mounted, persistent volume.
-    #
-    # SECURITY NOTE: parsed CIM/financial documents are written to this cache
-    # unencrypted. This service does not implement application-level
-    # encryption-at-rest, because doing so safely requires a defined key-
-    # management story (rotation, access control) that doesn't exist yet —
-    # bolting on ad-hoc encryption without one would be a false sense of
-    # security, not a real fix. Until that exists, this cache must live on
-    # storage that is encrypted at rest at the infrastructure/volume level,
-    # and access to the host/container must be restricted accordingly. If
-    # that guarantee can't be met in a given deployment, disable the cache
-    # entirely via `enable_cache=False` rather than accept unencrypted
-    # confidential documents on disk.
-    cache_dir: Path = Path("/tmp/simpero-parser/cache")
+    # Object storage (DigitalOcean Spaces, S3-compatible) for the raw
+    # DoclingDocument cache that DS-W3-2/DS-W3-6 consume. Spaces encrypts at rest
+    # at the bucket level, so confidential content is never persisted unencrypted
+    # at the application level, and the cache is durable and shared across parse
+    # workers. Unset until Spaces is provisioned; while unset the cache is
+    # disabled (see document_cache.build_document_cache) and nothing is written
+    # to local disk. Credentials come from the environment (PARSER_SPACES_*),
+    # never committed.
+    spaces_bucket: str | None = None
+    spaces_region: str | None = None
+    spaces_endpoint_url: str | None = None
+    spaces_access_key_id: str | None = None
+    spaces_secret_access_key: str | None = None
+    # Content-addressed under this prefix. Org-scoping (a per-tenant prefix) is a
+    # follow-up: parse_pdf_bytes has no org context yet, and sha256 keys are
+    # shared across tenants until it does.
+    spaces_key_prefix: str = "parser/document-cache"
 
-    # Escape hatch for environments that can't guarantee the cache_dir's
-    # storage is encrypted at rest (see SECURITY NOTE above). DS-W3-2/DS-W3-6
-    # depend on this cache, so disabling it is a real trade-off, not free.
-    enable_cache: bool = True
+    @property
+    def spaces_configured(self) -> bool:
+        return bool(
+            self.spaces_bucket
+            and self.spaces_endpoint_url
+            and self.spaces_access_key_id
+            and self.spaces_secret_access_key
+        )
 
     model_config = SettingsConfigDict(
         env_prefix="PARSER_",
