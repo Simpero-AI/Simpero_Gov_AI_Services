@@ -1,18 +1,17 @@
+import contextlib
+import re
+import tempfile
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
-import os
 from pathlib import Path
-import re
-import tempfile
-
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.page import TextCellUnit
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 from .schemas import CharBox, PageIndex
 
@@ -45,32 +44,32 @@ def normalize_numeric_tokens(text: str, char_map: list[CharBox]) -> tuple[str, l
     i = 0
     n = len(text)
     pattern = re.compile(r"^(\d)\s+([.,])\s*(\d)")
-    
+
     while i < n:
         match = pattern.match(text[i:])
         if match:
             sep = match.group(2)
             g0 = match.group(0)
-            
+
             idx_d1 = i
             idx_sep = i + g0.find(sep)
             idx_d2 = i + len(g0) - 1
-            
+
             new_text_list.append(text[idx_d1])
             new_char_map.append(char_map[idx_d1])
-            
+
             new_text_list.append(text[idx_sep])
             new_char_map.append(char_map[idx_sep])
-            
+
             new_text_list.append(text[idx_d2])
             new_char_map.append(char_map[idx_d2])
-            
+
             i += len(g0)
         else:
             new_text_list.append(text[i])
             new_char_map.append(char_map[i])
             i += 1
-            
+
     return "".join(new_text_list), new_char_map
 
 
@@ -122,7 +121,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
             }
         )
-        
+
         result = converter.convert(tmp_path)
         if not result or not result.pages:
             raise ParseError("no_extractable_text", "PDF contains no extractable text.", 422)
@@ -140,29 +139,29 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             )
 
         doc = result.document
-        
+
         # Save DoclingDocument to cache directory for downstream tickets
         cache_dir = Path("services/parser/cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = cache_dir / f"{digest}.json"
         doc.save_as_json(cache_file)
-        
+
         page_indices: list[PageIndex] = []
         for page in result.pages:
             page_no = page.page_no
             parsed_page = page.parsed_page
-            
+
             if not parsed_page:
                 page_indices.append(PageIndex(page=page_no, text="", char_map=[]))
                 continue
-                
+
             # Iterate over word cells in reading order
             words = list(parsed_page.iterate_cells(unit_type=TextCellUnit.WORD))
-            
+
             if not words:
                 page_indices.append(PageIndex(page=page_no, text="", char_map=[]))
                 continue
-                
+
             # Resolve each word's BoundingRectangle (corner points) to a BoundingBox
             # (.l/.t/.r/.b) once up front — BoundingRectangle itself has no .l/.t/.r/.b.
             word_boxes = [(word, word.rect.to_bounding_box()) for word in words]
@@ -248,12 +247,14 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
 
                 page_text_parts.extend(line_text_parts)
                 page_char_map.extend(line_char_map)
-                
+
             page_text = "".join(page_text_parts)
-            
+
             # Run numeric token normalization to collapse spaces inside numbers
-            normalized_text, normalized_char_map = normalize_numeric_tokens(page_text, page_char_map)
-            
+            normalized_text, normalized_char_map = normalize_numeric_tokens(
+                page_text, page_char_map
+            )
+
             # Verify and enforce lengths/characters match exactly. Raised as ParseError
             # rather than `assert` so the check can't be stripped under `python -O`.
             if len(normalized_text) != len(normalized_char_map):
@@ -270,7 +271,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                         f"Page {page_no}: char mismatch at index {k}.",
                         500,
                     )
-                
+
             page_indices.append(
                 PageIndex(
                     page=page_no,
@@ -286,9 +287,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             raise ParseError("no_extractable_text", "PDF contains no extractable text.", 422)
 
         return DoclingParseResult(sha256=digest, pages=page_indices)
-        
+
     finally:
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
