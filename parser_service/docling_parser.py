@@ -19,18 +19,6 @@ from .config import get_settings
 from .normalize import kept_indices
 from .schemas import CharBox, PageIndex
 
-# Docling's threaded pipeline holds each page's native backend + rendered image
-# resident until that page finishes the *entire* multi-stage pipeline, and the
-# producer thread opens every requested page's backend up front (queue_max_size
-# defaults to 100). On a multi-page document processed in one convert() call,
-# this means N pages' worth of native memory (~1.8GB/page, measured) accumulate
-# concurrently before any of it is released, which reproducibly triggers a
-# native std::bad_alloc past ~4-5 pages. Converting in small page_range chunks
-# on a reused converter bounds peak concurrent memory to one chunk's worth
-# regardless of document length — each convert() call fully releases its pages
-# before returning. See docs/track/DS-W3-1.md for the isolation experiments.
-PAGE_CHUNK_SIZE = 2
-
 _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
 BOILERPLATE_ZONE_LINES = 5
 MIN_BOILERPLATE_REPEAT_PAGES = 3
@@ -364,39 +352,25 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
         )
 
+        result = converter.convert(tmp_path)
+
+        if len(result.pages) != page_count:
+            raise ParseError(
+                "incomplete_parse",
+                f"Docling parsed {len(result.pages)} of {page_count} pages; "
+                "one or more pages failed during layout preprocessing.",
+                422,
+            )
+
+        # Raw DoclingDocument cached for DS-W3-2/DS-W3-6, which need the full
+        # structure rather than the flat PageIndex. Optional (settings.enable_cache):
+        # these documents may contain confidential financial content and this cache
+        # is not encrypted at rest at the application level — see config.py.
         if settings.enable_cache:
             settings.cache_dir.mkdir(parents=True, exist_ok=True)
+            result.document.save_as_json(settings.cache_dir / f"{digest}.json")
 
-        page_indices: list[PageIndex] = []
-        for chunk_start in range(1, page_count + 1, PAGE_CHUNK_SIZE):
-            chunk_end = min(chunk_start + PAGE_CHUNK_SIZE - 1, page_count)
-            result = converter.convert(tmp_path, page_range=(chunk_start, chunk_end))
-            if not result:
-                raise ParseError("no_extractable_text", "PDF contains no extractable text.", 422)
-
-            expected_chunk_pages = chunk_end - chunk_start + 1
-            if len(result.pages) != expected_chunk_pages:
-                raise ParseError(
-                    "incomplete_parse",
-                    f"Docling parsed {len(result.pages)} of {expected_chunk_pages} pages "
-                    f"in range [{chunk_start}, {chunk_end}]; one or more pages failed "
-                    "during layout preprocessing.",
-                    422,
-                )
-
-            # Raw DoclingDocument is chunked the same way (one convert() call per
-            # chunk yields one document covering just that chunk's pages) — cached
-            # per chunk for DS-W3-2/DS-W3-6 rather than as a single whole-document file.
-            # Caching is optional (settings.enable_cache) since these documents may
-            # contain confidential financial content and this cache is not encrypted
-            # at rest at the application level — see config.py's SECURITY NOTE.
-            if settings.enable_cache:
-                chunk_cache_file = settings.cache_dir / f"{digest}_p{chunk_start}-{chunk_end}.json"
-                result.document.save_as_json(chunk_cache_file)
-
-            for page in result.pages:
-                page_indices.append(_build_page_index(page, page.page_no))
-
+        page_indices = [_build_page_index(page, page.page_no) for page in result.pages]
         tag_boilerplate(page_indices)
 
         # A blank page still yields an (empty) PageIndex rather than being absent,

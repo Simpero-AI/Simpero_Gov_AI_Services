@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from reportlab.pdfgen import canvas
 
+from services.parser.parser_service.config import get_settings
 from services.parser.parser_service.docling_parser import (
     normalize_numeric_tokens,
     parse_known_hashes,
@@ -403,10 +404,10 @@ def test_parse_known_hashes_handles_none_empty_and_messy_input() -> None:
 def test_synthetic_multi_page_document_acceptance() -> None:
     """CI-portable equivalent of the ticket's real-corpus acceptance test.
 
-    Exercises the full parse pipeline — chunked conversion, the text/char_map
-    invariant, numeric-token normalization, and boilerplate tagging — against
-    a fixture generated at test time rather than a real (and confidential)
-    CIM document. Always runs, on any platform, in CI; no skip condition.
+    Exercises the full parse pipeline — the text/char_map invariant, numeric-token
+    normalization, and boilerplate tagging — against a fixture generated at test
+    time rather than a real (and confidential) CIM document. Always runs, on any
+    platform, in CI; no skip condition.
     """
     pdf_bytes = make_multi_page_pdf_with_boilerplate(num_pages=4)
 
@@ -455,11 +456,10 @@ def test_cim_pdf_acceptance_and_normalization() -> None:
     # 1st-App-H-PTL-Group-CIM.pdf is 19 pages
     assert len(result.pages) == 19
 
-    # Conversion runs in small page_range chunks (bounds peak native memory —
-    # see PAGE_CHUNK_SIZE), so the raw DoclingDocument is cached per chunk
-    # rather than as a single whole-document file.
-    chunk_cache_files = list(Path("services/parser/cache").glob(f"{digest}_p*.json"))
-    assert chunk_cache_files, "expected chunked DoclingDocument cache files"
+    # The raw DoclingDocument is cached as a single whole-document file for
+    # DS-W3-2/DS-W3-6.
+    cache_file = get_settings().cache_dir / f"{digest}.json"
+    assert cache_file.exists(), "expected the DoclingDocument cache file"
 
     # Hard invariant test across all pages
     for page in result.pages:

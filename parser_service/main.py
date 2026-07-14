@@ -6,7 +6,7 @@ from .schemas import PageIndex
 app = FastAPI(
     title="Simpero Parser Service",
     version="0.1.0",
-    description="Alpha PDF parser with character-span chunk coordinates.",
+    description="Alpha PDF parser with character-span coordinates.",
 )
 
 
