@@ -24,3 +24,49 @@ class PageIndex(BaseModel):
     page: int = Field(ge=1)
     text: str
     char_map: list[CharBox]
+
+
+class TableCellRecord(BaseModel):
+    row: int = Field(ge=0)
+    col: int = Field(ge=0)
+    row_span: int = Field(ge=1)
+    col_span: int = Field(ge=1)
+    # Verbatim cell text exactly as Docling read it off the page — may contain
+    # a split numeric token ("3 ,817"). Kept unmodified so it still matches the
+    # source for provenance/debugging.
+    text: str
+    # `text` with split numeric tokens collapsed ("3 ,817" -> "3,817"), using
+    # the same rule as the flat page index (normalize.py). Parse numeric facts
+    # from THIS field, not `text` — see DS-W3-2 finding F2.
+    text_normalized: str
+    # Docling's own flag. ADVISORY ONLY — on tables with unlabeled columns it
+    # marks the first *data* row instead of a real header row (verified on
+    # Pitchbook PDF-page 17). Use TableRecord.header_row to locate the header.
+    column_header: bool
+    row_header: bool
+    page: int = Field(ge=1)
+    # None when Docling did not expose a source bbox for this cell — see
+    # TableRecord.cell_provenance_ok.
+    x0: float | None
+    top: float | None
+    x1: float | None
+    bottom: float | None
+
+
+class TableRecord(BaseModel):
+    page: int = Field(ge=1)
+    num_rows: int = Field(ge=0)
+    num_cols: int = Field(ge=0)
+    cells: list[TableCellRecord]
+    # False if any cell in this table lacks a resolvable source bbox — per
+    # DS-2, such a table must not be treated as citable until this is true.
+    cell_provenance_ok: bool
+    # Header row inferred from table *structure*, not from Docling's
+    # column_header flag. None means this table has unlabeled columns (no
+    # header row exists to key off) — consumers must then fall back to
+    # positional/section context rather than inventing column names.
+    header_row: int | None
+    # True only when Docling's column_header flags agree with the structurally
+    # inferred header row. False means the flags are untrustworthy for this
+    # table and must be ignored.
+    column_headers_reliable: bool
