@@ -1,21 +1,39 @@
 import contextlib
 import re
 import tempfile
+from collections import defaultdict
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
 from docling.datamodel.base_models import InputFormat
+from docling.datamodel.base_models import Page as DoclingPage
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.page import TextCellUnit
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+from .config import get_settings
+from .normalize import kept_indices
 from .schemas import CharBox, PageIndex
 
-MAX_PAGES = 110
+# Docling's threaded pipeline holds each page's native backend + rendered image
+# resident until that page finishes the *entire* multi-stage pipeline, and the
+# producer thread opens every requested page's backend up front (queue_max_size
+# defaults to 100). On a multi-page document processed in one convert() call,
+# this means N pages' worth of native memory (~1.8GB/page, measured) accumulate
+# concurrently before any of it is released, which reproducibly triggers a
+# native std::bad_alloc past ~4-5 pages. Converting in small page_range chunks
+# on a reused converter bounds peak concurrent memory to one chunk's worth
+# regardless of document length — each convert() call fully releases its pages
+# before returning. See docs/track/DS-W3-1.md for the isolation experiments.
+PAGE_CHUNK_SIZE = 2
+
+_PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
+BOILERPLATE_ZONE_LINES = 5
+MIN_BOILERPLATE_REPEAT_PAGES = 3
 
 
 class ParseError(Exception):
@@ -39,38 +57,262 @@ def parse_known_hashes(value: str | None) -> set[str]:
 
 
 def normalize_numeric_tokens(text: str, char_map: list[CharBox]) -> tuple[str, list[CharBox]]:
-    new_text_list = []
-    new_char_map = []
-    i = 0
-    n = len(text)
-    pattern = re.compile(r"^(\d)\s+([.,])\s*(\d)")
+    """Collapse split numeric tokens ("3 ,817" -> "3,817") in the flat page
+    index, dropping each collapsed space's char_map entry so text and char_map
+    stay the same length and every surviving character still points at its own
+    source glyph.
 
-    while i < n:
-        match = pattern.match(text[i:])
-        if match:
-            sep = match.group(2)
-            g0 = match.group(0)
+    The rule itself lives in normalize.py — shared verbatim with table cell
+    values (DS-W3-2) so the two can never drift apart.
+    """
+    keep = kept_indices(text)
+    return "".join(text[i] for i in keep), [char_map[i] for i in keep]
 
-            idx_d1 = i
-            idx_sep = i + g0.find(sep)
-            idx_d2 = i + len(g0) - 1
 
-            new_text_list.append(text[idx_d1])
-            new_char_map.append(char_map[idx_d1])
+def _real_char_cells(parsed_page) -> list | None:
+    """Return Docling's real per-character cells for this page, if it has any.
 
-            new_text_list.append(text[idx_sep])
-            new_char_map.append(char_map[idx_sep])
+    Checked live on every page rather than assumed, so real per-glyph
+    precision is picked up automatically if a future Docling version or
+    pipeline configuration ever provides it. As of this Docling version,
+    native (non-OCR) text extraction returns zero CHAR-unit cells — confirmed
+    empirically against this service's parse configuration — so this
+    currently always returns None in production, and every CharBox falls
+    back to word-level precision (see CharBox.precision).
+    """
+    char_cells = list(parsed_page.iterate_cells(unit_type=TextCellUnit.CHAR))
+    return char_cells or None
 
-            new_text_list.append(text[idx_d2])
-            new_char_map.append(char_map[idx_d2])
 
-            i += len(g0)
+def _char_boxes_for_word(
+    word_text: str, word_bbox, page_no: int, char_cells: list | None, cursor: int
+) -> tuple[list[CharBox], int, bool]:
+    """Build per-character boxes for one word.
+
+    If `char_cells` holds real per-glyph cells and the next len(word_text) of
+    them match this word's text exactly, each character gets its own real
+    bounding box (precision="char"). Otherwise every character in this word
+    gets the word's own full bounding box (precision="word") — an honest
+    statement of word-level precision, never a fabricated per-glyph estimate.
+
+    Returns (char_boxes, new_cursor, still_usable). Once a mismatch is found,
+    `still_usable` is False for the remainder of the page — a partial
+    misalignment means the assumed reading-order correspondence between
+    char_cells and word text has broken down and can no longer be trusted.
+    """
+    if char_cells is not None and cursor + len(word_text) <= len(char_cells):
+        candidate = char_cells[cursor : cursor + len(word_text)]
+        if all(cell.text == ch for cell, ch in zip(candidate, word_text, strict=True)):
+            cell_bboxes = [cell.rect.to_bounding_box() for cell in candidate]
+            boxes = [
+                CharBox(
+                    char=ch,
+                    x0=float(cb.l),
+                    top=float(cb.t),
+                    x1=float(cb.r),
+                    bottom=float(cb.b),
+                    page=page_no,
+                    precision="char",
+                )
+                for ch, cb in zip(word_text, cell_bboxes, strict=True)
+            ]
+            return boxes, cursor + len(word_text), True
+
+    boxes = [
+        CharBox(
+            char=ch,
+            x0=float(word_bbox.l),
+            top=float(word_bbox.t),
+            x1=float(word_bbox.r),
+            bottom=float(word_bbox.b),
+            page=page_no,
+            precision="word",
+        )
+        for ch in word_text
+    ]
+    return boxes, cursor, False
+
+
+def _build_page_index(page: DoclingPage, page_no: int) -> PageIndex:
+    parsed_page = page.parsed_page
+    if not parsed_page:
+        return PageIndex(page=page_no, text="", char_map=[])
+
+    # Iterate over word cells in reading order
+    words = list(parsed_page.iterate_cells(unit_type=TextCellUnit.WORD))
+    if not words:
+        return PageIndex(page=page_no, text="", char_map=[])
+
+    char_cells = _real_char_cells(parsed_page)
+    char_cursor = 0
+
+    # Resolve each word's BoundingRectangle (corner points) to a BoundingBox
+    # (.l/.t/.r/.b) once up front — BoundingRectangle itself has no .l/.t/.r/.b.
+    word_boxes = [(word, word.rect.to_bounding_box()) for word in words]
+
+    # Group words into visual lines
+    lines: list[list[tuple]] = []
+    current_line: list[tuple] = []
+    for word, bbox in word_boxes:
+        if not current_line:
+            current_line.append((word, bbox))
         else:
-            new_text_list.append(text[i])
-            new_char_map.append(char_map[i])
-            i += 1
+            _, prev_bbox = current_line[-1]
+            # BoundingBox here is TOPLEFT-origin (top < bottom numerically),
+            # so height/overlap are bottom-minus-top, not top-minus-bottom.
+            overlap_y = min(prev_bbox.b, bbox.b) - max(prev_bbox.t, bbox.t)
+            height = min(prev_bbox.b - prev_bbox.t, bbox.b - bbox.t)
 
-    return "".join(new_text_list), new_char_map
+            if height > 0 and (overlap_y > 0.5 * height) and (bbox.l >= prev_bbox.l - 5.0):
+                current_line.append((word, bbox))
+            else:
+                lines.append(current_line)
+                current_line = [(word, bbox)]
+    if current_line:
+        lines.append(current_line)
+
+    # Construct flat page text and character map
+    page_text_parts = []
+    page_char_map = []
+
+    for line_idx, line in enumerate(lines):
+        line_text_parts = []
+        line_char_map = []
+
+        for word_idx, (word, bbox) in enumerate(line):
+            word_text = word.text
+
+            char_boxes, char_cursor, still_usable = _char_boxes_for_word(
+                word_text, bbox, page_no, char_cells, char_cursor
+            )
+            if not still_usable:
+                char_cells = None
+
+            # Space between words on the same line. The gap between two real
+            # word boxes, not a per-glyph estimate — always word-level.
+            if word_idx > 0:
+                _, prev_bbox = line[word_idx - 1]
+                space_box = CharBox(
+                    char=" ",
+                    x0=float(prev_bbox.r),
+                    top=float(prev_bbox.t),
+                    x1=float(bbox.l),
+                    bottom=float(prev_bbox.b),
+                    page=page_no,
+                    precision="word",
+                )
+                line_text_parts.append(" ")
+                line_char_map.append(space_box)
+
+            line_text_parts.append(word_text)
+            line_char_map.extend(char_boxes)
+
+        # Newline between lines — a zero-width marker at the prior line's end,
+        # not a glyph; always word-level.
+        if line_idx > 0:
+            _, prev_line_last_bbox = lines[line_idx - 1][-1]
+            newline_box = CharBox(
+                char="\n",
+                x0=float(prev_line_last_bbox.r),
+                top=float(prev_line_last_bbox.t),
+                x1=float(prev_line_last_bbox.r),
+                bottom=float(prev_line_last_bbox.b),
+                page=page_no,
+                precision="word",
+            )
+            page_text_parts.append("\n")
+            page_char_map.append(newline_box)
+
+        page_text_parts.extend(line_text_parts)
+        page_char_map.extend(line_char_map)
+
+    page_text = "".join(page_text_parts)
+
+    # Run numeric token normalization to collapse spaces inside numbers
+    normalized_text, normalized_char_map = normalize_numeric_tokens(page_text, page_char_map)
+
+    # Verify and enforce lengths/characters match exactly. Raised as ParseError
+    # rather than `assert` so the check can't be stripped under `python -O`.
+    if len(normalized_text) != len(normalized_char_map):
+        raise ParseError(
+            "char_map_invariant_violation",
+            f"Page {page_no}: text length ({len(normalized_text)}) != "
+            f"char_map length ({len(normalized_char_map)}).",
+            500,
+        )
+    for k, ch in enumerate(normalized_text):
+        if ch != normalized_char_map[k].char:
+            raise ParseError(
+                "char_map_invariant_violation",
+                f"Page {page_no}: char mismatch at index {k}.",
+                500,
+            )
+
+    return PageIndex(page=page_no, text=normalized_text, char_map=normalized_char_map)
+
+
+def _line_spans(text: str) -> list[tuple[int, int, str]]:
+    """Return (start, end, line_text) for each '\\n'-split line, end exclusive."""
+    spans = []
+    start = 0
+    for line in text.split("\n"):
+        end = start + len(line)
+        spans.append((start, end, line))
+        start = end + 1
+    return spans
+
+
+def _normalize_line(line: str) -> str:
+    return " ".join(line.split())
+
+
+def tag_boilerplate(page_indices: list[PageIndex]) -> None:
+    """Tag repeating headers/footers and page-number furniture as is_boilerplate.
+
+    Docling's page_header/page_footer layout labels are not reliably assigned on
+    real CIM documents (verified empirically against the fixed test corpus), so
+    this falls back to the ticket's documented approach: lines near the top/bottom
+    of each page whose normalized text repeats verbatim across >= 3 pages (banners,
+    running headers/footers), plus short digit-only lines in that same zone when
+    the *pattern* of a page-number-shaped line there recurs across >= 3 pages.
+    Mutates char_map entries in place; does not strip any text.
+    """
+    text_zone_lines: list[tuple[int, int, int, str]] = []
+    digit_zone_lines: list[tuple[int, int, int]] = []
+
+    for page_idx, page in enumerate(page_indices):
+        spans = _line_spans(page.text)
+        zone = spans[:BOILERPLATE_ZONE_LINES] + spans[-BOILERPLATE_ZONE_LINES:]
+        for start, end, line in zone:
+            norm = _normalize_line(line)
+            if not norm:
+                continue
+            if _PAGE_NUMBER_RE.match(norm):
+                digit_zone_lines.append((page_idx, start, end))
+            else:
+                text_zone_lines.append((page_idx, start, end, norm))
+
+    # Repeating banner/header/footer text: same normalized line in >= N distinct pages.
+    pages_by_text: dict[str, set[int]] = defaultdict(set)
+    for page_idx, _, _, norm in text_zone_lines:
+        pages_by_text[norm].add(page_idx)
+    repeating_texts = {
+        text for text, pages in pages_by_text.items() if len(pages) >= MIN_BOILERPLATE_REPEAT_PAGES
+    }
+
+    for page_idx, start, end, norm in text_zone_lines:
+        if norm in repeating_texts:
+            for char_box in page_indices[page_idx].char_map[start:end]:
+                char_box.is_boilerplate = True
+
+    # Page-number furniture: short digit-only lines in the header/footer zone.
+    # The digit itself varies per page, so we key on the *structural pattern*
+    # (a page-number-shaped line in this zone) recurring across >= N pages,
+    # not on exact text repetition.
+    if len({page_idx for page_idx, _, _ in digit_zone_lines}) >= MIN_BOILERPLATE_REPEAT_PAGES:
+        for page_idx, start, end in digit_zone_lines:
+            for char_box in page_indices[page_idx].char_map[start:end]:
+                char_box.is_boilerplate = True
 
 
 def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> DoclingParseResult:
@@ -85,16 +327,18 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             409,
         )
 
+    settings = get_settings()
+
     # Pre-flight check via pypdf to fast-fail on corrupt, encrypted, or too large PDFs
     try:
         reader = PdfReader(BytesIO(pdf_bytes))
         if reader.is_encrypted:
             raise ParseError("encrypted_pdf", "Encrypted PDFs are not supported.", 422)
         page_count = len(reader.pages)
-        if page_count > MAX_PAGES:
+        if page_count > settings.max_pages:
             raise ParseError(
                 "pdf_too_large",
-                f"PDF has {page_count} pages; maximum allowed is {MAX_PAGES}.",
+                f"PDF has {page_count} pages; maximum allowed is {settings.max_pages}.",
                 413,
             )
     except (PdfReadError, ValueError, OSError) as exc:
@@ -111,7 +355,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
         pipeline_options = PdfPipelineOptions()
         pipeline_options.generate_parsed_pages = True
         pipeline_options.do_table_structure = True
-        # This PDF lane is text-layer only (DS-1 acceptance corpus has no scanned pages).
+        # This PDF lane is text-layer only (DS-W3-1 acceptance corpus has no scanned pages).
         # OCR is unnecessary here and was fabricating cells on blank pages (breaking the
         # no_extractable_text guard); native text extraction gives real coordinates anyway.
         pipeline_options.do_ocr = False
@@ -120,163 +364,43 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
         )
 
-        result = converter.convert(tmp_path)
-        if not result or not result.pages:
-            raise ParseError("no_extractable_text", "PDF contains no extractable text.", 422)
-
-        # Docling silently drops a page from result.pages if its preprocess stage
-        # fails (e.g. a native layout-model crash on that page) rather than raising.
-        # Returning a truncated PageIndex list as 200 OK would be silent data loss
-        # for a citation pipeline — fail loudly instead.
-        if len(result.pages) != page_count:
-            raise ParseError(
-                "incomplete_parse",
-                f"Docling parsed {len(result.pages)} of {page_count} pages; "
-                "one or more pages failed during layout preprocessing.",
-                422,
-            )
-
-        doc = result.document
-
-        # Save DoclingDocument to cache directory for downstream tickets
-        cache_dir = Path("services/parser/cache")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"{digest}.json"
-        doc.save_as_json(cache_file)
+        if settings.enable_cache:
+            settings.cache_dir.mkdir(parents=True, exist_ok=True)
 
         page_indices: list[PageIndex] = []
-        for page in result.pages:
-            page_no = page.page_no
-            parsed_page = page.parsed_page
+        for chunk_start in range(1, page_count + 1, PAGE_CHUNK_SIZE):
+            chunk_end = min(chunk_start + PAGE_CHUNK_SIZE - 1, page_count)
+            result = converter.convert(tmp_path, page_range=(chunk_start, chunk_end))
+            if not result:
+                raise ParseError("no_extractable_text", "PDF contains no extractable text.", 422)
 
-            if not parsed_page:
-                page_indices.append(PageIndex(page=page_no, text="", char_map=[]))
-                continue
-
-            # Iterate over word cells in reading order
-            words = list(parsed_page.iterate_cells(unit_type=TextCellUnit.WORD))
-
-            if not words:
-                page_indices.append(PageIndex(page=page_no, text="", char_map=[]))
-                continue
-
-            # Resolve each word's BoundingRectangle (corner points) to a BoundingBox
-            # (.l/.t/.r/.b) once up front — BoundingRectangle itself has no .l/.t/.r/.b.
-            word_boxes = [(word, word.rect.to_bounding_box()) for word in words]
-
-            # Group words into visual lines
-            lines: list[list[tuple]] = []
-            current_line: list[tuple] = []
-            for word, bbox in word_boxes:
-                if not current_line:
-                    current_line.append((word, bbox))
-                else:
-                    _, prev_bbox = current_line[-1]
-                    # BoundingBox here is TOPLEFT-origin (top < bottom numerically),
-                    # so height/overlap are bottom-minus-top, not top-minus-bottom.
-                    overlap_y = min(prev_bbox.b, bbox.b) - max(prev_bbox.t, bbox.t)
-                    height = min(prev_bbox.b - prev_bbox.t, bbox.b - bbox.t)
-
-                    if height > 0 and (overlap_y > 0.5 * height) and (bbox.l >= prev_bbox.l - 5.0):
-                        current_line.append((word, bbox))
-                    else:
-                        lines.append(current_line)
-                        current_line = [(word, bbox)]
-            if current_line:
-                lines.append(current_line)
-
-            # Construct flat page text and character map
-            page_text_parts = []
-            page_char_map = []
-
-            for line_idx, line in enumerate(lines):
-                line_text_parts = []
-                line_char_map = []
-
-                for word_idx, (word, bbox) in enumerate(line):
-                    word_text = word.text
-
-                    # Interpolate character coordinates within the word bounding box
-                    char_boxes = []
-                    w = bbox.r - bbox.l
-                    char_w = w / len(word_text) if len(word_text) > 0 else 0
-                    for j, char in enumerate(word_text):
-                        char_boxes.append(
-                            CharBox(
-                                char=char,
-                                x0=float(bbox.l + j * char_w),
-                                top=float(bbox.t),
-                                x1=float(bbox.l + (j + 1) * char_w),
-                                bottom=float(bbox.b),
-                                page=page_no,
-                            )
-                        )
-
-                    # Space between words on the same line
-                    if word_idx > 0:
-                        _, prev_bbox = line[word_idx - 1]
-                        space_box = CharBox(
-                            char=" ",
-                            x0=float(prev_bbox.r),
-                            top=float(prev_bbox.t),
-                            x1=float(bbox.l),
-                            bottom=float(prev_bbox.b),
-                            page=page_no,
-                        )
-                        line_text_parts.append(" ")
-                        line_char_map.append(space_box)
-
-                    line_text_parts.append(word_text)
-                    line_char_map.extend(char_boxes)
-
-                # Newline between lines
-                if line_idx > 0:
-                    _, prev_line_last_bbox = lines[line_idx - 1][-1]
-                    newline_box = CharBox(
-                        char="\n",
-                        x0=float(prev_line_last_bbox.r),
-                        top=float(prev_line_last_bbox.t),
-                        x1=float(prev_line_last_bbox.r),
-                        bottom=float(prev_line_last_bbox.b),
-                        page=page_no,
-                    )
-                    page_text_parts.append("\n")
-                    page_char_map.append(newline_box)
-
-                page_text_parts.extend(line_text_parts)
-                page_char_map.extend(line_char_map)
-
-            page_text = "".join(page_text_parts)
-
-            # Run numeric token normalization to collapse spaces inside numbers
-            normalized_text, normalized_char_map = normalize_numeric_tokens(
-                page_text, page_char_map
-            )
-
-            # Verify and enforce lengths/characters match exactly. Raised as ParseError
-            # rather than `assert` so the check can't be stripped under `python -O`.
-            if len(normalized_text) != len(normalized_char_map):
+            expected_chunk_pages = chunk_end - chunk_start + 1
+            if len(result.pages) != expected_chunk_pages:
                 raise ParseError(
-                    "char_map_invariant_violation",
-                    f"Page {page_no}: text length ({len(normalized_text)}) != "
-                    f"char_map length ({len(normalized_char_map)}).",
-                    500,
+                    "incomplete_parse",
+                    f"Docling parsed {len(result.pages)} of {expected_chunk_pages} pages "
+                    f"in range [{chunk_start}, {chunk_end}]; one or more pages failed "
+                    "during layout preprocessing.",
+                    422,
                 )
-            for k, ch in enumerate(normalized_text):
-                if ch != normalized_char_map[k].char:
-                    raise ParseError(
-                        "char_map_invariant_violation",
-                        f"Page {page_no}: char mismatch at index {k}.",
-                        500,
-                    )
 
-            page_indices.append(
-                PageIndex(page=page_no, text=normalized_text, char_map=normalized_char_map)
-            )
+            # Raw DoclingDocument is chunked the same way (one convert() call per
+            # chunk yields one document covering just that chunk's pages) — cached
+            # per chunk for DS-W3-2/DS-W3-6 rather than as a single whole-document file.
+            # Caching is optional (settings.enable_cache) since these documents may
+            # contain confidential financial content and this cache is not encrypted
+            # at rest at the application level — see config.py's SECURITY NOTE.
+            if settings.enable_cache:
+                chunk_cache_file = settings.cache_dir / f"{digest}_p{chunk_start}-{chunk_end}.json"
+                result.document.save_as_json(chunk_cache_file)
 
-        # `result.pages` is non-empty even for a blank page (Docling still emits a
-        # page object with no cells), so the earlier `not result.pages` check never
-        # catches a text-free PDF. Check aggregate extracted text instead.
+            for page in result.pages:
+                page_indices.append(_build_page_index(page, page.page_no))
+
+        tag_boilerplate(page_indices)
+
+        # A blank page still yields an (empty) PageIndex rather than being absent,
+        # so check aggregate extracted text rather than page count for this guard.
         if not any(page.text for page in page_indices):
             raise ParseError("no_extractable_text", "PDF contains no extractable text.", 422)
 

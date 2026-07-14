@@ -9,8 +9,8 @@ RUN apt-get update && \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install fastapi, uvicorn, and docling (with CPU-only PyTorch)
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" --extra-index-url https://download.pytorch.org/whl/cpu
+# Install fastapi, uvicorn, pydantic-settings, and docling (with CPU-only PyTorch)
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" pydantic-settings --extra-index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir docling --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Set environment variables for better performance
