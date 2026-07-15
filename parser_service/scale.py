@@ -177,6 +177,21 @@ def _find_scale_phrases(text: str) -> list[_ScalePhraseMatch]:
     return matches
 
 
+def scale_phrase_in_text(text: str) -> tuple[float, str | None, str] | None:
+    """The rightmost (nearest/most-recent) scale phrase in `text`, or None.
+
+    Public on purpose: other parts of the parsing lane (DS-W3-6's table/chart
+    element processing, DS-W3-5's XLSX path) reuse this same phrase grammar
+    directly rather than re-deriving it, so a scale phrase is always
+    recognized identically regardless of which parse path is scanning it.
+    """
+    phrases = _find_scale_phrases(text)
+    if not phrases:
+        return None
+    start, end, multiplier, currency = phrases[-1]
+    return multiplier, currency, text[start:end].strip()
+
+
 def _column_header_scale(
     table: TableRecord, cell: TableCellRecord
 ) -> tuple[float, str | None, str] | None:
@@ -189,10 +204,9 @@ def _column_header_scale(
         header_cell = col_cells.get(row)
         if header_cell is None:
             continue
-        phrases = _find_scale_phrases(header_cell.text_normalized)
-        if phrases:
-            start, end, multiplier, currency = phrases[-1]
-            return multiplier, currency, header_cell.text_normalized[start:end].strip()
+        found = scale_phrase_in_text(header_cell.text_normalized)
+        if found is not None:
+            return found
     return None
 
 

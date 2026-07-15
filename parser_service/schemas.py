@@ -54,9 +54,14 @@ class TableCellRecord(BaseModel):
     # How the coordinate above was obtained. "docling_native": Docling exposed a
     # valid cell bbox. "reconstructed": it did not, so the bbox was recovered
     # from the page's positioned index by exact-span match of the cell text
-    # (fail closed on absent/ambiguous). None: neither resolved, so the cell has
-    # no citable location. A reconstructed box must never be treated as native.
-    bbox_source: Literal["docling_native", "reconstructed"] | None = None
+    # (fail closed on absent/ambiguous). "vision_resolved": neither of the above
+    # worked, so DS-W3-6 escalated to Claude Vision for a candidate reading,
+    # which was then independently verified via the DS-W3-3 exact-span resolver
+    # (fail closed) -- vision proposes text, never a coordinate, so this source
+    # carries the same fail-closed guarantee as "reconstructed". None: nothing
+    # resolved, so the cell has no citable location. A reconstructed or
+    # vision-resolved box must never be treated as native.
+    bbox_source: Literal["docling_native", "reconstructed", "vision_resolved"] | None = None
 
 
 class TableRecord(BaseModel):
