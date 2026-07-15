@@ -410,7 +410,9 @@ def test_missing_bbox_unresolvable_stays_not_provenance_ok() -> None:
 def test_reconstructed_cells_are_logged(caplog: pytest.LogCaptureFixture) -> None:
     # Recovering a cell's geometry from the flat index is an audit event.
     page = _page_index("Revenue 3,817 total")
-    table = _table(1, 1, 2, [_cell(0, 0, "Revenue", _bbox(0, 0, 50, 10)), _cell(0, 1, "3 ,817", None)])
+    table = _table(
+        1, 1, 2, [_cell(0, 0, "Revenue", _bbox(0, 0, 50, 10)), _cell(0, 1, "3 ,817", None)]
+    )
     with caplog.at_level(logging.INFO):
         _build_table_record(table, page)
     assert any("reconstruction fallback" in r.getMessage() for r in caplog.records)
