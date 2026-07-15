@@ -12,6 +12,7 @@ from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.base_models import Page as DoclingPage
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling_core.types.doc.document import DoclingDocument
 from docling_core.types.doc.page import TextCellUnit
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
@@ -40,6 +41,10 @@ class ParseError(Exception):
 class DoclingParseResult:
     sha256: str
     pages: list[PageIndex]
+    # In-memory raw DoclingDocument, kept for in-request table/element extraction
+    # (DS-W3-2/DS-W3-6). Not serialized by the /parse endpoint, which returns
+    # only pages; the Spaces cache is a separate cross-service optimization.
+    document: DoclingDocument | None = None
 
 
 def parse_known_hashes(value: str | None) -> set[str]:
@@ -414,7 +419,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             len(page_indices),
             sum(1 for p in page_indices if not p.text),
         )
-        return DoclingParseResult(sha256=digest, pages=page_indices)
+        return DoclingParseResult(sha256=digest, pages=page_indices, document=result.document)
 
     finally:
         with contextlib.suppress(OSError):
