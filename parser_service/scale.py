@@ -10,8 +10,16 @@ scale is indistinguishable from a known one unless scale_source is recorded
 alongside it. This module never returns a bare multiplier without saying
 where it came from, and never guesses a currency it did not actually read.
 
-Resolution order (first match wins):
-  1. Inline in the value itself ("$4.8M", "500K", "27.3%") -> explicit_in_value.
+Only a *currency* figure's magnitude is declared by a "(in thousands)"
+header. A percent, ratio, count, or date is read at face value -- a headcount
+of 1,200 on a "CAD (in Thousands)" income statement is 1,200 people, not
+1,200,000. determine_scale therefore takes the fact's value_type and applies
+the header lookup to currency alone; every other type self-scales at a known
+1.0. Forcing a non-currency value through the header lookup is exactly the
+silent 1000x error this module exists to prevent.
+
+Resolution order for a currency value (first match wins):
+  1. Inline in the value itself ("$4.8M", "500K") -> explicit_in_value.
   2. A scale phrase in the value's own table column, walking upward
      (DS-W3-2 table structure) -> column_header.
   3. A scale phrase anywhere earlier on the page -> page_header.
@@ -28,6 +36,11 @@ from pydantic import BaseModel, Field
 from .schemas import PageIndex, TableCellRecord, TableRecord
 
 ScaleSource = Literal["explicit_in_value", "column_header", "page_header", "assumed_1x"]
+
+# Mirrors the value.value_type enum in contracts/facts.schema.json. Kept here
+# with its sole current consumer; promote to schemas.py once the extractor and
+# the fact emitter share it.
+ValueType = Literal["currency", "percent", "count", "ratio", "date", "text"]
 
 
 class ScaleResult(BaseModel):
@@ -50,28 +63,26 @@ class ScaleResult(BaseModel):
 # Step 1: inline scale -- a value that states its own multiplier.
 #
 # Ported from the MVP's normalizeFinancialTokens (server/pipeline.ts) -- the
-# three suffix regexes and the percent regex below are direct translations of
-# that function's replace() patterns, verified against it line for line. The
-# MVP version returned a mutated prose string (it fed TF-IDF tokenization,
-# which DS-3 replaces); this port keeps only the recognition grammar and
-# returns a structured (number, multiplier, unit) instead, since DS-4 needs a
-# multiplier, not a token.
+# three suffix regexes and the percent regex below are translations of that
+# function's replace() patterns. The MVP version returned a mutated prose
+# string (it fed TF-IDF tokenization, which DS-3 replaces); this port keeps
+# only the recognition grammar and returns a structured (number, multiplier,
+# unit) instead, since DS-4 needs a multiplier, not a token.
 # --------------------------------------------------------------------------- #
 
 # Each pattern: an optional sign ("-" or an opening "(" for accounting
 # negative notation), an optional "$", the number, optional whitespace, the
-# suffix letter, an optional spelled-out/doubled continuation, a word
+# suffix letter, an optional spelled-out/abbreviated continuation, a word
 # boundary, and an optional closing ")" pairing with the opening one.
 #
-# The continuation group is deliberately narrow -- for the M/B patterns it
-# only completes "illion" or repeats the same letter ("MM", "BB", mixed
-# case), matching the ported source exactly. It does NOT accept "Bn"/"Mn":
-# "$3Bn" fails the trailing \b (two word characters "B" and "n" touch, so
-# there is no boundary), same as in the MVP. Extending the vocabulary here
-# would silently diverge from the "well-tested" function this ticket says to
-# port.
-_MILLION_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>[\d,.]+)\s*[Mm](?:illion|M|m)?\b\)?")
-_BILLION_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>[\d,.]+)\s*[Bb](?:illion|B|b)?\b\)?")
+# The continuation group accepts the spelled-out form ("illion"), the doubled
+# letter ("MM"/"BB", the accounting shorthand for millions/billions), and the
+# "n" abbreviation ("Mn"/"Bn"). The MVP's port stopped at the first two, which
+# dropped "$3Bn"/"$5Mn" -- a common CIM notation. That is a real recall gap,
+# not a precision risk: no non-magnitude token ends a number with "bn"/"mn",
+# so the abbreviation is included here.
+_MILLION_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>[\d,.]+)\s*[Mm](?:illion|M|m|n|N)?\b\)?")
+_BILLION_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>[\d,.]+)\s*[Bb](?:illion|B|b|n|N)?\b\)?")
 _THOUSAND_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>[\d,.]+)\s*[Kk](?:thousand)?\b\)?")
 
 # Checked in this order (matching the MVP's M -> B -> K replace() sequence):
@@ -91,7 +102,11 @@ _SUFFIX_PATTERNS: list[tuple[re.Pattern[str], float]] = [
 # them.
 _PERCENT_RE = re.compile(r"(?P<sign>[-(])?(?P<number>[\d,.]+)%\)?")
 
-_BARE_NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+# A bare number with optional sign. The sign group matches a leading "-" or an
+# accounting-negative "(" so a bracketed negative ("($15,295)") is not read as
+# positive; a leading "$" is stripped. Used for values that carry no inline
+# scale marker, once the multiplier is settled from context.
+_SIGNED_NUMBER_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>\d[\d,]*(?:\.\d+)?)")
 
 
 def _signed_number(match: re.Match[str]) -> float:
@@ -100,18 +115,18 @@ def _signed_number(match: re.Match[str]) -> float:
 
 
 def _parse_number(text: str) -> float | None:
-    match = _BARE_NUMBER_RE.search(text)
+    match = _SIGNED_NUMBER_RE.search(text)
     if match is None:
         return None
-    return float(match.group(0).replace(",", ""))
+    return _signed_number(match)
 
 
 def normalize_financial_token(text: str) -> tuple[float, float, str | None] | None:
     """Port of the MVP's normalizeFinancialTokens, narrowed to the inline case
     this ticket owns: given a value token that states its own scale -- a
-    K/M/B-family suffix ("$4.8M", "500K", "4.8 million"), accounting negative
-    notation ("-$4.8M", "($4.8M)"), or a percent sign ("27.3%") -- return
-    (base_number, multiplier, unit).
+    K/M/B-family suffix ("$4.8M", "500K", "4.8 million", "$3Bn"), accounting
+    negative notation ("-$4.8M", "($4.8M)"), or a percent sign ("27.3%") --
+    return (base_number, multiplier, unit).
 
     Returns None when the token carries no inline scale marker (a bare
     "$15,295" or "3,817"): the multiplier is not "1", it is *unknown until
@@ -132,7 +147,46 @@ def normalize_financial_token(text: str) -> tuple[float, float, str | None] | No
 
 
 # --------------------------------------------------------------------------- #
-# Steps 2 & 3: column-header / page-header scale phrases.
+# Self-scaling value types: percent / ratio / count / date.
+# --------------------------------------------------------------------------- #
+
+# Unit carried by a self-scaling value read at face value. A percent keeps
+# "%"; a ratio is the contract's "ratio" unit; a count or date carries no unit
+# from scale capture (a currency unit, when present, comes from a header, and
+# these types never take one).
+_SELF_SCALING_UNIT: dict[ValueType, str | None] = {
+    "percent": "%",
+    "ratio": "ratio",
+    "count": None,
+    "date": None,
+}
+
+
+def _self_scaling(raw: str, value_type: ValueType) -> ScaleResult:
+    """A percent, ratio, count, or date is read at face value: its magnitude
+    is not declared by a page/column scale header, so the multiplier is a
+    KNOWN 1.0. scale_source is explicit_in_value, not assumed_1x -- there is
+    nothing to assume and nothing to flag; the value's own type settles it.
+
+    (Known limitation: a count genuinely printed "in thousands", e.g. shares
+    outstanding, is read at face value here rather than scaled. That fails
+    safe -- it never 1000x-inflates a headcount -- and is revisited if the
+    corpus shows a scaled-count column.)
+    """
+    number = _parse_number(raw)
+    if number is None:
+        raise ValueError(f"raw value {raw!r} has no numeric content to scale")
+    return ScaleResult(
+        raw=raw,
+        normalized=number,
+        unit=_SELF_SCALING_UNIT[value_type],
+        scale_multiplier=1.0,
+        scale_source="explicit_in_value",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Steps 2 & 3: column-header / page-header scale phrases (currency only).
 # --------------------------------------------------------------------------- #
 
 _SCALE_WORD_MULTIPLIERS: dict[str, float] = {
@@ -177,6 +231,17 @@ def _find_scale_phrases(text: str) -> list[_ScalePhraseMatch]:
     return matches
 
 
+def _cell_covering_column(table: TableRecord, row: int, col: int) -> TableCellRecord | None:
+    """The cell in `row` whose column span covers `col`. Honors col_span so a
+    merged banner ("CAD (in Thousands)" spanning several value columns, stored
+    at its start column) is found from any column it covers -- not only its
+    start column, which the exact-column match would miss."""
+    for cell in table.cells:
+        if cell.row == row and cell.col <= col < cell.col + cell.col_span:
+            return cell
+    return None
+
+
 def _column_header_scale(
     table: TableRecord, cell: TableCellRecord
 ) -> tuple[float, str | None, str] | None:
@@ -184,9 +249,8 @@ def _column_header_scale(
     structure), looking for a scale phrase in a header cell above it. Stops
     at the nearest match -- a column-specific scale phrase takes precedence
     over anything found later at the page level."""
-    col_cells = {c.row: c for c in table.cells if c.col == cell.col}
     for row in range(cell.row - 1, -1, -1):
-        header_cell = col_cells.get(row)
+        header_cell = _cell_covering_column(table, row, cell.col)
         if header_cell is None:
             continue
         phrases = _find_scale_phrases(header_cell.text_normalized)
@@ -218,10 +282,17 @@ def determine_scale(
     page: PageIndex,
     char_start: int,
     *,
+    value_type: ValueType,
     table: TableRecord | None = None,
     cell: TableCellRecord | None = None,
 ) -> ScaleResult:
     """Resolve one numeric fact's scale, per the module's resolution order.
+
+    `value_type` (the C3 contract's value.value_type) gates the header lookup:
+    only "currency" is scaled by a column/page "(in thousands)" header; every
+    other numeric type self-scales at a known 1.0, and "text" has no magnitude
+    to scale. It is required, with no default, so a caller can never silently
+    fall into currency scaling for a value that is not currency.
 
     `char_start` is the value's position in `page.text` (from the DS-W3-3
     resolved Span) -- the page-header search only looks at text strictly
@@ -230,6 +301,11 @@ def determine_scale(
     cell, when the value came from a table; omit both for prose values, which
     skip straight from the inline check to the page-level one.
     """
+    if value_type == "text":
+        raise ValueError("determine_scale does not apply to value_type='text' (no magnitude)")
+    if value_type != "currency":
+        return _self_scaling(raw, value_type)
+
     inline = normalize_financial_token(raw)
     if inline is not None:
         number, multiplier, unit = inline

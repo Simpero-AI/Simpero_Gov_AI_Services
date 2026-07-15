@@ -83,13 +83,14 @@ def test_inline_doubled_letter_mm_is_still_millions() -> None:
     assert normalize_financial_token("$10MM") == (10.0, 1_000_000.0, None)
 
 
-def test_inline_bn_abbreviation_is_not_recognized() -> None:
-    # "Bn" is NOT in the ported source's grammar (its continuation group only
-    # completes "illion" or repeats "B"/"b", never "n") -- the trailing "n"
-    # also breaks the required word boundary after "B". Extending the
-    # vocabulary to accept it would silently diverge from the MVP function
-    # this ticket ports.
-    assert normalize_financial_token("$3Bn") is None
+def test_inline_bn_mn_abbreviations_are_recognized() -> None:
+    # "Bn"/"Mn" are common CIM notation the MVP's port dropped. The
+    # continuation group now completes the abbreviation, and the "n" keeps the
+    # required trailing word boundary intact. This is a recall gain with no
+    # precision cost -- no non-magnitude token ends a number with "bn"/"mn".
+    assert normalize_financial_token("$3Bn") == (3.0, 1_000_000_000.0, None)
+    assert normalize_financial_token("$5Mn") == (5.0, 1_000_000.0, None)
+    assert normalize_financial_token("3bn") == (3.0, 1_000_000_000.0, None)
 
 
 def test_inline_spelled_out_word() -> None:
@@ -151,7 +152,9 @@ def test_filing_reference_does_not_fire() -> None:
 
 def test_determine_scale_explicit_in_value_short_circuits_context() -> None:
     page = _page("no scale phrase anywhere on this page $4.8M")
-    result = determine_scale("$4.8M", page, char_start=page.text.index("$4.8M"))
+    result = determine_scale(
+        "$4.8M", page, char_start=page.text.index("$4.8M"), value_type="currency"
+    )
 
     assert result.scale_source == "explicit_in_value"
     assert result.scale_multiplier == 1_000_000.0
@@ -164,7 +167,7 @@ def test_determine_scale_percent_ignores_a_preceding_page_scale_header() -> None
     # percentage on a "(in Thousands)" page must not be multiplied by 1000.
     text = "CAD (in Thousands)\nGross Margin % 27.3%"
     page = _page(text)
-    result = determine_scale("27.3%", page, char_start=text.index("27.3%"))
+    result = determine_scale("27.3%", page, char_start=text.index("27.3%"), value_type="percent")
 
     assert result.scale_source == "explicit_in_value"
     assert result.scale_multiplier == 1.0
@@ -175,7 +178,9 @@ def test_determine_scale_percent_ignores_a_preceding_page_scale_header() -> None
 def test_determine_scale_page_header_found_before_value() -> None:
     text = "CAD (in Thousands)\nRevenue $15,295 total"
     page = _page(text)
-    result = determine_scale("$15,295", page, char_start=text.index("$15,295"))
+    result = determine_scale(
+        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+    )
 
     assert result.scale_source == "page_header"
     assert result.scale_multiplier == 1_000.0
@@ -190,7 +195,9 @@ def test_determine_scale_page_header_strips_trailing_whitespace_in_context() -> 
     # trailing space before the newline. scale_context must not carry it.
     text = "CAD (in Thousands) \nRevenue $15,295 total"
     page = _page(text)
-    result = determine_scale("$15,295", page, char_start=text.index("$15,295"))
+    result = determine_scale(
+        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+    )
 
     assert result.scale_context == "CAD (in Thousands)"
 
@@ -198,7 +205,7 @@ def test_determine_scale_page_header_strips_trailing_whitespace_in_context() -> 
 def test_determine_scale_paren_000_page_header() -> None:
     text = "Amounts in (000s)\nTotal $5,000"
     page = _page(text)
-    result = determine_scale("$5,000", page, char_start=text.index("$5,000"))
+    result = determine_scale("$5,000", page, char_start=text.index("$5,000"), value_type="currency")
 
     assert result.scale_source == "page_header"
     assert result.scale_multiplier == 1_000.0
@@ -210,7 +217,9 @@ def test_determine_scale_page_header_only_considers_text_before_the_value() -> N
     # A scale phrase that appears AFTER the value must not apply to it.
     text = "Revenue $15,295 total, reported (in Millions) below"
     page = _page(text)
-    result = determine_scale("$15,295", page, char_start=text.index("$15,295"))
+    result = determine_scale(
+        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+    )
 
     assert result.scale_source == "assumed_1x"
 
@@ -219,7 +228,9 @@ def test_determine_scale_page_header_nearest_phrase_wins() -> None:
     # A later scale declaration on the same page supersedes an earlier one.
     text = "(in Thousands) ... (in Millions) ... Revenue $15,295"
     page = _page(text)
-    result = determine_scale("$15,295", page, char_start=text.index("$15,295"))
+    result = determine_scale(
+        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+    )
 
     assert result.scale_multiplier == 1_000_000.0
     assert result.scale_context == "(in Millions)"
@@ -228,7 +239,7 @@ def test_determine_scale_page_header_nearest_phrase_wins() -> None:
 def test_determine_scale_lowercase_word_before_phrase_is_not_read_as_currency() -> None:
     text = "the (in thousands) figure is $500"
     page = _page(text)
-    result = determine_scale("$500", page, char_start=text.index("$500"))
+    result = determine_scale("$500", page, char_start=text.index("$500"), value_type="currency")
 
     assert result.scale_source == "page_header"
     assert result.unit is None
@@ -242,7 +253,12 @@ def test_determine_scale_column_header_walk_finds_scale_above_value() -> None:
     page = _page("no page-level scale phrase here $15,295")
 
     result = determine_scale(
-        "$15,295", page, char_start=page.text.index("$15,295"), table=table, cell=value
+        "$15,295",
+        page,
+        char_start=page.text.index("$15,295"),
+        value_type="currency",
+        table=table,
+        cell=value,
     )
 
     assert result.scale_source == "column_header"
@@ -259,7 +275,12 @@ def test_determine_scale_column_header_takes_precedence_over_page_header() -> No
     page = _page(text)
 
     result = determine_scale(
-        "$15,295", page, char_start=text.index("$15,295"), table=table, cell=value
+        "$15,295",
+        page,
+        char_start=text.index("$15,295"),
+        value_type="currency",
+        table=table,
+        cell=value,
     )
 
     assert result.scale_source == "column_header"
@@ -279,7 +300,12 @@ def test_determine_scale_column_header_ignores_a_different_columns_header() -> N
     page = _page(text)
 
     result = determine_scale(
-        "$15,295", page, char_start=text.index("$15,295", 10), table=table, cell=value
+        "$15,295",
+        page,
+        char_start=text.index("$15,295", 10),
+        value_type="currency",
+        table=table,
+        cell=value,
     )
 
     assert result.scale_source == "page_header"
@@ -289,7 +315,9 @@ def test_determine_scale_column_header_ignores_a_different_columns_header() -> N
 def test_determine_scale_assumed_1x_is_flagged_never_silent() -> None:
     text = "Revenue $15,295 total, no scale phrase anywhere on this page"
     page = _page(text)
-    result = determine_scale("$15,295", page, char_start=text.index("$15,295"))
+    result = determine_scale(
+        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+    )
 
     assert result.scale_source == "assumed_1x"
     assert result.scale_multiplier == 1.0
@@ -302,13 +330,138 @@ def test_determine_scale_assumed_1x_is_flagged_never_silent() -> None:
 def test_determine_scale_raises_on_non_numeric_raw() -> None:
     page = _page("no digits here")
     with pytest.raises(ValueError):
-        determine_scale("not-a-number", page, char_start=0)
+        determine_scale("not-a-number", page, char_start=0, value_type="currency")
 
 
 def test_scale_result_is_the_contract_shaped_model() -> None:
-    result = determine_scale("$4.8M", _page("$4.8M"), char_start=0)
+    result = determine_scale("$4.8M", _page("$4.8M"), char_start=0, value_type="currency")
     assert isinstance(result, ScaleResult)
     assert result.raw == "$4.8M"
+
+
+# --------------------------------------------------------------------------- #
+# value_type gate -- only currency is scaled by a header.
+# --------------------------------------------------------------------------- #
+
+
+def test_determine_scale_count_is_not_rescaled_by_page_header() -> None:
+    # The headline correctness gate: a headcount on a "(in Thousands)" income
+    # statement is 1,200 people, not 1,200,000. Only currency is header-scaled.
+    text = "Summary financials (in Thousands)\nHeadcount 1200"
+    page = _page(text)
+    result = determine_scale("1200", page, char_start=text.index("1200"), value_type="count")
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 1200.0
+    assert result.unit is None
+    assert result.flags == []
+
+
+def test_determine_scale_ratio_is_not_rescaled_by_page_header() -> None:
+    text = "Leverage (in Thousands)\nDebt / EBITDA 1.2"
+    page = _page(text)
+    result = determine_scale("1.2", page, char_start=text.index("1.2"), value_type="ratio")
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 1.2
+    assert result.unit == "ratio"
+
+
+def test_determine_scale_percent_without_percent_sign_is_not_rescaled() -> None:
+    # A percentage whose "%" lives in the column header, not the cell: the cell
+    # value is a bare "27.3". value_type=percent still forbids header scaling
+    # and restores the "%" unit.
+    text = "Margins (in Thousands)\nGross Margin 27.3"
+    page = _page(text)
+    result = determine_scale("27.3", page, char_start=text.index("27.3"), value_type="percent")
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 27.3
+    assert result.unit == "%"
+
+
+def test_determine_scale_date_is_not_rescaled() -> None:
+    text = "Fiscal years (in Thousands): 2024"
+    page = _page(text)
+    result = determine_scale("2024", page, char_start=text.index("2024"), value_type="date")
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 2024.0
+    assert result.unit is None
+
+
+def test_determine_scale_text_value_type_is_rejected() -> None:
+    # value_type=text has no numeric magnitude; the contract makes its
+    # normalized value null, so scale capture does not apply.
+    page = _page("North America")
+    with pytest.raises(ValueError):
+        determine_scale("North America", page, char_start=0, value_type="text")
+
+
+def test_determine_scale_count_ignores_a_column_scale_header() -> None:
+    # Even a column-header scale phrase does not scale a count: the header
+    # declares the magnitude of the money in that column, not a count that
+    # happens to share it.
+    header = _cell(0, 1, "(in Thousands)")
+    value = _cell(1, 1, "1200")
+    table = _table([header, value], num_rows=2, num_cols=2)
+    page = _page("no page-level scale phrase here 1200")
+
+    result = determine_scale(
+        "1200",
+        page,
+        char_start=page.text.index("1200"),
+        value_type="count",
+        table=table,
+        cell=value,
+    )
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 1200.0
+
+
+def test_determine_scale_bracketed_negative_currency_is_negative() -> None:
+    # Accounting-negative notation without a suffix: the bare-number fallback
+    # must honor the "(...)" so a loss is not read as a gain. Under a
+    # "(in Thousands)" header the scaled magnitude stays negative.
+    text = "CAD (in Thousands)\nNet income ($15,295)"
+    page = _page(text)
+    result = determine_scale(
+        "($15,295)", page, char_start=text.index("($15,295)"), value_type="currency"
+    )
+
+    assert result.scale_source == "page_header"
+    assert result.scale_multiplier == 1_000.0
+    assert result.normalized == -15_295_000.0
+
+
+def test_determine_scale_column_header_honors_a_merged_banner_span() -> None:
+    # A "CAD (in Thousands)" banner merged across the value columns is stored
+    # at its start column (col 1) with col_span=3. A value in col 3 must still
+    # find it -- the exact-column walk would miss it.
+    banner = _cell(0, 1, "CAD (in Thousands)").model_copy(update={"col_span": 3})
+    value = _cell(1, 3, "$15,295")
+    table = _table([banner, value], num_rows=2, num_cols=4)
+    page = _page("no page-level scale phrase here $15,295")
+
+    result = determine_scale(
+        "$15,295",
+        page,
+        char_start=page.text.index("$15,295"),
+        value_type="currency",
+        table=table,
+        cell=value,
+    )
+
+    assert result.scale_source == "column_header"
+    assert result.scale_multiplier == 1_000.0
+    assert result.unit == "CAD"
+    assert result.scale_context == "CAD (in Thousands)"
 
 
 # --------------------------------------------------------------------------- #
@@ -367,7 +520,12 @@ def test_ptl_page_11_revenue_scales_from_page_header(
     assert span is not None
 
     result = determine_scale(
-        "$15,295", page, char_start=span.char_start, table=table, cell=revenue_cell
+        "$15,295",
+        page,
+        char_start=span.char_start,
+        value_type="currency",
+        table=table,
+        cell=revenue_cell,
     )
 
     assert result.scale_source == "page_header"
@@ -387,7 +545,7 @@ def test_ptl_page_11_gross_margin_percent_is_not_rescaled(
     span = resolve("27.3%", page)
     assert span is not None
 
-    result = determine_scale("27.3%", page, char_start=span.char_start)
+    result = determine_scale("27.3%", page, char_start=span.char_start, value_type="percent")
 
     assert result.scale_source == "explicit_in_value"
     assert result.normalized == 27.3
