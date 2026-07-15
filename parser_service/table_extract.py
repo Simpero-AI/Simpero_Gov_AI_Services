@@ -3,16 +3,16 @@ from docling_core.types.doc.document import (
     TableItem,  # pyright: ignore[reportPrivateImportUsage]
 )
 
-from .config import get_settings
 from .normalize import normalize_numeric_text
 from .schemas import TableCellRecord, TableRecord
 
 
-class TableExtractError(Exception):
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        self.message = message
-        super().__init__(message)
+def _bbox_is_valid(bbox) -> bool:
+    """A cell coordinate is citable only if present and geometrically real —
+    positive width and non-zero height. Origin-agnostic (x always increases
+    left to right; height is checked as non-zero, not signed). Catches dropped
+    or inverted rects that a bare None check would pass as valid provenance."""
+    return bbox is not None and bbox.r > bbox.l and bbox.b != bbox.t
 
 
 def _looks_numeric(text: str) -> bool:
@@ -57,7 +57,7 @@ def _build_table_record(table: TableItem) -> TableRecord:
     provenance_ok = True
     for cell in table.data.table_cells:
         bbox = cell.bbox
-        if bbox is None:
+        if not _bbox_is_valid(bbox):
             provenance_ok = False
         cells.append(
             TableCellRecord(
@@ -99,38 +99,14 @@ def _build_table_record(table: TableItem) -> TableRecord:
     )
 
 
-def extract_tables_for_digest(digest: str) -> list[TableRecord]:
-    """Extract structured, per-cell table records for a previously parsed PDF.
+def extract_tables(doc: DoclingDocument) -> list[TableRecord]:
+    """Structured, per-cell table records from a parsed DoclingDocument.
 
-    Reads the chunked DoclingDocument JSON cache that
-    docling_parser.parse_pdf_bytes writes to settings.cache_dir (one file per
-    page_range chunk) rather than re-running Docling — DS-W3-1 persists the
-    raw document specifically so DS-W3-2/DS-W3-6 can consume table/element
-    structure without a second parse.
+    Consumes the in-memory document (DoclingParseResult.document) — no cache
+    round-trip — so table extraction runs in the same request as the parse and
+    does not depend on the (optional) Spaces document cache.
     """
-    settings = get_settings()
-    if not settings.enable_cache:
-        raise TableExtractError(
-            "cache_disabled",
-            "PARSER_ENABLE_CACHE is False in this deployment, so no raw "
-            "DoclingDocument was persisted for DS-W3-2/DS-W3-6 to read. Table "
-            "extraction requires the cache — see config.py's SECURITY NOTE.",
-        )
-
-    chunk_files = sorted(settings.cache_dir.glob(f"{digest}_p*.json"))
-    if not chunk_files:
-        raise TableExtractError(
-            "no_cached_document",
-            f"No cached DoclingDocument chunks found for digest {digest}. "
-            "Call parse_pdf_bytes first.",
-        )
-
-    tables: list[TableRecord] = []
-    for chunk_file in chunk_files:
-        doc = DoclingDocument.load_from_json(chunk_file)
-        tables.extend(_build_table_record(table) for table in doc.tables)
-
-    return tables
+    return [_build_table_record(table) for table in doc.tables]
 
 
 def tables_on_page(tables: list[TableRecord], page_no: int) -> list[TableRecord]:

@@ -8,25 +8,22 @@ the cell_provenance_ok=False branch (this corpus has zero missing bboxes) and
 the extractor's error handling.
 """
 
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from pydantic import ValidationError
 
-from services.parser.parser_service import table_extract
-from services.parser.parser_service.config import ParserSettings
 from services.parser.parser_service.schemas import TableCellRecord, TableRecord
 from services.parser.parser_service.table_extract import (
-    TableExtractError,
     _build_table_record,
-    extract_tables_for_digest,
+    extract_tables,
     tables_on_page,
 )
 
 if TYPE_CHECKING:
     from docling_core.types.doc.document import (
+        DoclingDocument,  # pyright: ignore[reportPrivateImportUsage]
         TableItem,  # pyright: ignore[reportPrivateImportUsage]
     )
 
@@ -157,27 +154,24 @@ def test_tables_on_page_filters_by_page_number() -> None:
     assert tables_on_page(tables, 99) == []
 
 
-def test_extract_tables_raises_when_cache_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(table_extract, "get_settings", lambda: ParserSettings(enable_cache=False))
-    with pytest.raises(TableExtractError) as exc:
-        extract_tables_for_digest("deadbeef")
-    assert exc.value.code == "cache_disabled"
-
-
-def test_extract_tables_raises_when_no_cached_document(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # Cache enabled, but no chunk files for this digest — must fail closed with
-    # a clear error, not silently return an empty table list (which downstream
-    # could mistake for "document genuinely has no tables").
-    monkeypatch.setattr(
-        table_extract,
-        "get_settings",
-        lambda: ParserSettings(enable_cache=True, cache_dir=tmp_path),
+def test_extract_tables_builds_one_record_per_docling_table() -> None:
+    doc = cast(
+        "DoclingDocument",
+        SimpleNamespace(
+            tables=[
+                _table(11, 1, 1, [_cell(0, 0, "Revenue", _bbox(1, 1, 2, 2))]),
+                _table(17, 1, 1, [_cell(0, 0, "Ratio", _bbox(3, 3, 4, 4))]),
+            ]
+        ),
     )
-    with pytest.raises(TableExtractError) as exc:
-        extract_tables_for_digest("never-parsed-digest")
-    assert exc.value.code == "no_cached_document"
+    records = extract_tables(doc)
+    assert [r.page for r in records] == [11, 17]
+    assert all(isinstance(r, TableRecord) for r in records)
+
+
+def test_extract_tables_returns_empty_for_a_document_with_no_tables() -> None:
+    doc = cast("DoclingDocument", SimpleNamespace(tables=[]))
+    assert extract_tables(doc) == []
 
 
 def _valid_cell_kwargs() -> dict:

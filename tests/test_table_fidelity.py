@@ -9,43 +9,24 @@ documents. Marked local_corpus and always explicitly skipped, never silently,
 when the fixture isn't present.
 """
 
-import shutil
-from hashlib import sha256
+import os
 from pathlib import Path
 
 import pytest
 
 from services.parser.parser_service.docling_parser import parse_pdf_bytes
 from services.parser.parser_service.schemas import TableRecord
-from services.parser.parser_service.table_extract import extract_tables_for_digest, tables_on_page
+from services.parser.parser_service.table_extract import extract_tables, tables_on_page
 
 pytestmark = pytest.mark.local_corpus
 
 
-def _copy_if_needed(src: Path, dest_name: str) -> Path | None:
-    dest_dir = Path(__file__).parent.parent / "test_data"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / dest_name
-    if not dest_path.exists() and src.exists():
-        shutil.copy(src, dest_path)
-    return dest_path if dest_path.exists() else None
-
-
-def _ptl_pdf_path() -> Path | None:
-    return _copy_if_needed(
-        Path("p:/simpero_GOV_AI/scripts/examples/1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf"),
-        "1st-App-H-PTL-Group-CIM.pdf",
-    )
-
-
-def _pitchbook_pdf_path() -> Path | None:
-    return _copy_if_needed(
-        Path(
-            "p:/simpero_GOV_AI/scripts/examples/sell-side-pitchbook/"
-            "Sell-Side-Pitchbook-CIM-Sample.pdf"
-        ),
-        "Sell-Side-Pitchbook-CIM-Sample.pdf",
-    )
+def _local_corpus_pdf(relative_path: str) -> Path | None:
+    root = os.environ.get("PARSER_LOCAL_CORPUS_DIR")
+    if not root:
+        return None
+    path = Path(root) / relative_path
+    return path if path.exists() else None
 
 
 def _row_by_label(table: TableRecord, label: str, *, normalized: bool = False) -> dict[int, str]:
@@ -64,30 +45,22 @@ def _row_by_label(table: TableRecord, label: str, *, normalized: bool = False) -
 
 @pytest.fixture(scope="module")
 def ptl_tables() -> list[TableRecord]:
-    pdf_path = _ptl_pdf_path()
-    if not pdf_path or not pdf_path.exists():
-        pytest.skip(
-            "Real PTL CIM not available on this machine (confidential document, "
-            "never committed to this repo)."
-        )
-    pdf_bytes = pdf_path.read_bytes()
-    parse_pdf_bytes(pdf_bytes)
-    digest = sha256(pdf_bytes).hexdigest()
-    return extract_tables_for_digest(digest)
+    pdf_path = _local_corpus_pdf("1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf")
+    if not pdf_path:
+        pytest.skip("Real PTL CIM not available (set PARSER_LOCAL_CORPUS_DIR).")
+    result = parse_pdf_bytes(pdf_path.read_bytes())
+    assert result.document is not None
+    return extract_tables(result.document)
 
 
 @pytest.fixture(scope="module")
 def pitchbook_tables() -> list[TableRecord]:
-    pdf_path = _pitchbook_pdf_path()
-    if not pdf_path or not pdf_path.exists():
-        pytest.skip(
-            "Real Pitchbook CIM not available on this machine (confidential document, "
-            "never committed to this repo)."
-        )
-    pdf_bytes = pdf_path.read_bytes()
-    parse_pdf_bytes(pdf_bytes)
-    digest = sha256(pdf_bytes).hexdigest()
-    return extract_tables_for_digest(digest)
+    pdf_path = _local_corpus_pdf("sell-side-pitchbook/Sell-Side-Pitchbook-CIM-Sample.pdf")
+    if not pdf_path:
+        pytest.skip("Real Pitchbook CIM not available (set PARSER_LOCAL_CORPUS_DIR).")
+    result = parse_pdf_bytes(pdf_path.read_bytes())
+    assert result.document is not None
+    return extract_tables(result.document)
 
 
 def test_ptl_page_11_income_statement_structure_and_values(
