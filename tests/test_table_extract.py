@@ -14,9 +14,15 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from pydantic import ValidationError
 
-from services.parser.parser_service.schemas import TableCellRecord, TableRecord
+from services.parser.parser_service.schemas import (
+    CharBox,
+    PageIndex,
+    TableCellRecord,
+    TableRecord,
+)
 from services.parser.parser_service.table_extract import (
     _build_table_record,
+    _reconstruct_bbox,
     extract_tables,
     tables_on_page,
 )
@@ -77,7 +83,7 @@ def test_build_table_record_all_cells_have_bbox_sets_provenance_ok() -> None:
             _cell(1, 1, "B", _bbox(10, 5, 20, 10)),
         ],
     )
-    record = _build_table_record(table)
+    record = _build_table_record(table, None)
 
     assert record.cell_provenance_ok is True
     assert record.page == 3
@@ -101,7 +107,7 @@ def test_build_table_record_missing_bbox_flags_provenance_and_nulls_coords() -> 
             _cell(1, 1, "B", _bbox(10, 5, 20, 10)),
         ],
     )
-    record = _build_table_record(table)
+    record = _build_table_record(table, None)
 
     assert record.cell_provenance_ok is False
     missing = [(c.row, c.col) for c in record.cells if c.x0 is None]
@@ -124,7 +130,7 @@ def test_build_table_record_propagates_page_span_and_header_flags() -> None:
             _cell(1, 1, "Val", _bbox(10, 5, 20, 10)),
         ],
     )
-    record = _build_table_record(table)
+    record = _build_table_record(table, None)
 
     assert {c.page for c in record.cells} == {4}
     merged = next(c for c in record.cells if c.text == "Merged")
@@ -235,7 +241,7 @@ def test_cell_text_is_normalized_but_raw_text_is_preserved() -> None:
             _cell(1, 1, "3 ,817", _bbox(10, 5, 20, 10)),
         ],
     )
-    record = _build_table_record(table)
+    record = _build_table_record(table, None)
 
     split = next(c for c in record.cells if c.row == 1 and c.col == 1)
     assert split.text == "3 ,817", "verbatim source text must be preserved"
@@ -258,7 +264,7 @@ def test_cell_normalization_uses_the_same_rule_as_the_page_index() -> None:
             _cell(0, 1, "$2 ,094", _bbox(10, 0, 20, 5)),
         ],
     )
-    record = _build_table_record(table)
+    record = _build_table_record(table, None)
 
     notes = next(c for c in record.cells if c.col == 0)
     currency = next(c for c in record.cells if c.col == 1)
@@ -282,7 +288,7 @@ def test_header_row_inferred_from_structure_when_labels_present() -> None:
             _cell(1, 2, "17146", _bbox(20, 5, 30, 10)),
         ],
     )
-    record = _build_table_record(table)
+    record = _build_table_record(table, None)
 
     assert record.header_row == 0
     assert record.column_headers_reliable is True
@@ -308,7 +314,7 @@ def test_header_row_is_none_when_columns_are_unlabeled() -> None:
         3,
         [_cell(0, 0, "Turnover Ratios:", _bbox(0, 0, 10, 5)), *data_cells],
     )
-    record = _build_table_record(table)
+    record = _build_table_record(table, None)
 
     assert record.header_row is None, "a table with no labeled columns has no header row"
     assert record.column_headers_reliable is False, (
@@ -329,7 +335,95 @@ def test_header_inference_rejects_numeric_first_row() -> None:
             _cell(0, 2, "17,146", _bbox(20, 0, 30, 5)),
         ],
     )
-    record = _build_table_record(table)
+    record = _build_table_record(table, None)
 
     assert record.header_row is None
     assert record.column_headers_reliable is False
+
+
+# --- Reconstruction fallback: recover a cell bbox from the positioned index ---
+
+
+def _page_index(text: str, x0: float = 100.0, y: float = 200.0, w: float = 6.0) -> PageIndex:
+    """A positioned index laying each character out left to right at one y."""
+    boxes = [
+        CharBox(
+            char=ch,
+            x0=x0 + i * w,
+            top=y,
+            x1=x0 + (i + 1) * w,
+            bottom=y + 10.0,
+            page=1,
+            precision="word",
+        )
+        for i, ch in enumerate(text)
+    ]
+    return PageIndex(page=1, text=text, char_map=boxes)
+
+
+def test_reconstruct_bbox_unique_match_unions_char_boxes() -> None:
+    page = _page_index("Revenue 3,817 total")
+    bbox = _reconstruct_bbox("3,817", page)
+    assert bbox is not None
+    x0, top, x1, bottom = bbox
+    start = page.text.index("3,817")
+    end = start + len("3,817") - 1
+    assert x0 == page.char_map[start].x0
+    assert x1 == page.char_map[end].x1
+    assert bottom > top
+
+
+def test_reconstruct_bbox_fails_closed_on_absent_or_ambiguous() -> None:
+    assert _reconstruct_bbox("9,999", _page_index("Revenue 3,817 total")) is None
+    assert _reconstruct_bbox("3,817", _page_index("3,817 versus 3,817 again")) is None
+    assert _reconstruct_bbox("", _page_index("anything")) is None
+
+
+def test_missing_bbox_is_reconstructed_from_page_index() -> None:
+    # Docling gave this cell no bbox, but its (split-token) text resolves uniquely
+    # in the positioned index, so the fallback recovers a citable coordinate.
+    page = _page_index("Revenue 3,817 total")
+    table = _table(
+        1, 1, 2, [_cell(0, 0, "Revenue", _bbox(0, 0, 50, 10)), _cell(0, 1, "3 ,817", None)]
+    )
+    record = _build_table_record(table, page)
+
+    recovered = next(c for c in record.cells if c.text == "3 ,817")
+    assert recovered.bbox_source == "reconstructed"
+    assert recovered.x0 is not None and recovered.x1 is not None and recovered.x1 > recovered.x0
+    assert record.cell_provenance_ok is True
+    assert record.reconstructed_cells == 1
+
+
+def test_missing_bbox_unresolvable_stays_not_provenance_ok() -> None:
+    page = _page_index("Revenue 3,817 total")
+    table = _table(1, 1, 1, [_cell(0, 0, "value not on the page", None)])
+    record = _build_table_record(table, page)
+
+    assert record.cells[0].bbox_source is None
+    assert record.cells[0].x0 is None
+    assert record.cell_provenance_ok is False
+    assert record.reconstructed_cells == 0
+
+
+def test_native_bbox_takes_precedence_over_reconstruction() -> None:
+    page = _page_index("Revenue 3,817 total")
+    table = _table(1, 1, 1, [_cell(0, 0, "3,817", _bbox(1, 2, 3, 4))])
+    record = _build_table_record(table, page)
+
+    assert record.cells[0].bbox_source == "docling_native"
+    assert record.cells[0].x0 == 1
+    assert record.reconstructed_cells == 0
+
+
+def test_extract_tables_threads_page_indices_for_fallback() -> None:
+    page = _page_index("Revenue 3,817 total")
+    table = _table(1, 1, 1, [_cell(0, 0, "3,817", None)])
+    doc = cast("DoclingDocument", SimpleNamespace(tables=[table]))
+
+    without = extract_tables(doc)
+    assert without[0].cell_provenance_ok is False  # no index -> native only
+
+    with_index = extract_tables(doc, [page])
+    assert with_index[0].cell_provenance_ok is True
+    assert with_index[0].reconstructed_cells == 1

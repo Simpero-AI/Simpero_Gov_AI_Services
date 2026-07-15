@@ -45,12 +45,18 @@ class TableCellRecord(BaseModel):
     column_header: bool
     row_header: bool
     page: int = Field(ge=1)
-    # None when Docling did not expose a source bbox for this cell — see
-    # TableRecord.cell_provenance_ok.
+    # None only when neither the Docling-native bbox nor the reconstruction
+    # fallback resolved a coordinate — see TableRecord.cell_provenance_ok.
     x0: float | None
     top: float | None
     x1: float | None
     bottom: float | None
+    # How the coordinate above was obtained. "docling_native": Docling exposed a
+    # valid cell bbox. "reconstructed": it did not, so the bbox was recovered
+    # from the page's positioned index by exact-span match of the cell text
+    # (fail closed on absent/ambiguous). None: neither resolved, so the cell has
+    # no citable location. A reconstructed box must never be treated as native.
+    bbox_source: Literal["docling_native", "reconstructed"] | None = None
 
 
 class TableRecord(BaseModel):
@@ -58,9 +64,15 @@ class TableRecord(BaseModel):
     num_rows: int = Field(ge=0)
     num_cols: int = Field(ge=0)
     cells: list[TableCellRecord]
-    # False if any cell in this table lacks a resolvable source bbox — per
+    # False if any cell still lacks a resolvable source bbox after both the
+    # Docling-native path and the positioned-index reconstruction fallback — per
     # DS-2, such a table must not be treated as citable until this is true.
     cell_provenance_ok: bool
+    # Count of cells whose coordinates came from the reconstruction fallback
+    # rather than a Docling-native bbox. > 0 means the table is citable but part
+    # of its geometry was recovered from the flat index, not read from the
+    # layout — surfaced so it is never silently trusted as native.
+    reconstructed_cells: int = Field(ge=0, default=0)
     # Header row inferred from table *structure*, not from Docling's
     # column_header flag. None means this table has unlabeled columns (no
     # header row exists to key off) — consumers must then fall back to

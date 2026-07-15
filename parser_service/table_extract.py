@@ -1,10 +1,12 @@
+from typing import Literal
+
 from docling_core.types.doc.document import (
     DoclingDocument,
     TableItem,  # pyright: ignore[reportPrivateImportUsage]
 )
 
 from .normalize import normalize_numeric_text
-from .schemas import TableCellRecord, TableRecord
+from .schemas import PageIndex, TableCellRecord, TableRecord
 
 
 def _bbox_is_valid(bbox) -> bool:
@@ -50,15 +52,59 @@ def _infer_header_row(cells: list[TableCellRecord]) -> int | None:
     return 0
 
 
-def _build_table_record(table: TableItem) -> TableRecord:
+def _reconstruct_bbox(
+    text_normalized: str, page_index: PageIndex
+) -> tuple[float, float, float, float] | None:
+    """Recover a cell's coordinates from the page's positioned index when Docling
+    exposed no valid cell bbox: locate the cell text in the flat page text and
+    union the covering char boxes. Fail closed on an absent or ambiguous match —
+    the same exact-span rule the flat index uses — so a reconstructed coordinate
+    is never a guess. The page index is normalized, so match on text_normalized."""
+    needle = text_normalized.strip()
+    if not needle:
+        return None
+    first = page_index.text.find(needle)
+    if first == -1 or page_index.text.find(needle, first + 1) != -1:
+        return None
+    boxes = page_index.char_map[first : first + len(needle)]
+    if not boxes:
+        return None
+    return (
+        min(b.x0 for b in boxes),
+        min(b.top for b in boxes),
+        max(b.x1 for b in boxes),
+        max(b.bottom for b in boxes),
+    )
+
+
+def _build_table_record(table: TableItem, page_index: PageIndex | None) -> TableRecord:
     page_no = table.prov[0].page_no
 
     cells: list[TableCellRecord] = []
     provenance_ok = True
+    reconstructed = 0
     for cell in table.data.table_cells:
+        # Split numeric tokens survive in Docling's raw cell text; the flat page
+        # index normalizes them but the table structure does not. Normalize here,
+        # with the same rule, so downstream fact extraction never has to re-derive
+        # it (DS-W3-2 finding F2), and so the reconstruction match uses the same
+        # form as the page index.
+        text_normalized = normalize_numeric_text(cell.text)
         bbox = cell.bbox
-        if not _bbox_is_valid(bbox):
-            provenance_ok = False
+        source: Literal["docling_native", "reconstructed"] | None
+        if bbox is not None and _bbox_is_valid(bbox):
+            x0, top, x1, bottom = bbox.l, bbox.t, bbox.r, bbox.b
+            source = "docling_native"
+        else:
+            rebuilt = _reconstruct_bbox(text_normalized, page_index) if page_index else None
+            if rebuilt is not None:
+                x0, top, x1, bottom = rebuilt
+                source = "reconstructed"
+                reconstructed += 1
+            else:
+                x0 = top = x1 = bottom = None
+                source = None
+                provenance_ok = False
         cells.append(
             TableCellRecord(
                 row=cell.start_row_offset_idx,
@@ -66,18 +112,15 @@ def _build_table_record(table: TableItem) -> TableRecord:
                 row_span=cell.row_span,
                 col_span=cell.col_span,
                 text=cell.text,
-                # Split numeric tokens survive in Docling's raw cell text; the
-                # flat page index normalizes them but the table structure does
-                # not. Normalize here, with the same rule, so downstream fact
-                # extraction never has to re-derive it (DS-W3-2 finding F2).
-                text_normalized=normalize_numeric_text(cell.text),
+                text_normalized=text_normalized,
                 column_header=cell.column_header,
                 row_header=cell.row_header,
                 page=page_no,
-                x0=bbox.l if bbox else None,
-                top=bbox.t if bbox else None,
-                x1=bbox.r if bbox else None,
-                bottom=bbox.b if bbox else None,
+                x0=x0,
+                top=top,
+                x1=x1,
+                bottom=bottom,
+                bbox_source=source,
             )
         )
 
@@ -94,19 +137,28 @@ def _build_table_record(table: TableItem) -> TableRecord:
         num_cols=table.data.num_cols,
         cells=cells,
         cell_provenance_ok=provenance_ok,
+        reconstructed_cells=reconstructed,
         header_row=header_row,
         column_headers_reliable=column_headers_reliable,
     )
 
 
-def extract_tables(doc: DoclingDocument) -> list[TableRecord]:
+def extract_tables(
+    doc: DoclingDocument, page_indices: list[PageIndex] | None = None
+) -> list[TableRecord]:
     """Structured, per-cell table records from a parsed DoclingDocument.
 
     Consumes the in-memory document (DoclingParseResult.document) — no cache
     round-trip — so table extraction runs in the same request as the parse and
     does not depend on the (optional) Spaces document cache.
+
+    When page_indices (DoclingParseResult.pages) are supplied, a cell that Docling
+    gives no valid bbox is recovered from that page's positioned index by
+    exact-span match, so a table stays citable even where Docling drops cell
+    geometry. Without them, only Docling-native cell bboxes are used.
     """
-    return [_build_table_record(table) for table in doc.tables]
+    by_page = {pi.page: pi for pi in (page_indices or [])}
+    return [_build_table_record(t, by_page.get(t.prov[0].page_no)) for t in doc.tables]
 
 
 def tables_on_page(tables: list[TableRecord], page_no: int) -> list[TableRecord]:

@@ -50,7 +50,7 @@ def ptl_tables() -> list[TableRecord]:
         pytest.skip("Real PTL CIM not available (set PARSER_LOCAL_CORPUS_DIR).")
     result = parse_pdf_bytes(pdf_path.read_bytes())
     assert result.document is not None
-    return extract_tables(result.document)
+    return extract_tables(result.document, result.pages)
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +60,7 @@ def pitchbook_tables() -> list[TableRecord]:
         pytest.skip("Real Pitchbook CIM not available (set PARSER_LOCAL_CORPUS_DIR).")
     result = parse_pdf_bytes(pdf_path.read_bytes())
     assert result.document is not None
-    return extract_tables(result.document)
+    return extract_tables(result.document, result.pages)
 
 
 def test_ptl_page_11_income_statement_structure_and_values(

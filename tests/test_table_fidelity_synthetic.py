@@ -57,7 +57,7 @@ def _coord(value: float | None) -> float:
 def synthetic_table() -> TableRecord:
     result = parse_pdf_bytes(_income_statement_pdf())
     assert result.document is not None, "parse must expose the in-memory DoclingDocument"
-    tables = extract_tables(result.document)
+    tables = extract_tables(result.document, result.pages)
     assert len(tables) == 1, "Docling should detect exactly one table"
     return tables[0]
 
@@ -81,7 +81,11 @@ def test_split_token_normalized_in_cell(synthetic_table: TableRecord) -> None:
 def test_every_cell_has_valid_provenance(synthetic_table: TableRecord) -> None:
     t = synthetic_table
     assert t.cell_provenance_ok is True
+    # Docling exposes every cell bbox on this table, so the reconstruction
+    # fallback is not needed here — provenance is fully native.
+    assert t.reconstructed_cells == 0
     for c in t.cells:
+        assert c.bbox_source == "docling_native"
         assert _coord(c.x1) > _coord(c.x0)
         assert _coord(c.bottom) != _coord(c.top)
 
