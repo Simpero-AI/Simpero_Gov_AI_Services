@@ -44,6 +44,9 @@ def union_bbox(chars: list[CharBox]) -> BBox:
     """
     if not chars:
         raise ValueError("union_bbox requires at least one char box")
+    pages = {c.page for c in chars}
+    if len(pages) != 1:
+        raise ValueError(f"union_bbox requires chars on one page, got {sorted(pages)}")
     return BBox(
         x0=min(c.x0 for c in chars),
         top=min(c.top for c in chars),
