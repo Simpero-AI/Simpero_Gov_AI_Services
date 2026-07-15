@@ -82,3 +82,30 @@ class TableRecord(BaseModel):
     # inferred header row. False means the flags are untrustworthy for this
     # table and must be ignored.
     column_headers_reliable: bool
+
+
+class BBox(BaseModel):
+    # TOPLEFT origin, matching CharBox: top < bottom numerically.
+    x0: float
+    top: float
+    x1: float
+    bottom: float
+    page: int = Field(ge=1)
+
+
+class Span(BaseModel):
+    # Character offsets into PageIndex.text; char_end is exclusive, so
+    # page.text[char_start:char_end] == the resolved quote.
+    char_start: int = Field(ge=0)
+    char_end: int = Field(ge=0)
+    page: int = Field(ge=1)
+    # Union of every matched character's box. On a quote that wraps across
+    # lines this is a coarse envelope that also covers text between the lines —
+    # use it only to locate the fact on the page, not to draw the highlight.
+    bbox: BBox
+    # One box per visual line the quote covers (the matched region split on the
+    # newline characters the flat page index inserts between lines).
+    # Single-element for a single-line quote. This is the correct primitive to
+    # highlight from; a single union box would cover unrelated text on any
+    # quote that wraps.
+    line_bboxes: list[BBox]
