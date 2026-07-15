@@ -17,6 +17,7 @@ from services.parser.parser_service.scale import (
     ScaleResult,
     determine_scale,
     normalize_financial_token,
+    scale_phrase_in_text,
 )
 from services.parser.parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
 
@@ -143,6 +144,29 @@ def test_filing_reference_does_not_fire() -> None:
     # "10-K" -- the hyphen breaks suffix adjacency, so this is not read as
     # "10 thousand".
     assert normalize_financial_token("Form 10-K") is None
+
+
+# --------------------------------------------------------------------------- #
+# scale_phrase_in_text -- the public phrase lookup shared with DS-W3-5/6.
+# --------------------------------------------------------------------------- #
+
+
+def test_scale_phrase_in_text_returns_rightmost_phrase() -> None:
+    # Nearest-wins, like the page-header rule: a later phrase supersedes an
+    # earlier one, so the rightmost match is returned.
+    assert scale_phrase_in_text("(in thousands) ... (in millions)") == (
+        1_000_000.0,
+        None,
+        "(in millions)",
+    )
+
+
+def test_scale_phrase_in_text_captures_currency() -> None:
+    assert scale_phrase_in_text("CAD (in Thousands)") == (1_000.0, "CAD", "CAD (in Thousands)")
+
+
+def test_scale_phrase_in_text_returns_none_when_absent() -> None:
+    assert scale_phrase_in_text("Revenue and gross margin, no scale phrase") is None
 
 
 # --------------------------------------------------------------------------- #

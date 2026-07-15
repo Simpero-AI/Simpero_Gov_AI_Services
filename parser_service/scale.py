@@ -231,6 +231,24 @@ def _find_scale_phrases(text: str) -> list[_ScalePhraseMatch]:
     return matches
 
 
+def scale_phrase_in_text(text: str) -> tuple[float, str | None, str] | None:
+    """The rightmost (nearest/most-recent) scale phrase in `text` as
+    (multiplier, currency, context), or None.
+
+    Public on purpose: the downstream parse paths that share this module's
+    scale grammar -- the XLSX header scan (DS-W3-5) and table/chart element
+    processing (DS-W3-6) -- reuse it directly rather than re-deriving the
+    phrase lookup, so a scale phrase is recognized identically no matter which
+    path is scanning. "Rightmost" mirrors _page_header_scale's nearest-wins
+    rule: a later declaration in the same text supersedes an earlier one.
+    """
+    phrases = _find_scale_phrases(text)
+    if not phrases:
+        return None
+    start, end, multiplier, currency = phrases[-1]
+    return multiplier, currency, text[start:end].strip()
+
+
 def _cell_covering_column(table: TableRecord, row: int, col: int) -> TableCellRecord | None:
     """The cell in `row` whose column span covers `col`. Honors col_span so a
     merged banner ("CAD (in Thousands)" spanning several value columns, stored
@@ -253,10 +271,9 @@ def _column_header_scale(
         header_cell = _cell_covering_column(table, row, cell.col)
         if header_cell is None:
             continue
-        phrases = _find_scale_phrases(header_cell.text_normalized)
-        if phrases:
-            start, end, multiplier, currency = phrases[-1]
-            return multiplier, currency, header_cell.text_normalized[start:end].strip()
+        found = scale_phrase_in_text(header_cell.text_normalized)
+        if found is not None:
+            return found
     return None
 
 
