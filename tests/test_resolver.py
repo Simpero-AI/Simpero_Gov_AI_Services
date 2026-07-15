@@ -8,7 +8,7 @@ Two layers, like the rest of the parser suite:
   corpus strings ($15,295, 27.3%, 3,817) against the real PTL PDF-page 11.
 """
 
-import shutil
+import os
 from pathlib import Path
 
 import pytest
@@ -168,6 +168,32 @@ def test_resolve_multiline_quote_returns_one_bbox_per_line() -> None:
     assert (span.bbox.bottom - span.bbox.top) > (top_line.bottom - top_line.top)
 
 
+def test_resolve_matches_a_quote_that_wraps_a_line() -> None:
+    # The extractor emits the quote with a space, but the value wraps in the
+    # source (a real '\n' in page.text). Whitespace-flexible matching resolves it
+    # instead of silently dropping the fact.
+    page = make_page("Total debt\nto net worth")
+
+    span = resolve("Total debt to net worth", page)
+
+    assert span is not None
+    assert page.text[span.char_start : span.char_end] == "Total debt\nto net worth"
+    assert len(span.line_bboxes) == 2
+    assert span.line_bboxes[1].top > span.line_bboxes[0].top
+
+
+def test_resolve_is_flexible_across_any_whitespace_run() -> None:
+    # Multiple spaces (or mixed whitespace) in the source still resolve; only
+    # whitespace is flexible, so this is not fuzzy matching.
+    page = make_page("Gross   Margin")
+    span = resolve("Gross Margin", page)
+    assert span is not None
+    assert page.text[span.char_start : span.char_end] == "Gross   Margin"
+
+    # ...but a non-whitespace difference still fails closed.
+    assert resolve("Gross-Margin", page) is None
+
+
 def test_union_bbox_takes_min_and_max_over_boxes() -> None:
     chars = [
         CharBox(char="a", x0=10.0, top=5.0, x1=15.0, bottom=12.0, page=2, precision="word"),
@@ -203,14 +229,13 @@ def test_resolve_span_bbox_page_matches_page() -> None:
 
 
 def _ptl_pdf_path() -> Path | None:
-    dest_dir = Path(__file__).parent.parent / "test_data"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / "1st-App-H-PTL-Group-CIM.pdf"
-    if not dest_path.exists():
-        src = Path("p:/simpero_GOV_AI/scripts/examples/1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf")
-        if src.exists():
-            shutil.copy(src, dest_path)
-    return dest_path if dest_path.exists() else None
+    # Opt-in via PARSER_LOCAL_CORPUS_DIR (the confidential CIM is never committed),
+    # matching the rest of the parser suite. Unset -> the local_corpus tests skip.
+    root = os.environ.get("PARSER_LOCAL_CORPUS_DIR")
+    if not root:
+        return None
+    path = Path(root) / "1st-app-h-ptl/1st-App-H-PTL-Group-CIM.pdf"
+    return path if path.exists() else None
 
 
 @pytest.fixture(scope="module")

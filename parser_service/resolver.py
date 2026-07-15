@@ -1,18 +1,38 @@
 """DS-W3-3 exact-span resolver — the citation trust boundary.
 
 A fact exists only if its quote resolves to an exact, unambiguous span in the
-source page. This is deterministic exact-substring matching: found exactly once
--> a real span + bbox; not found, or found more than once -> None. There is no
-fuzzy matching, no "closest sentence", no fallback slice. Approximating a
-citation is worse than dropping the fact, because a wrong span looks correct and
-points at unrelated text — the exact failure mode this ticket exists to remove.
+source page. Matching is deterministic and whitespace-flexible: every
+non-whitespace character must match literally, while a run of whitespace in the
+quote matches any run of whitespace in the page text. That single relaxation is
+principled, not fuzzy — it lets a quote emitted with a space resolve against
+source text that wraps with a newline (the flat page index carries a real '\\n'
+between visual lines), which an exact-substring match would silently drop.
+Found exactly once -> a real span + bbox; not found, or found more than once ->
+None. No "closest sentence", no fallback slice. Approximating a citation is
+worse than dropping the fact, because a wrong span looks correct and points at
+unrelated text — the failure mode this ticket exists to remove.
 """
 
 import logging
+import re
 
 from .schemas import BBox, CharBox, PageIndex, Span
 
 logger = logging.getLogger(__name__)
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _flexible_pattern(quote: str) -> str:
+    """Regex matching the quote with whitespace runs treated flexibly.
+
+    Non-whitespace tokens are matched literally (`re.escape`); each gap between
+    them matches any run of whitespace. The quote's own leading/trailing
+    whitespace is insignificant. Callers guarantee a non-whitespace-only quote,
+    so the token list is never empty.
+    """
+    tokens = [t for t in _WHITESPACE.split(quote) if t]
+    return r"\s+".join(re.escape(t) for t in tokens)
 
 
 def union_bbox(chars: list[CharBox]) -> BBox:
@@ -59,22 +79,25 @@ def _line_bboxes(chars: list[CharBox]) -> list[BBox]:
 def resolve(quote: str, page: PageIndex) -> Span | None:
     """Resolve a verbatim quote to its exact span on a page, or None.
 
-    Fail-closed: an empty quote, a quote not present, or a quote present more
-    than once all return None. The quote must be a verbatim substring of
-    page.text (the extractor must emit verbatim quotes, never restatements) and
+    Fail-closed: an empty (or whitespace-only) quote, a quote not present, or a
+    quote present more than once all return None. Non-whitespace content must
+    match verbatim (the extractor emits verbatim quotes, never restatements) and
     must already be normalized the same way page.text is — e.g. "3,817" resolves
-    only after DS-W3-1 has collapsed the raw "3 ,817"; resolving it against
-    un-normalized text is a correct None, not a bug.
+    only after DS-W3-1 has collapsed the raw "3 ,817". Only whitespace is matched
+    flexibly, so a quote that wraps a line still resolves.
     """
-    if not quote:
+    if not quote.strip():
         return None
 
-    first = page.text.find(quote)
-    if first == -1:
+    pattern = _flexible_pattern(quote)
+    # Lookahead so overlapping occurrences are still counted (e.g. "aa" in "aaa"
+    # appears twice); group(1) captures the real span at each start position.
+    matches = [(m.start(1), m.end(1)) for m in re.finditer(rf"(?=({pattern}))", page.text)]
+    if not matches:
         return None
 
-    if page.text.find(quote, first + 1) != -1:
-        # Ambiguous: the same string appears more than once, so which instance
+    if len(matches) > 1:
+        # Ambiguous: the quote resolves at more than one place, so which instance
         # the fact refers to is unknowable. Fail closed and log it — these are
         # recall gaps (a real value we refused to cite) that must stay visible.
         logger.warning(
@@ -84,10 +107,11 @@ def resolve(quote: str, page: PageIndex) -> Span | None:
         )
         return None
 
-    chars = page.char_map[first : first + len(quote)]
+    start, end = matches[0]
+    chars = page.char_map[start:end]
     return Span(
-        char_start=first,
-        char_end=first + len(quote),
+        char_start=start,
+        char_end=end,
         page=page.page,
         bbox=union_bbox(chars),
         line_bboxes=_line_bboxes(chars),
