@@ -7,6 +7,7 @@ from docling_core.types.doc.document import (
 )
 
 from .normalize import normalize_numeric_text
+from .resolver import resolve
 from .schemas import PageIndex, TableCellRecord, TableRecord
 
 logger = logging.getLogger(__name__)
@@ -59,25 +60,15 @@ def _reconstruct_bbox(
     text_normalized: str, page_index: PageIndex
 ) -> tuple[float, float, float, float] | None:
     """Recover a cell's coordinates from the page's positioned index when Docling
-    exposed no valid cell bbox: locate the cell text in the flat page text and
-    union the covering char boxes. Fail closed on an absent or ambiguous match —
-    the same exact-span rule the flat index uses — so a reconstructed coordinate
-    is never a guess. The page index is normalized, so match on text_normalized."""
-    needle = text_normalized.strip()
-    if not needle:
+    exposed no valid cell bbox: resolve the cell text against the page via the
+    DS-W3-3 exact-span resolver (fail closed on absent/ambiguous — a reconstructed
+    coordinate is never a guess). The page index is normalized, so match on
+    text_normalized."""
+    span = resolve(text_normalized, page_index)
+    if span is None:
         return None
-    first = page_index.text.find(needle)
-    if first == -1 or page_index.text.find(needle, first + 1) != -1:
-        return None
-    boxes = page_index.char_map[first : first + len(needle)]
-    if not boxes:
-        return None
-    return (
-        min(b.x0 for b in boxes),
-        min(b.top for b in boxes),
-        max(b.x1 for b in boxes),
-        max(b.bottom for b in boxes),
-    )
+    bbox = span.bbox
+    return (bbox.x0, bbox.top, bbox.x1, bbox.bottom)
 
 
 def _build_table_record(table: TableItem, page_index: PageIndex | None) -> TableRecord:
