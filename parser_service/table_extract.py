@@ -1,3 +1,4 @@
+import logging
 from typing import Literal
 
 from docling_core.types.doc.document import (
@@ -7,6 +8,8 @@ from docling_core.types.doc.document import (
 
 from .normalize import normalize_numeric_text
 from .schemas import PageIndex, TableCellRecord, TableRecord
+
+logger = logging.getLogger(__name__)
 
 
 def _bbox_is_valid(bbox) -> bool:
@@ -130,6 +133,24 @@ def _build_table_record(table: TableItem, page_index: PageIndex | None) -> Table
     # row) means consumers must ignore column_header for this table.
     flagged_rows = {c.row for c in cells if c.column_header}
     column_headers_reliable = header_row is not None and flagged_rows == {header_row}
+
+    # Provenance is audit-critical: surface where a table's geometry was recovered
+    # from the flat index rather than read from Docling, and where it stayed uncitable.
+    if reconstructed:
+        logger.info(
+            "table page %s: recovered %d of %d cell bbox(es) via reconstruction fallback",
+            page_no,
+            reconstructed,
+            len(cells),
+        )
+    if not provenance_ok:
+        unresolved = sum(1 for c in cells if c.bbox_source is None)
+        logger.warning(
+            "table page %s: not citable — %d of %d cell(s) have no resolvable coordinate",
+            page_no,
+            unresolved,
+            len(cells),
+        )
 
     return TableRecord(
         page=page_no,
