@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import re
 import tempfile
 from collections import defaultdict
@@ -19,6 +20,8 @@ from .config import get_settings
 from .document_cache import get_document_cache
 from .normalize import kept_indices
 from .schemas import CharBox, PageIndex
+
+logger = logging.getLogger(__name__)
 
 _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
 BOILERPLATE_ZONE_LINES = 5
@@ -335,6 +338,8 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             raise exc
         raise ParseError("corrupt_pdf", "Uploaded file is not a readable PDF.", 400) from exc
 
+    logger.info("parse start: sha256=%s pages=%d bytes=%d", digest[:16], page_count, len(pdf_bytes))
+
     # Write to a temporary file to convert with Docling converter
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
         tmp_file.write(pdf_bytes)
@@ -360,6 +365,9 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
         # failure. Such a page would pass the count check below and ship as a
         # silently-blank PageIndex, so fail closed on any non-success status.
         if result.status != ConversionStatus.SUCCESS:
+            logger.warning(
+                "incomplete parse: sha256=%s docling status=%s", digest[:16], result.status.value
+            )
             raise ParseError(
                 "incomplete_parse",
                 f"Docling conversion status was {result.status.value}; "
@@ -368,6 +376,12 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             )
 
         if len(result.pages) != page_count:
+            logger.warning(
+                "incomplete parse: sha256=%s docling returned %d of %d pages",
+                digest[:16],
+                len(result.pages),
+                page_count,
+            )
             raise ParseError(
                 "incomplete_parse",
                 f"Docling parsed {len(result.pages)} of {page_count} pages; "
@@ -381,6 +395,7 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
         document_cache = get_document_cache()
         if document_cache.enabled:
             document_cache.put_json(f"{digest}.json", result.document.export_to_dict())
+            logger.debug("cached DoclingDocument: sha256=%s", digest[:16])
 
         page_indices = [_build_page_index(page, page.page_no) for page in result.pages]
         tag_boilerplate(page_indices)
@@ -388,8 +403,17 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
         # A blank page still yields an (empty) PageIndex rather than being absent,
         # so check aggregate extracted text rather than page count for this guard.
         if not any(page.text for page in page_indices):
+            logger.warning(
+                "no extractable text: sha256=%s (likely scanned or image-only)", digest[:16]
+            )
             raise ParseError("no_extractable_text", "PDF contains no extractable text.", 422)
 
+        logger.info(
+            "parse complete: sha256=%s pages=%d empty_pages=%d",
+            digest[:16],
+            len(page_indices),
+            sum(1 for p in page_indices if not p.text),
+        )
         return DoclingParseResult(sha256=digest, pages=page_indices)
 
     finally:
