@@ -13,6 +13,12 @@ class ParserSettings(BaseSettings):
     # accidentally-huge uploads, not a hard technical ceiling.
     max_pages: int = 110
 
+    # Upper bound on sheets accepted per XLSX workbook (DS-W3-5). openpyxl has
+    # no ML cost like Docling's per-page models, but this is still a guard
+    # against an accidentally-huge upload (some models carry dozens of
+    # scenario/sensitivity sheets) turning into an unbounded parse.
+    max_sheets: int = 50
+
     # Object storage (DigitalOcean Spaces, S3-compatible) for the raw
     # DoclingDocument cache that DS-W3-2/DS-W3-6 consume. Spaces encrypts at rest
     # at the bucket level, so confidential content is never persisted unencrypted

@@ -106,6 +106,14 @@ def _parse_number(text: str) -> float | None:
     return float(match.group(0).replace(",", ""))
 
 
+def parse_bare_number(text: str) -> float | None:
+    """The first plain number in `text` (commas stripped), or None. Public
+    for reuse by other parse paths (DS-W3-5's XLSX cells that hold a numeric
+    string with no inline scale marker) that need the same fallback numeric
+    parse this module uses once `normalize_financial_token` finds nothing."""
+    return _parse_number(text)
+
+
 def normalize_financial_token(text: str) -> tuple[float, float, str | None] | None:
     """Port of the MVP's normalizeFinancialTokens, narrowed to the inline case
     this ticket owns: given a value token that states its own scale -- a
@@ -177,6 +185,21 @@ def _find_scale_phrases(text: str) -> list[_ScalePhraseMatch]:
     return matches
 
 
+def scale_phrase_in_text(text: str) -> tuple[float, str | None, str] | None:
+    """The rightmost (nearest/most-recent) scale phrase in `text`, or None.
+
+    Public on purpose: DS-W3-5's XLSX path reuses this same phrase grammar
+    for its own column/sheet-header scan ("Scale headers -- same capture as
+    DS-4") without needing a PDF PageIndex -- XLSX header text is scanned
+    cell-by-cell rather than as one flat positioned string.
+    """
+    phrases = _find_scale_phrases(text)
+    if not phrases:
+        return None
+    start, end, multiplier, currency = phrases[-1]
+    return multiplier, currency, text[start:end].strip()
+
+
 def _column_header_scale(
     table: TableRecord, cell: TableCellRecord
 ) -> tuple[float, str | None, str] | None:
@@ -189,10 +212,9 @@ def _column_header_scale(
         header_cell = col_cells.get(row)
         if header_cell is None:
             continue
-        phrases = _find_scale_phrases(header_cell.text_normalized)
-        if phrases:
-            start, end, multiplier, currency = phrases[-1]
-            return multiplier, currency, header_cell.text_normalized[start:end].strip()
+        found = scale_phrase_in_text(header_cell.text_normalized)
+        if found is not None:
+            return found
     return None
 
 
