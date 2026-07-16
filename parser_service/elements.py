@@ -35,8 +35,9 @@ _CHART_CONTEXT_PADDING = 50.0
 class TableElement(BaseModel):
     kind: Literal["table"] = "table"
     page: int = Field(ge=1)
-    # None only when no cell in the table has a resolved coordinate yet (e.g.
-    # before vision escalation runs) -- see TableRecord.cell_provenance_ok.
+    # None only when no cell in the table has a resolved coordinate -- neither
+    # the Docling-native path nor the reconstruction fallback placed any cell;
+    # see TableRecord.cell_provenance_ok.
     bbox: BBox | None
     cells: list[TableCellRecord]
     cell_provenance_ok: bool

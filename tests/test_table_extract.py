@@ -8,6 +8,7 @@ the cell_provenance_ok=False branch (this corpus has zero missing bboxes) and
 the extractor's error handling.
 """
 
+import logging
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -404,6 +405,25 @@ def test_missing_bbox_unresolvable_stays_not_provenance_ok() -> None:
     assert record.cells[0].x0 is None
     assert record.cell_provenance_ok is False
     assert record.reconstructed_cells == 0
+
+
+def test_reconstructed_cells_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    # Recovering a cell's geometry from the flat index is an audit event.
+    page = _page_index("Revenue 3,817 total")
+    table = _table(
+        1, 1, 2, [_cell(0, 0, "Revenue", _bbox(0, 0, 50, 10)), _cell(0, 1, "3 ,817", None)]
+    )
+    with caplog.at_level(logging.INFO):
+        _build_table_record(table, page)
+    assert any("reconstruction fallback" in r.getMessage() for r in caplog.records)
+
+
+def test_uncitable_table_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    page = _page_index("Revenue 3,817 total")
+    table = _table(1, 1, 1, [_cell(0, 0, "value not on the page", None)])
+    with caplog.at_level(logging.WARNING):
+        _build_table_record(table, page)
+    assert any("not citable" in r.getMessage() for r in caplog.records)
 
 
 def test_native_bbox_takes_precedence_over_reconstruction() -> None:

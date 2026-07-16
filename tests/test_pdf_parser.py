@@ -1,3 +1,4 @@
+import logging
 import os
 from hashlib import sha256
 from io import BytesIO
@@ -239,6 +240,48 @@ def test_partial_success_conversion_is_rejected(monkeypatch) -> None:
         parse_pdf_bytes(pdf_bytes)
     assert exc_info.value.code == "incomplete_parse"
     assert "partial_success" in exc_info.value.message
+
+
+# --- Audit-line regression guards: the trust pipeline must stay traceable ----
+
+
+def test_parse_rejection_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    # Every fail-closed rejection must be traceable: the endpoint logs its code.
+    with caplog.at_level(logging.WARNING):
+        response = client.post("/parse", content=b"", headers={"Content-Type": "application/pdf"})
+    assert response.status_code == 400
+    assert any(
+        "parse rejected" in r.getMessage() and "zero_byte_pdf" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_incomplete_parse_is_logged(caplog: pytest.LogCaptureFixture, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from docling.datamodel.base_models import ConversionStatus
+    from docling.document_converter import DocumentConverter
+
+    def fake_convert(self, *args, **kwargs):
+        return SimpleNamespace(status=ConversionStatus.PARTIAL_SUCCESS, pages=[], document=None)
+
+    monkeypatch.setattr(DocumentConverter, "convert", fake_convert)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ParseError):
+        parse_pdf_bytes(make_multi_page_pdf_with_boilerplate(num_pages=2))
+    assert any(
+        "incomplete parse" in r.getMessage() and "partial_success" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_parse_start_and_no_extractable_text_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO), pytest.raises(ParseError) as exc_info:
+        parse_pdf_bytes(make_blank_pdf(page_count=1))
+    assert exc_info.value.code == "no_extractable_text"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("parse start" in m for m in messages)
+    assert any("no extractable text" in m for m in messages)
 
 
 def test_normalize_numeric_tokens_collapses_space_before_separator() -> None:

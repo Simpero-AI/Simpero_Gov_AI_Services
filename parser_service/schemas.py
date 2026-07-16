@@ -54,14 +54,9 @@ class TableCellRecord(BaseModel):
     # How the coordinate above was obtained. "docling_native": Docling exposed a
     # valid cell bbox. "reconstructed": it did not, so the bbox was recovered
     # from the page's positioned index by exact-span match of the cell text
-    # (fail closed on absent/ambiguous). "vision_resolved": neither of the above
-    # worked, so DS-W3-6 escalated to Claude Vision for a candidate reading,
-    # which was then independently verified via the DS-W3-3 exact-span resolver
-    # (fail closed) -- vision proposes text, never a coordinate, so this source
-    # carries the same fail-closed guarantee as "reconstructed". None: nothing
-    # resolved, so the cell has no citable location. A reconstructed or
-    # vision-resolved box must never be treated as native.
-    bbox_source: Literal["docling_native", "reconstructed", "vision_resolved"] | None = None
+    # (fail closed on absent/ambiguous). None: neither resolved, so the cell has
+    # no citable location. A reconstructed box must never be treated as native.
+    bbox_source: Literal["docling_native", "reconstructed"] | None = None
 
 
 class TableRecord(BaseModel):
@@ -96,6 +91,63 @@ class BBox(BaseModel):
     x1: float
     bottom: float
     page: int = Field(ge=1)
+
+
+class XlsxCellRecord(BaseModel):
+    sheet: str
+    cell_ref: str = Field(description='e.g. "B14".')
+    row: int = Field(ge=1)
+    col: int = Field(ge=1)
+    # The literal value Excel stores for this cell. None for a formula cell —
+    # the file's cached formula result is never trusted as the fact's value
+    # (the exact anti-pattern DS-W3-5 replaces); see `formula`/`cached_value`.
+    value: float | str | bool | None
+    # The formula text (e.g. "=B2+B3"), when this cell computes rather than
+    # states its value. None for a literal cell. Re-execution happens via
+    # HyperFormula on the TS side (per the locked architecture) — this module
+    # only surfaces the formula itself, never evaluates it.
+    formula: str | None = None
+    # The workbook's own last-cached result for a formula cell, kept only for
+    # debugging/comparison. NEVER authoritative: a fact built from this field
+    # instead of a HyperFormula re-execution is not formula-verified — that is
+    # the exact trust gap ("recompute...rather than trusting the file's
+    # cached value") this ticket exists to close.
+    cached_value: float | str | bool | None = None
+    number_format: str
+    # True when Excel's own number format is a percentage ("0.00%", "0%", ...).
+    # A native-percentage cell stores the fraction (0.285 for 28.5%), not the
+    # whole number — the SIM-17 bug this ticket folds in and fixes. scale.py's
+    # inline "%" detection can't see this: the "%" lives in the cell's
+    # formatting metadata, not in any printed text.
+    is_percentage: bool = False
+    # False when this cell is a non-anchor member of a merged range — openpyxl
+    # stores the value only on the anchor (top-left) cell, so a non-anchor
+    # cell's `value`/`formula` are always None. Consumers must resolve
+    # provenance to `merged_anchor_ref`, per the ticket: "resolve to the
+    # anchor cell so provenance points somewhere real."
+    is_merged_anchor: bool = True
+    # The anchor cell's ref for the merged range this cell belongs to; equals
+    # `cell_ref` when the cell is unmerged or is itself the anchor.
+    merged_anchor_ref: str
+
+
+class XlsxSheetRecord(BaseModel):
+    name: str
+    cells: list[XlsxCellRecord]
+    # openpyxl's sheet visibility: "visible", "hidden", or "veryHidden". A fact
+    # sourced from a non-visible sheet is materially different in diligence
+    # (adjustments/assumptions are often parked on hidden sheets), so the state
+    # is preserved on the record rather than silently flattened to visible.
+    sheet_state: Literal["visible", "hidden", "veryHidden"] = "visible"
+    # True if openpyxl found at least one embedded chart on this sheet. Flag
+    # chart_data_not_extracted downstream — the chart object itself is not
+    # read, though its underlying series data is usually already present in
+    # cells (and thus already extracted separately).
+    has_chart: bool = False
+
+
+class XlsxParseResult(BaseModel):
+    sheets: list[XlsxSheetRecord]
 
 
 class Span(BaseModel):
