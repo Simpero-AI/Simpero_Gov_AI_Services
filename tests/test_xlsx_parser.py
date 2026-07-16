@@ -17,11 +17,13 @@ from io import BytesIO
 
 import openpyxl
 import pytest
+from fastapi.testclient import TestClient
 from openpyxl.chart import BarChart, Reference
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.formula import DataTableFormula
 
 from services.parser.parser_service.errors import ParseError
+from services.parser.parser_service.main import app
 from services.parser.parser_service.schemas import XlsxCellRecord, XlsxSheetRecord
 from services.parser.parser_service.xlsx_parser import (
     _formula_text,
@@ -573,7 +575,7 @@ def test_oversized_uncompressed_workbook_is_rejected(monkeypatch: pytest.MonkeyP
     from services.parser.parser_service import config
 
     config.get_settings.cache_clear()
-    monkeypatch.setenv("PARSER_MAX_XLSX_UNCOMPRESSED_BYTES", "100")
+    monkeypatch.setenv("PARSER_MAX_OOXML_UNCOMPRESSED_BYTES", "100")
     config.get_settings.cache_clear()
     try:
 
@@ -649,3 +651,28 @@ def test_formula_cached_value_captured_but_never_used_as_value() -> None:
     assert cell.formula == "=B1*2"
     assert cell.value is None
     assert cell.cached_value == 999.0
+
+
+# --------------------------------------------------------------------------- #
+# /parse dispatch -- one endpoint, format detected from the bytes.
+# --------------------------------------------------------------------------- #
+
+client = TestClient(app)
+
+
+def test_parse_endpoint_dispatches_xlsx_by_content() -> None:
+    # XLSX and DOCX are both OOXML zips, so the sniffer must tell them apart by
+    # the part each format actually contains -- not by extension or header.
+    def build(wb):
+        ws = wb.active
+        ws.title = "Financials"
+        ws["B14"] = 8_100_000
+
+    response = client.post("/parse", content=_workbook_bytes(build))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "xlsx"
+    assert body["pages"] is None and body["paragraphs"] is None
+    assert body["sheets"][0]["name"] == "Financials"
+    assert response.headers["X-Content-SHA256"] == body["sha256"]

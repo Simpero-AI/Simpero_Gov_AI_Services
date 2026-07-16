@@ -2,7 +2,7 @@
 
 Some PDFs render a real space inside a number: the PTL CIM's income statement
 renders 3,817 as the literal string "3 ,817" (verified with PyMuPDF rawdict).
-Left alone, a quote of "3,817" fails exact-match and a correct fact is dropped.
+Left alone, a quote of "3,817" fails exact-match and a correct claim is dropped.
 
 Both the flat page index (DS-W3-1) and table cell values (DS-W3-2) must apply
 the *same* rule, so it lives here rather than being duplicated — tightening the

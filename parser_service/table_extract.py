@@ -80,7 +80,7 @@ def _build_table_record(table: TableItem, page_index: PageIndex | None) -> Table
     for cell in table.data.table_cells:
         # Split numeric tokens survive in Docling's raw cell text; the flat page
         # index normalizes them but the table structure does not. Normalize here,
-        # with the same rule, so downstream fact extraction never has to re-derive
+        # with the same rule, so downstream claim extraction never has to re-derive
         # it (DS-W3-2 finding F2), and so the reconstruction match uses the same
         # form as the page index.
         text_normalized = normalize_numeric_text(cell.text)

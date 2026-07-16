@@ -1,6 +1,6 @@
 """DS-W3-3 exact-span resolver — the citation trust boundary.
 
-A fact exists only if its quote resolves to an exact, unambiguous span in the
+A claim exists only if its quote resolves to an exact, unambiguous span in the
 source page. Matching is deterministic and whitespace-flexible: every
 non-whitespace character must match literally, while a run of whitespace in the
 quote matches any run of whitespace in the page text. That single relaxation is
@@ -9,14 +9,14 @@ source text that wraps with a newline (the flat page index carries a real '\\n'
 between visual lines), which an exact-substring match would silently drop.
 Found exactly once -> a real span + bbox; not found, or found more than once ->
 None. No "closest sentence", no fallback slice. Approximating a citation is
-worse than dropping the fact, because a wrong span looks correct and points at
+worse than dropping the claim, because a wrong span looks correct and points at
 unrelated text — the failure mode this ticket exists to remove.
 """
 
 import logging
 import re
 
-from .schemas import BBox, CharBox, PageIndex, Span
+from .schemas import BBox, CharBox, PageIndex, ParagraphIndex, ParagraphSpan, Span
 
 logger = logging.getLogger(__name__)
 
@@ -79,15 +79,21 @@ def _line_bboxes(chars: list[CharBox]) -> list[BBox]:
     return boxes
 
 
-def resolve(quote: str, page: PageIndex) -> Span | None:
-    """Resolve a verbatim quote to its exact span on a page, or None.
+def find_exact_span(quote: str, text: str, *, where: str) -> tuple[int, int] | None:
+    """The citation trust boundary itself, shared by every source format.
 
-    Fail-closed: an empty (or whitespace-only) quote, a quote not present, or a
-    quote present more than once all return None. Non-whitespace content must
-    match verbatim (the extractor emits verbatim quotes, never restatements) and
-    must already be normalized the same way page.text is — e.g. "3,817" resolves
-    only after DS-W3-1 has collapsed the raw "3 ,817". Only whitespace is matched
-    flexibly, so a quote that wraps a line still resolves.
+    Returns (char_start, char_end) for a quote that occurs exactly once in
+    `text`, else None. Fail-closed: an empty (or whitespace-only) quote, a quote
+    not present, or a quote present more than once all return None. Only
+    whitespace is flexible; every other character must match verbatim, and the
+    quote must already be normalized the same way `text` is — e.g. "3,817"
+    resolves only after DS-W3-1 has collapsed the raw "3 ,817".
+
+    Deliberately geometry-free and format-agnostic: a PDF page and a DOCX
+    paragraph are both just linear text, and they must never disagree about what
+    counts as a resolved citation. Two implementations of this rule would be two
+    trust boundaries that can drift — so there is exactly one. `where` is used
+    only to make the ambiguity log locatable.
     """
     if not quote.strip():
         return None
@@ -95,22 +101,35 @@ def resolve(quote: str, page: PageIndex) -> Span | None:
     pattern = _flexible_pattern(quote)
     # Lookahead so overlapping occurrences are still counted (e.g. "aa" in "aaa"
     # appears twice); group(1) captures the real span at each start position.
-    matches = [(m.start(1), m.end(1)) for m in re.finditer(rf"(?=({pattern}))", page.text)]
+    matches = [(m.start(1), m.end(1)) for m in re.finditer(rf"(?=({pattern}))", text)]
     if not matches:
         return None
 
     if len(matches) > 1:
         # Ambiguous: the quote resolves at more than one place, so which instance
-        # the fact refers to is unknowable. Fail closed and log it — these are
+        # the claim refers to is unknowable. Fail closed and log it — these are
         # recall gaps (a real value we refused to cite) that must stay visible.
         logger.warning(
-            "Ambiguous quote not resolved on page %s: %r appears more than once",
-            page.page,
+            "Ambiguous quote not resolved in %s: %r appears more than once",
+            where,
             quote,
         )
         return None
 
-    start, end = matches[0]
+    return matches[0]
+
+
+def resolve(quote: str, page: PageIndex) -> Span | None:
+    """Resolve a verbatim quote to its exact span on a PDF page, or None.
+
+    The PDF path: the shared exact-span rule plus the geometry the positioned
+    index carries, so the resulting Span always has a real bbox.
+    """
+    found = find_exact_span(quote, page.text, where=f"page {page.page}")
+    if found is None:
+        return None
+
+    start, end = found
     chars = page.char_map[start:end]
     return Span(
         char_start=start,
@@ -119,3 +138,20 @@ def resolve(quote: str, page: PageIndex) -> Span | None:
         bbox=union_bbox(chars),
         line_bboxes=_line_bboxes(chars),
     )
+
+
+def resolve_in_paragraph(quote: str, paragraph: ParagraphIndex) -> ParagraphSpan | None:
+    """Resolve a verbatim quote to its exact span in a DOCX paragraph, or None.
+
+    Identical trust rule to the PDF path — same `find_exact_span`, same
+    fail-closed semantics — with no geometry, because a Word file has no page
+    layout to report (Docling returns no prov for DOCX at all). The citation is
+    (paragraph, char_start, char_end), exactly what the claims contract's docx
+    location carries.
+    """
+    found = find_exact_span(quote, paragraph.text, where=f"paragraph {paragraph.paragraph}")
+    if found is None:
+        return None
+
+    start, end = found
+    return ParagraphSpan(char_start=start, char_end=end, paragraph=paragraph.paragraph)

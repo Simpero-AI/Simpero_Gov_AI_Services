@@ -31,10 +31,10 @@ on the TS side.
 import datetime
 import re
 from decimal import Decimal
+from hashlib import sha256
 from io import BytesIO
 from math import isfinite
 from typing import cast
-from zipfile import BadZipFile, ZipFile
 
 from openpyxl import load_workbook
 from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
@@ -42,6 +42,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from .config import get_settings
 from .errors import ParseError
+from .ooxml import reject_decompression_bomb
 from .scale import (
     ScaleResult,
     ValueType,
@@ -88,7 +89,7 @@ def _formula_text(value: object) -> str:
 # installed, which it is here transitively via docling) and TIME_TYPES
 # (date/time cells are completely ordinary in a financial model, e.g. a
 # period-end date). XlsxCellRecord.value is float | str | bool | None per the
-# facts contract's value shape, so anything outside that set must be
+# claims contract's value shape, so anything outside that set must be
 # converted rather than handed to Pydantic as-is -- otherwise a single date
 # cell anywhere in the workbook raises an unhandled ValidationError and takes
 # down the entire parse, not a clean fail-closed rejection of just that cell.
@@ -183,30 +184,23 @@ def _build_sheet_record(formula_sheet: Worksheet, cached_sheet: Worksheet) -> Xl
     )
 
 
-def _reject_decompression_bomb(xlsx_bytes: bytes, cap: int) -> None:
-    """Reject a workbook whose declared uncompressed size exceeds `cap` before
-    openpyxl loads it whole into memory -- a first-line guard against a
-    decompression bomb (kilobytes on disk, gigabytes expanded). Sizes come from
-    the zip's central directory, so no decompression happens here."""
-    try:
-        with ZipFile(BytesIO(xlsx_bytes)) as archive:
-            uncompressed = sum(info.file_size for info in archive.infolist())
-    except BadZipFile as exc:
-        raise ParseError("corrupt_xlsx", "Uploaded file is not a readable XLSX.", 400) from exc
-    if uncompressed > cap:
-        raise ParseError(
-            "xlsx_too_large",
-            f"Workbook expands to {uncompressed} bytes; maximum allowed is {cap}.",
-            413,
-        )
-
-
-def parse_xlsx_bytes(xlsx_bytes: bytes) -> XlsxParseResult:
+def parse_xlsx_bytes(xlsx_bytes: bytes, known_sha256s: set[str] | None = None) -> XlsxParseResult:
     if len(xlsx_bytes) == 0:
         raise ParseError("zero_byte_xlsx", "Uploaded XLSX is empty.", 400)
 
+    # Same content-hash identity + duplicate guard as the PDF and DOCX lanes:
+    # a re-uploaded workbook must be rejected identically whichever format it
+    # arrives in, not silently re-parsed because this lane forgot to check.
+    digest = sha256(xlsx_bytes).hexdigest()
+    if digest in (known_sha256s or set()):
+        raise ParseError(
+            "duplicate_xlsx",
+            "Uploaded XLSX matches an existing data source SHA-256 hash.",
+            409,
+        )
+
     settings = get_settings()
-    _reject_decompression_bomb(xlsx_bytes, settings.max_xlsx_uncompressed_bytes)
+    reject_decompression_bomb(xlsx_bytes, settings.max_ooxml_uncompressed_bytes, kind="XLSX")
 
     # Two loads are required: openpyxl's API returns either the formula text
     # or the file's cached result for a formula cell, never both at once. Any
@@ -233,7 +227,7 @@ def parse_xlsx_bytes(xlsx_bytes: bytes) -> XlsxParseResult:
     sheets = [
         _build_sheet_record(formula_wb[name], cached_wb[name]) for name in formula_wb.sheetnames
     ]
-    return XlsxParseResult(sheets=sheets)
+    return XlsxParseResult(sha256=digest, sheets=sheets)
 
 
 def _cell_raw(cell: XlsxCellRecord) -> str:

@@ -48,7 +48,7 @@ class TableElement(BaseModel):
     ragged_table_rows: bool
     # Scale phrase found in the table's own header row, if any (DS-W3-4's
     # phrase grammar, reused via scale.py's public scale_phrase_in_text) --
-    # captured once here so DS-7's per-fact scale resolution doesn't have to
+    # captured once here so DS-7's per-claim scale resolution doesn't have to
     # re-scan this table's header for every cell.
     scale_multiplier: float | None = None
     scale_unit: str | None = None

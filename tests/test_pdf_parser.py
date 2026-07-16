@@ -152,7 +152,14 @@ def test_parse_endpoint_accepts_pdf_bytes() -> None:
     assert response.status_code == 200
     assert response.headers["X-Content-SHA256"] == sha256(pdf_bytes).hexdigest()
 
-    pages = response.json()
+    body = response.json()
+    # The response says which lane read the document; only that lane's index is
+    # populated (a PDF has pages; sheets/paragraphs stay null).
+    assert body["kind"] == "pdf"
+    assert body["sha256"] == sha256(pdf_bytes).hexdigest()
+    assert body["sheets"] is None and body["paragraphs"] is None
+
+    pages = body["pages"]
     assert len(pages) == 1
     assert "The company serves enterprise customers." in pages[0]["text"]
     assert len(pages[0]["text"]) == len(pages[0]["char_map"])
@@ -169,10 +176,25 @@ def test_zero_byte_pdf_is_rejected() -> None:
     assert response.json()["detail"]["code"] == "zero_byte_pdf"
 
 
-def test_corrupt_pdf_is_rejected() -> None:
+def test_unrecognized_bytes_are_rejected_as_unsupported_format() -> None:
+    # Format is detected from the bytes, never from the Content-Type header --
+    # so a client that lies about the type still gets an honest answer.
     response = client.post(
         "/parse",
         content=b"not a pdf",
+        headers={"Content-Type": "application/pdf"},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["detail"]["code"] == "unsupported_format"
+
+
+def test_corrupt_pdf_is_rejected() -> None:
+    # Genuinely a PDF (correct magic bytes) but broken: this reaches the PDF
+    # lane and fails there, rather than being turned away by the sniffer.
+    response = client.post(
+        "/parse",
+        content=b"%PDF-1.7\ntruncated garbage, no xref, no trailer",
         headers={"Content-Type": "application/pdf"},
     )
 

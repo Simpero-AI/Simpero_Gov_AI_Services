@@ -1,6 +1,6 @@
-"""DS-W3-4 scale capture -- determines a numeric fact's scale multiplier and
-records HOW it was determined (scale_source), per the C3 facts contract
-(contracts/facts.schema.json).
+"""DS-W3-4 scale capture -- determines a numeric claim's scale multiplier and
+records HOW it was determined (scale_source), per the C3 claims contract
+(contracts/claims.schema.json).
 
 A financial document states scale in a header, not on the value: PTL PDF-page
 11 prints Revenue as "$15,295" under a "CAD (in Thousands)" header several
@@ -13,7 +13,7 @@ where it came from, and never guesses a currency it did not actually read.
 Only a *currency* figure's magnitude is declared by a "(in thousands)"
 header. A percent, ratio, count, or date is read at face value -- a headcount
 of 1,200 on a "CAD (in Thousands)" income statement is 1,200 people, not
-1,200,000. determine_scale therefore takes the fact's value_type and applies
+1,200,000. determine_scale therefore takes the claim's value_type and applies
 the header lookup to currency alone; every other type self-scales at a known
 1.0. Forcing a non-currency value through the header lookup is exactly the
 silent 1000x error this module exists to prevent.
@@ -37,18 +37,18 @@ from .schemas import PageIndex, TableCellRecord, TableRecord
 
 ScaleSource = Literal["explicit_in_value", "column_header", "page_header", "assumed_1x"]
 
-# Mirrors the value.value_type enum in contracts/facts.schema.json. Kept here
+# Mirrors the value.value_type enum in contracts/claims.schema.json. Kept here
 # with its sole current consumer; promote to schemas.py once the extractor and
-# the fact emitter share it.
+# the claim emitter share it.
 ValueType = Literal["currency", "percent", "count", "ratio", "date", "text"]
 
 
 class ScaleResult(BaseModel):
     """raw/normalized/unit/scale_multiplier/scale_source mirror the value
-    JSONB keys in the C3 facts contract. scale_context (the exact phrase that
+    JSONB keys in the C3 claims contract. scale_context (the exact phrase that
     justified a column_header/page_header multiplier) and flags are not wire
     contract fields themselves -- DS-7 decides where that provenance detail is
-    surfaced (e.g. the structured flag log / the fact's flags array)."""
+    surfaced (e.g. the structured flag log / the claim's flags array)."""
 
     raw: str
     normalized: float
@@ -312,7 +312,7 @@ def determine_scale(
     table: TableRecord | None = None,
     cell: TableCellRecord | None = None,
 ) -> ScaleResult:
-    """Resolve one numeric fact's scale, per the module's resolution order.
+    """Resolve one numeric claim's scale, per the module's resolution order.
 
     `value_type` (the C3 contract's value.value_type) gates the header lookup:
     only "currency" is scaled by a column/page "(in thousands)" header; every

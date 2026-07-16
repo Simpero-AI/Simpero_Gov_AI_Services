@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simpero.ai/contracts/claims.schema.json",
+  "title": "Claim",
+  "description": "The C3 seam contract: one claim row as emitted by the Python parse service across the JSON boundary to the backend. The consuming side validates against this SAME file. A change here must be made on both sides together, or the contract job fails.\n\nA claim is an assertion pending verification, not a verified truth (hence claims, not facts). Nothing is emitted without a citation attached at write time, and provenance is all-or-nothing: a claim resolves to an exact span, or it is emitted with status=missing. A partial or approximate citation is never written.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entity", "attribute", "value", "status", "location"],
+  "properties": {
+    "id": { "type": "string" },
+    "deal_id": { "type": "string" },
+    "session_id": { "type": "string", "description": "Which pipeline run produced it." },
+    "org_id": { "type": "string", "description": "Tenant; RLS scopes on this." },
+    "data_source_id": {
+      "type": ["string", "null"],
+      "description": "FK to data_sources (document identity + versioning). Assigned by the ingesting backend; the parse service cites the file by name in location.file."
+    },
+
+    "entity": {
+      "type": "string",
+      "description": "What the claim is about (company, segment, etc.)."
+    },
+    "attribute": {
+      "type": "string",
+      "description": "The field, e.g. revenueLatestUsd."
+    },
+
+    "period_year": {
+      "type": ["integer", "null"],
+      "description": "Fiscal year the claim applies to, when the source states one."
+    },
+    "period_kind": {
+      "type": ["string", "null"],
+      "enum": ["A", "E", "P", null],
+      "description": "A=Actual, E=Estimate, P=Projected. Null when the source does not qualify the period."
+    },
+
+    "value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "normalized", "unit", "value_type"],
+      "description": "Unit-normalized at write time; raw is never overwritten. The canonical number everything compares against is `normalized`.",
+      "properties": {
+        "raw": {
+          "type": "string",
+          "description": "Verbatim as printed, e.g. \"$15,295\"."
+        },
+        "normalized": {
+          "type": ["number", "null"],
+          "description": "After scale + unit applied, e.g. 15295000. null only when value_type is text."
+        },
+        "unit": {
+          "type": ["string", "null"],
+          "description": "e.g. USD, CAD, bp, ratio."
+        },
+        "scale_multiplier": {
+          "type": ["number", "null"],
+          "description": "What took raw -> normalized, e.g. 1000."
+        },
+        "scale_source": {
+          "type": "string",
+          "enum": ["explicit_in_value", "column_header", "page_header", "assumed_1x"],
+          "description": "HOW scale was determined. assumed_1x must be distinguishable from a known 1x, and raises the scale_assumed flag."
+        },
+        "value_type": {
+          "type": "string",
+          "enum": ["currency", "percent", "count", "ratio", "date", "text"],
+          "description": "Drives tolerance selection at comparison time (Verify / golden-set diff). Only currency is scaled by a column/page header."
+        }
+      }
+    },
+
+    "location": {
+      "description": "Typed union by kind. PDF => page/char span; XLSX => sheet/cell_ref; DOCX => paragraph. One claims spine stores all three: the format-specific columns are null per row. Location is always exact, zero tolerance.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "page", "char_start", "char_end"],
+          "properties": {
+            "kind": { "const": "pdf" },
+            "file": {
+              "type": "string",
+              "description": "Source filename — debug/human-readable only. The canonical document identity is the top-level data_source_id; the claims table has no file column."
+            },
+            "document_id": { "type": "string" },
+            "document_name": { "type": "string" },
+            "document_version": { "type": ["integer", "string"] },
+            "ingested_at": { "type": "string", "format": "date-time" },
+            "document_date": { "type": ["string", "null"], "format": "date" },
+            "page": { "type": "integer", "description": "PDF page index, not printed footer." },
+            "char_start": { "type": "integer" },
+            "char_end": { "type": "integer" },
+            "bbox": {
+              "type": "array",
+              "description": "Docling's native coordinate system, coord_origin preserved verbatim — no highlight-UI decision is smuggled in here.",
+              "items": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": { "type": "number" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "sheet", "cell_ref"],
+          "properties": {
+            "kind": { "const": "xlsx" },
+            "file": {
+              "type": "string",
+              "description": "Source filename — debug only; canonical identity is data_source_id."
+            },
+            "document_id": { "type": "string" },
+            "document_name": { "type": "string" },
+            "document_version": { "type": ["integer", "string"] },
+            "ingested_at": { "type": "string", "format": "date-time" },
+            "document_date": { "type": ["string", "null"], "format": "date" },
+            "sheet": { "type": "string" },
+            "cell_ref": {
+              "type": "string",
+              "description": "e.g. B14. A merged cell cites its anchor (top-left) cell; no merge range is persisted."
+            },
+            "named_range": { "type": ["string", "null"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "paragraph", "char_start", "char_end"],
+          "properties": {
+            "kind": { "const": "docx" },
+            "file": {
+              "type": "string",
+              "description": "Source filename — debug only; canonical identity is data_source_id."
+            },
+            "document_id": { "type": "string" },
+            "document_name": { "type": "string" },
+            "document_version": { "type": ["integer", "string"] },
+            "ingested_at": { "type": "string", "format": "date-time" },
+            "document_date": { "type": ["string", "null"], "format": "date" },
+            "paragraph": {
+              "type": "integer",
+              "description": "Paragraph index; maps to the claims table's DOCX-only `paragraph` column."
+            },
+            "char_start": {
+              "type": "integer",
+              "description": "DOCX is a linear text stream, so a claim cites an exact span exactly like PDF — a paragraph index alone is not a citation. Required, per all-or-nothing provenance."
+            },
+            "char_end": { "type": "integer" },
+            "table_id": { "type": ["string", "null"] },
+            "row": { "type": ["integer", "null"] },
+            "col": { "type": ["integer", "null"] }
+          }
+        }
+      ]
+    },
+
+    "status": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "cited",
+        "rejected",
+        "missing",
+        "conflicted",
+        "inconclusive",
+        "partially_verified",
+        "verified"
+      ],
+      "description": "How much trust the claim has earned. The parse service emits only the reachable subset: `proposed` (extracted, citation attached, not yet checked — PDF/DOCX), `cited` (XLSX, where a byte-exact cell read or a re-executed formula leaves nothing to check), or `missing` (no citation exists in the source). Verify moves proposed -> cited|rejected; the corroboration pass moves cited -> conflicted|inconclusive|partially_verified|verified. An extractor must never assert cited for text it has not had checked."
+    },
+
+    "verification_method": {
+      "type": ["string", "null"],
+      "enum": ["exact_span", "formula_reexecution", "direct_read", "reranker", "human_review", null],
+      "description": "HOW the claim earned citation-level trust. Null before anything has been checked (status=proposed|rejected|missing); required once status is cited or later. direct_read = a literal XLSX cell; formula_reexecution = a workbook formula independently recomputed."
+    },
+
+    "section": { "type": ["string", "null"] },
+
+    "chunk_id": {
+      "type": ["string", "null"],
+      "description": "The chunk the quote was read from. Agent-self-reported and validated by substring match within that chunk only. Set together with char_start/char_end, or not at all."
+    },
+
+    "table_group_id": {
+      "type": ["string", "null"],
+      "description": "Groups fragments of one logical table split across pages."
+    },
+    "fragment_order": {
+      "type": ["integer", "null"],
+      "description": "Order of this fragment within table_group_id."
+    },
+
+    "flags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "ragged_table_rows",
+          "chart_data_not_extracted",
+          "scale_assumed",
+          "quote_unresolved",
+          "ambiguous_location",
+          "ambiguous_region_bounds",
+          "ambiguous_unit",
+          "table_touches_page_edge",
+          "zero_text_page",
+          "empty_section",
+          "formula_mismatch",
+          "external_reference_unresolved"
+        ]
+      }
+    }
+  },
+
+  "allOf": [
+    {
+      "$comment": "Mirrors the claims-table CHECK: verification_method records how trust was earned, so it must be present once a claim has actually been checked.",
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["cited", "conflicted", "inconclusive", "partially_verified", "verified"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["verification_method"],
+        "properties": { "verification_method": { "type": "string" } }
+      }
+    }
+  ]
+}

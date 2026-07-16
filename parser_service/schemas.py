@@ -26,6 +26,24 @@ class PageIndex(BaseModel):
     char_map: list[CharBox]
 
 
+class ParagraphIndex(BaseModel):
+    """The DOCX analog of PageIndex: one paragraph of a flow document.
+
+    A Word file has no page layout, so there is deliberately no char_map and no
+    geometry here — Docling reports no prov at all for DOCX text items, because
+    there is none to report. The exact citation for DOCX is therefore
+    (paragraph, char_start, char_end), which is precisely what the claims
+    contract's docx location carries. Same trust bar as PDF, different shape:
+    a claim still resolves to an exact span or it is not citable.
+    """
+
+    paragraph: int = Field(ge=0, description="0-based index in document body order.")
+    text: str
+    # Docling's own label for the item ("section_header", "text", ...). Advisory
+    # context for the extractor; never a citation.
+    label: str | None = None
+
+
 class TableCellRecord(BaseModel):
     row: int = Field(ge=0)
     col: int = Field(ge=0)
@@ -36,7 +54,7 @@ class TableCellRecord(BaseModel):
     # source for provenance/debugging.
     text: str
     # `text` with split numeric tokens collapsed ("3 ,817" -> "3,817"), using
-    # the same rule as the flat page index (normalize.py). Parse numeric facts
+    # the same rule as the flat page index (normalize.py). Parse numeric claims
     # from THIS field, not `text` — see DS-W3-2 finding F2.
     text_normalized: str
     # Docling's own flag. ADVISORY ONLY — on tables with unlabeled columns it
@@ -99,7 +117,7 @@ class XlsxCellRecord(BaseModel):
     row: int = Field(ge=1)
     col: int = Field(ge=1)
     # The literal value Excel stores for this cell. None for a formula cell —
-    # the file's cached formula result is never trusted as the fact's value
+    # the file's cached formula result is never trusted as the claim's value
     # (the exact anti-pattern DS-W3-5 replaces); see `formula`/`cached_value`.
     value: float | str | bool | None
     # The formula text (e.g. "=B2+B3"), when this cell computes rather than
@@ -108,7 +126,7 @@ class XlsxCellRecord(BaseModel):
     # only surfaces the formula itself, never evaluates it.
     formula: str | None = None
     # The workbook's own last-cached result for a formula cell, kept only for
-    # debugging/comparison. NEVER authoritative: a fact built from this field
+    # debugging/comparison. NEVER authoritative: a claim built from this field
     # instead of a HyperFormula re-execution is not formula-verified — that is
     # the exact trust gap ("recompute...rather than trusting the file's
     # cached value") this ticket exists to close.
@@ -134,7 +152,7 @@ class XlsxCellRecord(BaseModel):
 class XlsxSheetRecord(BaseModel):
     name: str
     cells: list[XlsxCellRecord]
-    # openpyxl's sheet visibility: "visible", "hidden", or "veryHidden". A fact
+    # openpyxl's sheet visibility: "visible", "hidden", or "veryHidden". A claim
     # sourced from a non-visible sheet is materially different in diligence
     # (adjustments/assumptions are often parked on hidden sheets), so the state
     # is preserved on the record rather than silently flattened to visible.
@@ -147,6 +165,7 @@ class XlsxSheetRecord(BaseModel):
 
 
 class XlsxParseResult(BaseModel):
+    sha256: str
     sheets: list[XlsxSheetRecord]
 
 
@@ -158,7 +177,7 @@ class Span(BaseModel):
     page: int = Field(ge=1)
     # Union of every matched character's box. On a quote that wraps across
     # lines this is a coarse envelope that also covers text between the lines —
-    # use it only to locate the fact on the page, not to draw the highlight.
+    # use it only to locate the claim on the page, not to draw the highlight.
     bbox: BBox
     # One box per visual line the quote covers (the matched region split on the
     # newline characters the flat page index inserts between lines).
@@ -166,3 +185,22 @@ class Span(BaseModel):
     # highlight from; a single union box would cover unrelated text on any
     # quote that wraps.
     line_bboxes: list[BBox]
+
+
+class ParagraphSpan(BaseModel):
+    """The DOCX analog of Span: an exact citation with no geometry.
+
+    Deliberately a separate type rather than a Span with an optional bbox. A PDF
+    Span *guarantees* geometry; weakening that to satisfy DOCX would force every
+    PDF consumer to None-check a box that is always present, and would let a
+    geometry-free span leak into a code path that assumes one. The formats differ
+    legitimately — the claims contract already models them as separate location
+    kinds — so the types differ too. What they share is the matching rule, not
+    the shape: both resolve through the same exact, unambiguous, fail-closed core.
+    """
+
+    # Character offsets into ParagraphIndex.text; char_end is exclusive, so
+    # paragraph.text[char_start:char_end] == the resolved quote.
+    char_start: int = Field(ge=0)
+    char_end: int = Field(ge=0)
+    paragraph: int = Field(ge=0)
