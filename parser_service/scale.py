@@ -121,6 +121,15 @@ def _parse_number(text: str) -> float | None:
     return _signed_number(match)
 
 
+def parse_bare_number(text: str) -> float | None:
+    """The first plain number in `text` (commas stripped, accounting-negative
+    "(...)" honored), or None. Public wrapper over the same fallback numeric
+    parse this module uses once `normalize_financial_token` finds nothing --
+    reused by the DS-W3-5 XLSX path for cells that hold a numeric string with
+    no inline scale marker."""
+    return _parse_number(text)
+
+
 def normalize_financial_token(text: str) -> tuple[float, float, str | None] | None:
     """Port of the MVP's normalizeFinancialTokens, narrowed to the inline case
     this ticket owns: given a value token that states its own scale -- a

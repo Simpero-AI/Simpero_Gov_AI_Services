@@ -19,6 +19,7 @@ from pypdf.errors import PdfReadError
 
 from .config import get_settings
 from .document_cache import get_document_cache
+from .errors import ParseError
 from .normalize import kept_indices
 from .schemas import CharBox, PageIndex
 
@@ -27,14 +28,6 @@ logger = logging.getLogger(__name__)
 _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
 BOILERPLATE_ZONE_LINES = 5
 MIN_BOILERPLATE_REPEAT_PAGES = 3
-
-
-class ParseError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 422) -> None:
-        self.code = code
-        self.message = message
-        self.status_code = status_code
-        super().__init__(message)
 
 
 @dataclass(frozen=True)
