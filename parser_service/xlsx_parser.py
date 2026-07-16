@@ -29,13 +29,14 @@ on the TS side.
 """
 
 import datetime
+import re
 from decimal import Decimal
 from io import BytesIO
+from math import isfinite
 from typing import cast
-from zipfile import BadZipFile
+from zipfile import BadZipFile, ZipFile
 
 from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -91,13 +92,26 @@ def _formula_text(value: object) -> str:
 # converted rather than handed to Pydantic as-is -- otherwise a single date
 # cell anywhere in the workbook raises an unhandled ValidationError and takes
 # down the entire parse, not a clean fail-closed rejection of just that cell.
+# A float cannot represent an integer with magnitude beyond 2^53 without
+# silently rounding it; such a value is kept verbatim as a string rather than
+# lied about, per the exact-or-drop invariant.
+_MAX_EXACT_INT = 2**53
+
+
 def _normalize_value(value: object) -> float | str | bool | None:
     if value is None or isinstance(value, str | bool | float):
         return value
     if isinstance(value, int):
-        return float(value)
+        return float(value) if abs(value) <= _MAX_EXACT_INT else str(value)
     if isinstance(value, Decimal):
-        return float(value)
+        # A huge/NaN/infinite Decimal cannot become a finite float; keep it as a
+        # string rather than raising OverflowError (which would abort the whole
+        # workbook parse) or fabricating inf/nan.
+        try:
+            as_float = float(value)
+        except (ValueError, OverflowError):
+            return str(value)
+        return as_float if isfinite(as_float) else str(value)
     if isinstance(value, datetime.timedelta):
         return str(value)
     if isinstance(value, datetime.datetime | datetime.date | datetime.time):
@@ -107,10 +121,22 @@ def _normalize_value(value: object) -> float | str | bool | None:
     try:
         # Covers numpy scalar types and anything else numeric-like without
         # importing numpy directly (it's not a declared dependency of this
-        # service -- only present transitively).
+        # service -- only present transitively). OverflowError included so one
+        # pathological cell can never abort the parse.
         return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return str(value)
+
+
+def _is_percentage_format(number_format: str) -> bool:
+    """True when Excel's number format actually applies a percentage -- an
+    unquoted, unescaped '%'. A '%' inside a quoted literal ("\"up 10%\"") or
+    escaped ('\\%') is display text, not the percent operator, and must not
+    trigger the fraction->percent conversion (a plain currency cell whose label
+    happens to contain '%' is not a percentage)."""
+    without_literals = re.sub(r'"[^"]*"', "", number_format)
+    without_escapes = re.sub(r"\\.", "", without_literals)
+    return "%" in without_escapes
 
 
 def _build_sheet_record(formula_sheet: Worksheet, cached_sheet: Worksheet) -> XlsxSheetRecord:
@@ -141,7 +167,7 @@ def _build_sheet_record(formula_sheet: Worksheet, cached_sheet: Worksheet) -> Xl
                     formula=_formula_text(cell.value) if is_formula else None,
                     cached_value=_normalize_value(cached_cell.value) if is_formula else None,
                     number_format=cell.number_format,
-                    is_percentage="%" in cell.number_format,
+                    is_percentage=_is_percentage_format(cell.number_format),
                     is_merged_anchor=not is_merged_member or anchors[coord] == cell.coordinate,
                     merged_anchor_ref=anchors.get(coord, cell.coordinate),
                 )
@@ -150,8 +176,29 @@ def _build_sheet_record(formula_sheet: Worksheet, cached_sheet: Worksheet) -> Xl
     return XlsxSheetRecord(
         name=formula_sheet.title,
         cells=cells,
-        has_chart=len(cast(list[object], formula_sheet._charts)) > 0,  # pyright: ignore[reportAttributeAccessIssue]
+        sheet_state=formula_sheet.sheet_state,
+        # _charts is private but openpyxl exposes no public accessor; getattr
+        # keeps a future rename from crashing the parse (defaults to "none").
+        has_chart=len(getattr(formula_sheet, "_charts", ())) > 0,
     )
+
+
+def _reject_decompression_bomb(xlsx_bytes: bytes, cap: int) -> None:
+    """Reject a workbook whose declared uncompressed size exceeds `cap` before
+    openpyxl loads it whole into memory -- a first-line guard against a
+    decompression bomb (kilobytes on disk, gigabytes expanded). Sizes come from
+    the zip's central directory, so no decompression happens here."""
+    try:
+        with ZipFile(BytesIO(xlsx_bytes)) as archive:
+            uncompressed = sum(info.file_size for info in archive.infolist())
+    except BadZipFile as exc:
+        raise ParseError("corrupt_xlsx", "Uploaded file is not a readable XLSX.", 400) from exc
+    if uncompressed > cap:
+        raise ParseError(
+            "xlsx_too_large",
+            f"Workbook expands to {uncompressed} bytes; maximum allowed is {cap}.",
+            413,
+        )
 
 
 def parse_xlsx_bytes(xlsx_bytes: bytes) -> XlsxParseResult:
@@ -159,13 +206,20 @@ def parse_xlsx_bytes(xlsx_bytes: bytes) -> XlsxParseResult:
         raise ParseError("zero_byte_xlsx", "Uploaded XLSX is empty.", 400)
 
     settings = get_settings()
+    _reject_decompression_bomb(xlsx_bytes, settings.max_xlsx_uncompressed_bytes)
 
     # Two loads are required: openpyxl's API returns either the formula text
-    # or the file's cached result for a formula cell, never both at once.
+    # or the file's cached result for a formula cell, never both at once. Any
+    # failure reading these untrusted bytes -- a malformed inner XML part, a
+    # truncated archive, an unsupported feature -- is a fail-closed 400, never
+    # an unhandled 500: openpyxl raises a wide, undocumented set of exception
+    # types on hostile input, so the boundary is caught broadly on purpose.
     try:
         formula_wb = load_workbook(BytesIO(xlsx_bytes), data_only=False)
         cached_wb = load_workbook(BytesIO(xlsx_bytes), data_only=True)
-    except (InvalidFileException, BadZipFile, KeyError) as exc:
+    except ParseError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- untrusted-input boundary, fail closed
         raise ParseError("corrupt_xlsx", "Uploaded file is not a readable XLSX.", 400) from exc
 
     if len(formula_wb.sheetnames) > settings.max_sheets:
@@ -183,7 +237,15 @@ def parse_xlsx_bytes(xlsx_bytes: bytes) -> XlsxParseResult:
 
 
 def _cell_raw(cell: XlsxCellRecord) -> str:
-    return "" if cell.value is None else str(cell.value)
+    if cell.value is None:
+        return ""
+    # A whole-number float prints as "15295", not "15295.0": openpyxl reads
+    # every numeric cell as a float, so without this the raw provenance string
+    # carries a spurious decimal the source never showed. (Full number-format
+    # rendering -- "$15,295", "28.5%" -- is a separate, larger concern.)
+    if isinstance(cell.value, float) and cell.value.is_integer():
+        return str(int(cell.value))
+    return str(cell.value)
 
 
 def _header_text(cell: XlsxCellRecord, by_ref: dict[str, XlsxCellRecord]) -> str | None:

@@ -43,6 +43,26 @@ def _cells_by_ref(sheets, name: str) -> dict[str, XlsxCellRecord]:
     return {c.cell_ref: c for c in sheet.cells}
 
 
+def _inject_cached_value(xlsx_bytes: bytes, formula: str, cached: str) -> bytes:
+    """Add a cached <v> result next to a formula cell in the sheet XML. A
+    fresh openpyxl-authored workbook stores no cached formula results (openpyxl
+    never computes), so this is the only way to exercise the cached_value path
+    a real Excel-saved file would have."""
+    import zipfile
+
+    out = BytesIO()
+    with zipfile.ZipFile(BytesIO(xlsx_bytes)) as zin, zipfile.ZipFile(out, "w") as zout:
+        for item in zin.namelist():
+            data = zin.read(item)
+            if item.startswith("xl/worksheets/") and item.endswith(".xml"):
+                text = data.decode("utf-8").replace(
+                    f"<f>{formula}</f>", f"<f>{formula}</f><v>{cached}</v>"
+                )
+                data = text.encode("utf-8")
+            zout.writestr(item, data)
+    return out.getvalue()
+
+
 # --------------------------------------------------------------------------- #
 # parse_xlsx_bytes -- native read, end to end on synthetic workbooks.
 # --------------------------------------------------------------------------- #
@@ -510,3 +530,122 @@ def test_text_value_type_fails_closed_never_fabricates_a_number() -> None:
 
     with pytest.raises(ValueError):
         determine_xlsx_scale(sheet, label, value_type="text")
+
+
+# --------------------------------------------------------------------------- #
+# Robustness / security hardening (DS-W3-5 review findings).
+# --------------------------------------------------------------------------- #
+
+
+def test_large_integer_beyond_float_precision_is_kept_exact() -> None:
+    # float() cannot hold an integer past 2^53 without silently rounding it
+    # (2^53 + 1 rounds down to 2^53). When openpyxl reads such a value from a
+    # real Excel file it hands over an exact Python int; _normalize_value keeps
+    # it verbatim as a string rather than lying -- exact-or-drop. (This is unit
+    # tested directly: openpyxl's own writer floats big ints, so a synthetic
+    # round-trip can't construct the input.)
+    from services.parser.parser_service.xlsx_parser import _normalize_value
+
+    big = 2**53 + 1
+    assert float(big) != big  # sanity: really beyond float precision
+    assert _normalize_value(big) == str(big)
+    # An in-range int still normalizes to float, unchanged.
+    assert _normalize_value(8_100_000) == 8_100_000.0
+
+
+def test_quoted_percent_literal_is_not_treated_as_percentage() -> None:
+    # A "%" that is display text (a quoted literal) must NOT flag the cell as a
+    # percentage -- otherwise a plain number gets mis-scaled to a percent.
+    def build(wb):
+        ws = wb.active
+        ws.title = "S"
+        ws["A1"] = 5
+        ws["A1"].number_format = '0"%"'  # literal % as text, not the operator
+        ws["A2"] = 0.05
+        ws["A2"].number_format = "0.00%"  # a real percentage
+
+    cells = _cells_by_ref(parse_xlsx_bytes(_workbook_bytes(build)).sheets, "S")
+    assert cells["A1"].is_percentage is False
+    assert cells["A2"].is_percentage is True
+
+
+def test_oversized_uncompressed_workbook_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.parser.parser_service import config
+
+    config.get_settings.cache_clear()
+    monkeypatch.setenv("PARSER_MAX_XLSX_UNCOMPRESSED_BYTES", "100")
+    config.get_settings.cache_clear()
+    try:
+
+        def build(wb):
+            wb.active["A1"] = "any workbook uncompresses well past 100 bytes"
+
+        with pytest.raises(ParseError) as exc_info:
+            parse_xlsx_bytes(_workbook_bytes(build))
+        assert exc_info.value.code == "xlsx_too_large"
+        assert exc_info.value.status_code == 413
+    finally:
+        config.get_settings.cache_clear()
+
+
+def test_valid_zip_that_is_not_a_workbook_fails_closed() -> None:
+    # A well-formed zip that is not an XLSX must become a clean 400, not an
+    # unhandled 500 -- the untrusted-input boundary catches broadly.
+    import zipfile
+
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("hello.txt", "not a workbook at all")
+
+    with pytest.raises(ParseError) as exc_info:
+        parse_xlsx_bytes(buf.getvalue())
+    assert exc_info.value.code == "corrupt_xlsx"
+    assert exc_info.value.status_code == 400
+
+
+def test_hidden_sheet_state_is_preserved() -> None:
+    # A hidden sheet is read (nothing is dropped) but flagged as hidden --
+    # a fact from a hidden "adjustments" sheet must stay distinguishable.
+    def build(wb):
+        ws = wb.active
+        ws.title = "Visible"
+        ws["A1"] = 1
+        hidden = wb.create_sheet("Adjustments")
+        hidden["A1"] = 2
+        hidden.sheet_state = "hidden"
+
+    by_name = {s.name: s for s in parse_xlsx_bytes(_workbook_bytes(build)).sheets}
+    assert by_name["Visible"].sheet_state == "visible"
+    assert by_name["Adjustments"].sheet_state == "hidden"
+
+
+def test_whole_number_raw_has_no_spurious_decimal() -> None:
+    # openpyxl reads 15295 as a float; the raw provenance string must read
+    # "15295", not "15295.0" (a decimal the source never displayed).
+    def build(wb):
+        ws = wb.active
+        ws.title = "S"
+        ws["A1"] = 15295
+
+    result = parse_xlsx_bytes(_workbook_bytes(build))
+    sheet = next(s for s in result.sheets if s.name == "S")
+    cell = _cells_by_ref(result.sheets, "S")["A1"]
+    scaled = determine_xlsx_scale(sheet, cell, value_type="currency")
+    assert scaled.raw == "15295"
+
+
+def test_formula_cached_value_captured_but_never_used_as_value() -> None:
+    # With a real cached result present (injected), the formula is still what
+    # is surfaced, value stays None, and the cached result is captured
+    # separately -- never silently standing in for a HyperFormula re-execution.
+    def build(wb):
+        ws = wb.active
+        ws.title = "Model"
+        ws["B1"] = 10
+        ws["B2"] = "=B1*2"
+
+    xlsx = _inject_cached_value(_workbook_bytes(build), "B1*2", "999")
+    cell = _cells_by_ref(parse_xlsx_bytes(xlsx).sheets, "Model")["B2"]
+    assert cell.formula == "=B1*2"
+    assert cell.value is None
+    assert cell.cached_value == 999.0

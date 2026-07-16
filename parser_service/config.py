@@ -19,6 +19,13 @@ class ParserSettings(BaseSettings):
     # scenario/sensitivity sheets) turning into an unbounded parse.
     max_sheets: int = 50
 
+    # Upper bound on an XLSX's total UNCOMPRESSED size (DS-W3-5). An .xlsx is a
+    # zip of XML; openpyxl loads it whole into memory, so a decompression bomb
+    # (a few KB on disk expanding to gigabytes) would OOM the worker. Checked
+    # from the zip directory's declared sizes before any parse. 500 MB clears
+    # any real financial model with wide headroom.
+    max_xlsx_uncompressed_bytes: int = 500_000_000
+
     # Object storage (DigitalOcean Spaces, S3-compatible) for the raw
     # DoclingDocument cache that DS-W3-2/DS-W3-6 consume. Spaces encrypts at rest
     # at the bucket level, so confidential content is never persisted unencrypted

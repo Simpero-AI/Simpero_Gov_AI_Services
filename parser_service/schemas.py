@@ -134,6 +134,11 @@ class XlsxCellRecord(BaseModel):
 class XlsxSheetRecord(BaseModel):
     name: str
     cells: list[XlsxCellRecord]
+    # openpyxl's sheet visibility: "visible", "hidden", or "veryHidden". A fact
+    # sourced from a non-visible sheet is materially different in diligence
+    # (adjustments/assumptions are often parked on hidden sheets), so the state
+    # is preserved on the record rather than silently flattened to visible.
+    sheet_state: Literal["visible", "hidden", "veryHidden"] = "visible"
     # True if openpyxl found at least one embedded chart on this sheet. Flag
     # chart_data_not_extracted downstream — the chart object itself is not
     # read, though its underlying series data is usually already present in
