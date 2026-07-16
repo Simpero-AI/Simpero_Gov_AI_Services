@@ -15,9 +15,13 @@ the ticket's Dependencies note) with two jobs:
    points somewhere real."
 
 2. `determine_xlsx_scale` -- "Scale headers -- same capture as DS-4" for one
-   literal-valued numeric cell, reusing scale.py's phrase grammar. Also fixes
-   SIM-17: a native-percentage cell stores a decimal (0.285 for 28.5%), and
-   the scale factor to reach basis points is 10,000, not 100.
+   cell, reusing scale.py's phrase grammar AND its value_type gate: only a
+   currency value is scaled by a column/sheet "(in thousands)" header; a
+   percent/ratio/count/date is read at face value, so a headcount or ratio is
+   never silently 1000x-ed. A native-percentage cell stores a decimal (0.285
+   for 28.5%, SIM-17); it normalizes to face-value "28.5" with unit "%", the
+   same representation the PDF path emits, so the figure is identical whichever
+   lane read it.
 
 Formula cells are out of scope for determine_xlsx_scale -- a formula's true
 value (and thus its scale) is only knowable after HyperFormula re-executes it
@@ -37,7 +41,13 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from .config import get_settings
 from .errors import ParseError
-from .scale import ScaleResult, normalize_financial_token, parse_bare_number, scale_phrase_in_text
+from .scale import (
+    ScaleResult,
+    ValueType,
+    normalize_financial_token,
+    parse_bare_number,
+    scale_phrase_in_text,
+)
 from .schemas import XlsxCellRecord, XlsxParseResult, XlsxSheetRecord
 
 # Mirrors the MVP's own detectScale() convention (server/xlsxParser.ts):
@@ -240,24 +250,37 @@ def _sheet_header_phrase(sheet: XlsxSheetRecord) -> tuple[float, str | None, str
     return found
 
 
-def determine_xlsx_scale(sheet: XlsxSheetRecord, cell: XlsxCellRecord) -> ScaleResult:
-    """Resolve one literal-valued numeric cell's scale, mirroring DS-W3-4's
-    resolution order: native-percentage format (SIM-17) -> inline scale
-    marker in the cell's own text -> column header -> sheet header ->
-    assumed_1x (flagged, never silent).
+# Unit carried by a self-scaling (non-currency, non-percent) value read at
+# face value -- mirrors scale.py's _SELF_SCALING_UNIT. A ratio is the
+# contract's "ratio" unit; a count or date carries no unit from scale capture.
+_SELF_SCALING_UNIT: dict[ValueType, str | None] = {
+    "percent": "%",
+    "ratio": "ratio",
+    "count": None,
+    "date": None,
+}
 
-    Raises ValueError for a formula cell -- its value, and thus its scale, is
-    only knowable once HyperFormula re-executes it (TS side); this function
-    resolves scale for the RESULT, not the formula.
-    """
-    if cell.formula is not None:
-        raise ValueError(
-            f"cell {cell.sheet}!{cell.cell_ref} is a formula; scale is resolved "
-            "against its re-executed result, not the formula itself"
-        )
 
-    raw = _cell_raw(cell)
+def _numeric_value(cell: XlsxCellRecord, raw: str) -> float:
+    """The cell's number as a float: the native numeric value when Excel
+    stored one, otherwise the first bare number in its text. Booleans are not
+    numbers (isinstance(True, int) is True in Python, so guard explicitly)."""
+    if isinstance(cell.value, int | float) and not isinstance(cell.value, bool):
+        return float(cell.value)
+    number = parse_bare_number(raw)
+    if number is None:
+        raise ValueError(f"cell {cell.sheet}!{cell.cell_ref} has no numeric content to scale")
+    return number
 
+
+def _percent_result(cell: XlsxCellRecord, raw: str) -> ScaleResult:
+    """A percent read at face value with unit "%", matching the PDF path
+    (scale.py normalizes "28.5%" -> 28.5, "%") rather than to basis points --
+    so the same figure from an XLSX or a PDF normalizes identically. A
+    native-%-formatted cell stores the fraction (0.285 for 28.5%), so the
+    printed percentage is value * 100; a percent that arrived as text or a
+    plain number is already face value. Never header-scaled: a percentage is
+    self-scaling, exactly as on the PDF path."""
     if (
         cell.is_percentage
         and isinstance(cell.value, int | float)
@@ -265,15 +288,68 @@ def determine_xlsx_scale(sheet: XlsxSheetRecord, cell: XlsxCellRecord) -> ScaleR
     ):
         return ScaleResult(
             raw=raw,
-            # round(): 0.285 * 10_000 is 2849.9999999999995 in binary float --
-            # basis points are a whole-number unit, and the MVP's own
-            # equivalent (dealMetricsMerge.ts) rounds for the same reason.
-            normalized=float(round(float(cell.value) * 10_000.0)),
-            unit="bp",
-            scale_multiplier=10_000.0,
+            # round(_, 10): 0.285 * 100 is 28.499999999999996 in binary float;
+            # trim the dust without touching real percentage precision.
+            normalized=round(float(cell.value) * 100.0, 10),
+            unit="%",
+            scale_multiplier=100.0,
+            scale_source="explicit_in_value",
+        )
+    return ScaleResult(
+        raw=raw,
+        normalized=_numeric_value(cell, raw),
+        unit="%",
+        scale_multiplier=1.0,
+        scale_source="explicit_in_value",
+    )
+
+
+def determine_xlsx_scale(
+    sheet: XlsxSheetRecord, cell: XlsxCellRecord, *, value_type: ValueType
+) -> ScaleResult:
+    """Resolve one cell's scale, gated by value_type exactly like DS-W3-4's
+    determine_scale: only a *currency* value's magnitude is declared by a
+    column/sheet "(in thousands)" header. A percent is face-value "%", and a
+    ratio/count/date is read at face value at a known 1.0 -- forcing any of
+    them through the header lookup is the silent 1000x error this module (and
+    scale.py) exists to prevent (a headcount of 1,200 under "(in Thousands)"
+    is 1,200 people, not 1,200,000). value_type is required, with no default,
+    so a caller can never fall into currency scaling for a non-currency value.
+
+    Raises ValueError for a formula cell -- its value, and thus its scale, is
+    only knowable once HyperFormula re-executes it on the TS side -- and for
+    value_type="text" (no numeric magnitude to scale).
+
+    Currency resolution order: inline scale marker in the cell's own text ->
+    column header -> sheet header -> assumed_1x (flagged, never silent).
+    """
+    if cell.formula is not None:
+        raise ValueError(
+            f"cell {cell.sheet}!{cell.cell_ref} is a formula; scale is resolved "
+            "against its re-executed result, not the formula itself"
+        )
+    if value_type == "text":
+        raise ValueError(
+            f"cell {cell.sheet}!{cell.cell_ref}: determine_xlsx_scale does not apply "
+            "to value_type='text' (no numeric magnitude)"
+        )
+
+    raw = _cell_raw(cell)
+
+    if value_type == "percent":
+        return _percent_result(cell, raw)
+
+    # ratio / count / date: face value, never header-scaled.
+    if value_type != "currency":
+        return ScaleResult(
+            raw=raw,
+            normalized=_numeric_value(cell, raw),
+            unit=_SELF_SCALING_UNIT[value_type],
+            scale_multiplier=1.0,
             scale_source="explicit_in_value",
         )
 
+    # currency: inline marker -> column header -> sheet header -> assumed_1x.
     if isinstance(cell.value, str):
         inline = normalize_financial_token(cell.value)
         if inline is not None:
@@ -286,12 +362,7 @@ def determine_xlsx_scale(sheet: XlsxSheetRecord, cell: XlsxCellRecord) -> ScaleR
                 scale_source="explicit_in_value",
             )
 
-    if isinstance(cell.value, int | float) and not isinstance(cell.value, bool):
-        number = float(cell.value)
-    else:
-        number = parse_bare_number(raw)
-    if number is None:
-        raise ValueError(f"cell {cell.sheet}!{cell.cell_ref} has no numeric content to scale")
+    number = _numeric_value(cell, raw)
 
     column_match = _column_header_phrase(sheet, cell)
     if column_match is not None:

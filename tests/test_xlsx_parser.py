@@ -259,8 +259,12 @@ def test_column_header_scale_resolves_through_merged_header_non_anchor_columns()
     sheet = result.sheets[0]
     cells = _cells_by_ref(result.sheets, "Sheet1")
 
-    thousands_section = [determine_xlsx_scale(sheet, cells[ref]) for ref in ("B2", "C2", "D2")]
-    millions_section = [determine_xlsx_scale(sheet, cells[ref]) for ref in ("F2", "G2", "H2")]
+    thousands_section = [
+        determine_xlsx_scale(sheet, cells[ref], value_type="currency") for ref in ("B2", "C2", "D2")
+    ]
+    millions_section = [
+        determine_xlsx_scale(sheet, cells[ref], value_type="currency") for ref in ("F2", "G2", "H2")
+    ]
 
     for result_ in thousands_section:
         assert result_.scale_source == "column_header"
@@ -336,37 +340,43 @@ def _sheet(cells: list[XlsxCellRecord]) -> XlsxSheetRecord:
     return XlsxSheetRecord(name="Sheet1", cells=cells)
 
 
-def test_native_percentage_scales_to_basis_points() -> None:
-    # The ticket's SIM-17 acceptance test: 0.285 -> 2850bp, scale 10,000.
+def test_native_percentage_normalizes_to_face_value_percent() -> None:
+    # SIM-17: a native-%-formatted cell stores the fraction (0.285). It
+    # normalizes to face-value 28.5 with unit "%", matching the PDF path --
+    # NOT to basis points, which would make the same figure read 100x
+    # differently depending on whether it arrived as XLSX or PDF.
     cell = _cell(2, 3, 0.285, is_percentage=True)
     sheet = _sheet([cell])
 
-    result = determine_xlsx_scale(sheet, cell)
+    result = determine_xlsx_scale(sheet, cell, value_type="percent")
 
     assert result.scale_source == "explicit_in_value"
-    assert result.scale_multiplier == 10_000.0
-    assert result.unit == "bp"
-    assert result.normalized == 2850.0
+    assert result.scale_multiplier == 100.0
+    assert result.unit == "%"
+    assert result.normalized == 28.5
     assert result.raw == "0.285"
 
 
-def test_percentage_format_takes_priority_over_column_header() -> None:
+def test_percentage_is_never_scaled_by_a_column_header() -> None:
+    # A percent under a "(in Thousands)" column header must not be multiplied
+    # by 1000: it self-scales to face value, ignoring the header entirely.
     header = _cell(1, 3, "(in Thousands)")
     value = _cell(2, 3, 0.076, is_percentage=True)
     sheet = _sheet([header, value])
 
-    result = determine_xlsx_scale(sheet, value)
+    result = determine_xlsx_scale(sheet, value, value_type="percent")
 
     assert result.scale_source == "explicit_in_value"
-    assert result.scale_multiplier == 10_000.0
-    assert result.normalized == 760.0
+    assert result.scale_multiplier == 100.0
+    assert result.unit == "%"
+    assert result.normalized == 7.6
 
 
 def test_inline_scale_marker_in_text_cell() -> None:
     cell = _cell(1, 1, "$4.8M")
     sheet = _sheet([cell])
 
-    result = determine_xlsx_scale(sheet, cell)
+    result = determine_xlsx_scale(sheet, cell, value_type="currency")
 
     assert result.scale_source == "explicit_in_value"
     assert result.scale_multiplier == 1_000_000.0
@@ -378,7 +388,7 @@ def test_column_header_scale_found_above_value() -> None:
     value = _cell(2, 2, 15295)
     sheet = _sheet([header, value])
 
-    result = determine_xlsx_scale(sheet, value)
+    result = determine_xlsx_scale(sheet, value, value_type="currency")
 
     assert result.scale_source == "column_header"
     assert result.scale_multiplier == 1_000.0
@@ -394,7 +404,7 @@ def test_sheet_header_scale_used_when_no_column_header() -> None:
     value = _cell(5, 2, 5000)
     sheet = _sheet([sheet_note, value])
 
-    result = determine_xlsx_scale(sheet, value)
+    result = determine_xlsx_scale(sheet, value, value_type="currency")
 
     assert result.scale_source == "page_header"
     assert result.scale_multiplier == 1_000.0
@@ -407,7 +417,7 @@ def test_column_header_takes_precedence_over_sheet_header() -> None:
     value = _cell(2, 2, 15295)
     sheet = _sheet([sheet_note, column_header, value])
 
-    result = determine_xlsx_scale(sheet, value)
+    result = determine_xlsx_scale(sheet, value, value_type="currency")
 
     assert result.scale_source == "column_header"
     assert result.scale_multiplier == 1_000.0
@@ -417,7 +427,7 @@ def test_assumed_1x_is_flagged_never_silent() -> None:
     value = _cell(3, 3, 42)
     sheet = _sheet([value])
 
-    result = determine_xlsx_scale(sheet, value)
+    result = determine_xlsx_scale(sheet, value, value_type="currency")
 
     assert result.scale_source == "assumed_1x"
     assert result.scale_multiplier == 1.0
@@ -430,7 +440,7 @@ def test_formula_cell_raises_scale_is_not_meaningful_yet() -> None:
     sheet = _sheet([cell])
 
     with pytest.raises(ValueError):
-        determine_xlsx_scale(sheet, cell)
+        determine_xlsx_scale(sheet, cell, value_type="currency")
 
 
 def test_boolean_cell_is_not_treated_as_numeric_one_or_zero() -> None:
@@ -440,4 +450,63 @@ def test_boolean_cell_is_not_treated_as_numeric_one_or_zero() -> None:
     sheet = _sheet([cell])
 
     with pytest.raises(ValueError):
-        determine_xlsx_scale(sheet, cell)
+        determine_xlsx_scale(sheet, cell, value_type="currency")
+
+
+# --------------------------------------------------------------------------- #
+# value_type gate -- only currency is scaled by a header (mirrors DS-W3-4).
+# --------------------------------------------------------------------------- #
+
+
+def test_count_is_not_scaled_by_a_sheet_header() -> None:
+    # The headline regression: a headcount under a "(in Thousands)" sheet
+    # header is 1,200 people, not 1,200,000. Only currency is header-scaled;
+    # value_type='count' self-scales and never reaches the header lookup.
+    sheet_note = _cell(1, 1, "Summary (in Thousands)")
+    headcount = _cell(5, 2, 1200)
+    sheet = _sheet([sheet_note, headcount])
+
+    result = determine_xlsx_scale(sheet, headcount, value_type="count")
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 1200.0
+    assert result.unit is None
+    assert result.flags == []
+
+
+def test_ratio_is_not_scaled_by_a_column_header() -> None:
+    header = _cell(1, 2, "(in Thousands)")
+    ratio = _cell(2, 2, 1.2)
+    sheet = _sheet([header, ratio])
+
+    result = determine_xlsx_scale(sheet, ratio, value_type="ratio")
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 1.2
+    assert result.unit == "ratio"
+
+
+def test_date_cell_is_not_scaled_by_a_header() -> None:
+    # A period-end date (stored ISO by _normalize_value) must never be
+    # multiplied by a "(in Thousands)" header. It self-scales at 1.0.
+    header = _cell(1, 2, "(in Thousands)")
+    date_cell = _cell(2, 2, "2024-06-30T00:00:00")
+    sheet = _sheet([header, date_cell])
+
+    result = determine_xlsx_scale(sheet, date_cell, value_type="date")
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.scale_multiplier == 1.0
+    assert result.unit is None
+
+
+def test_text_value_type_fails_closed_never_fabricates_a_number() -> None:
+    # A label cell has no numeric magnitude; it must fail closed, never invent
+    # a value from a stray digit ("See note 3" -> 3).
+    label = _cell(2, 2, "See note 3")
+    sheet = _sheet([label])
+
+    with pytest.raises(ValueError):
+        determine_xlsx_scale(sheet, label, value_type="text")
