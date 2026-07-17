@@ -47,7 +47,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .elements import ChartElement, TableElement
-from .resolver import resolve
+from .resolver import resolve, resolve_in_cell
 from .scale import ScaleSource, ValueType, determine_scale
 from .schemas import BBox, PageIndex, TableCellRecord, TableRecord, XlsxCellRecord, XlsxSheetRecord
 from .xlsx_parser import determine_xlsx_scale
@@ -310,11 +310,18 @@ def emit_pdf_claim(
     document_name: str | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
 ) -> Claim:
-    """Emit one PDF-sourced fact for `quote` on `page`. Fails closed to
+    """Emit one PDF-sourced claim for `quote` on `page`. Fails closed to
     `status="missing"` on a zero-text page or an unresolved/ambiguous
     quote (DS-W3-3) -- never a fabricated or partially-cited value. `table`/
     `cell` are passed through to DS-W3-4's column-header scale lookup when the
-    quote came from a table cell; omit both for prose."""
+    quote came from a table cell; omit both for prose.
+
+    When `cell` is given, the quote is resolved inside that cell's own region
+    first: the caller knows which cell it read, so asking the page instead
+    throws that away and cannot cite a value the table repeats (see
+    resolver.resolve_in_cell). Page-wide search remains the fallback, so a cell
+    whose box does not enclose its own text is no worse off than before.
+    """
     element_id = f"pdf:{file}:p{page.page}:{attribute}"
 
     if not page.text.strip():
@@ -332,7 +339,12 @@ def emit_pdf_claim(
             section=section,
         )
 
-    span = resolve(quote, page)
+    # Cell-scoped first when we know the cell, page-wide otherwise. Both go
+    # through the same exact-span core, so this widens what is citable without
+    # loosening what counts as a citation.
+    span = resolve_in_cell(quote, page, cell) if cell is not None else None
+    if span is None:
+        span = resolve(quote, page)
     if span is None:
         flag_log.log(stage, element_id, "quote_unresolved", detail=quote)
         return _missing_pdf_claim(

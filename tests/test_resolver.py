@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from parser_service.resolver import resolve, union_bbox
-from parser_service.schemas import CharBox, PageIndex
+from parser_service.resolver import resolve, resolve_in_cell, union_bbox
+from parser_service.schemas import CharBox, PageIndex, TableCellRecord
 
 # parse_pdf_bytes (and the heavy docling import behind it) is pulled in lazily by
 # the local_corpus fixture only — the fast tests below need nothing from docling.
@@ -281,3 +281,90 @@ def test_ptl_page_11_ambiguous_value_fails_closed(ptl_page_11: PageIndex) -> Non
         assert resolve("21.2%", page) is None
     else:
         pytest.skip("21.2% is not duplicated in this parse; ambiguity covered by fast tests")
+
+
+# --------------------------------------------------------------------------- #
+# resolve_in_cell — citing a value the page repeats.
+# --------------------------------------------------------------------------- #
+
+
+def _cell_over(page: PageIndex, start: int, end: int, *, row: int = 0, col: int = 0):
+    """A cell whose box encloses exactly page.char_map[start:end]."""
+    boxes = page.char_map[start:end]
+    return TableCellRecord(
+        row=row,
+        col=col,
+        row_span=1,
+        col_span=1,
+        text=page.text[start:end],
+        text_normalized=page.text[start:end],
+        column_header=False,
+        row_header=False,
+        page=page.page,
+        x0=min(b.x0 for b in boxes),
+        top=min(b.top for b in boxes),
+        x1=max(b.x1 for b in boxes),
+        bottom=max(b.bottom for b in boxes),
+        bbox_source="docling_native",
+    )
+
+
+def test_resolve_in_cell_cites_a_value_the_page_repeats() -> None:
+    # The gap DS-W3-8's harness surfaced on PTL p.11: "21.2%" three times in one
+    # row. Page-wide the question has three answers, so resolve() must fail
+    # closed and all three real figures are dropped. Scoped to the cell it has
+    # exactly one -- the caller always knew which cell it read.
+    page = make_page("Gross Margin % 27.3% 21.2% 21.2% 21.2%")
+    assert page.text.count("21.2%") == 3
+    assert resolve("21.2%", page) is None, "page-wide must stay ambiguous"
+
+    second = page.text.index("21.2%", page.text.index("21.2%") + 1)
+    span = resolve_in_cell("21.2%", page, _cell_over(page, second, second + 5))
+
+    assert span is not None
+    assert (span.char_start, span.char_end) == (second, second + 5)
+    assert span.page == page.page
+    assert span.bbox is not None
+
+
+def test_resolve_in_cell_span_is_page_relative_not_cell_relative() -> None:
+    # A citation must address the page the reader sees. A cell-local offset
+    # would look plausible and point at the wrong text.
+    page = make_page("Revenue 15,295 and Margin 21.2%")
+    start = page.text.index("21.2%")
+    span = resolve_in_cell("21.2%", page, _cell_over(page, start, start + 5))
+
+    assert span is not None
+    assert span.char_start == start
+    assert page.text[span.char_start : span.char_end] == "21.2%"
+
+
+def test_resolve_in_cell_fails_closed_when_the_cell_has_no_box() -> None:
+    # No region means no way to scope the question, and a claim is not citable
+    # on a cell whose own bounds are unknown.
+    page = make_page("Margin 21.2%")
+    cell = _cell_over(page, 7, 12)
+    cell = cell.model_copy(update={"x0": None, "top": None, "x1": None, "bottom": None})
+
+    assert resolve_in_cell("21.2%", page, cell) is None
+
+
+def test_resolve_in_cell_fails_closed_when_the_quote_is_outside_the_cell() -> None:
+    # The value is on the page, but not in THIS cell. Citing it anyway would
+    # attribute a neighbour's number to this cell -- the wrong-span failure the
+    # resolver exists to prevent.
+    page = make_page("A 27.3% B 21.2%")
+    other = page.text.index("27.3%")
+
+    assert resolve_in_cell("21.2%", page, _cell_over(page, other, other + 5)) is None
+
+
+def test_resolve_in_cell_ignores_a_repeat_outside_its_own_box() -> None:
+    # Two identical values; the cell encloses one. Scoping must pick that one
+    # and must not see the other as an ambiguity.
+    page = make_page("21.2% then later 21.2%")
+    first = page.text.index("21.2%")
+    span = resolve_in_cell("21.2%", page, _cell_over(page, first, first + 5))
+
+    assert span is not None
+    assert (span.char_start, span.char_end) == (first, first + 5)
