@@ -81,9 +81,17 @@ class ScaleResult(BaseModel):
 # dropped "$3Bn"/"$5Mn" -- a common CIM notation. That is a real recall gap,
 # not a precision risk: no non-magnitude token ends a number with "bn"/"mn",
 # so the abbreviation is included here.
-_MILLION_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>[\d,.]+)\s*[Mm](?:illion|M|m|n|N)?\b\)?")
-_BILLION_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>[\d,.]+)\s*[Bb](?:illion|B|b|n|N)?\b\)?")
-_THOUSAND_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>[\d,.]+)\s*[Kk](?:thousand)?\b\)?")
+
+# The number itself. MUST contain a digit: a plain "[\d,.]+" also matches a bare
+# ".", so "2:00 p.m. NDT June 14, 2018" -- a real bid-deadline cell on PTL
+# PDF-page 15 -- matched ".m" in "p.m." as "point million" and crashed
+# float("."). A leading decimal (".5M") is still accepted; a digitless token is
+# not a number and must not reach the parse.
+_NUMBER = r"(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
+
+_MILLION_RE = re.compile(rf"(?P<sign>[-(])?\$?(?P<number>{_NUMBER})\s*[Mm](?:illion|M|m|n|N)?\b\)?")
+_BILLION_RE = re.compile(rf"(?P<sign>[-(])?\$?(?P<number>{_NUMBER})\s*[Bb](?:illion|B|b|n|N)?\b\)?")
+_THOUSAND_RE = re.compile(rf"(?P<sign>[-(])?\$?(?P<number>{_NUMBER})\s*[Kk](?:thousand)?\b\)?")
 
 # Checked in this order (matching the MVP's M -> B -> K replace() sequence):
 # for an isolated single-value token this only matters in that the first
@@ -100,7 +108,7 @@ _SUFFIX_PATTERNS: list[tuple[re.Pattern[str], float]] = [
 # a 27.3% Gross Margin figure on a "CAD (in Thousands)" page is still 27.3%,
 # not 27,300%. Checked before the suffix patterns so "%" is never reached by
 # them.
-_PERCENT_RE = re.compile(r"(?P<sign>[-(])?(?P<number>[\d,.]+)%\)?")
+_PERCENT_RE = re.compile(rf"(?P<sign>[-(])?(?P<number>{_NUMBER})%\)?")
 
 # A bare number with optional sign. The sign group matches a leading "-" or an
 # accounting-negative "(" so a bracketed negative ("($15,295)") is not read as
