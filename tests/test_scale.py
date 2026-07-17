@@ -574,3 +574,53 @@ def test_ptl_page_11_gross_margin_percent_is_not_rescaled(
     assert result.scale_source == "explicit_in_value"
     assert result.normalized == 27.3
     assert result.unit == "%"
+
+
+# --------------------------------------------------------------------------- #
+# normalize_financial_token — digitless tokens are not numbers.
+# --------------------------------------------------------------------------- #
+
+
+def test_time_of_day_is_not_a_million() -> None:
+    # PTL PDF-page 15 carries a bid deadline: "2:00 p.m. NDT June 14, 2018".
+    # The number group used to be "[\d,.]+", which matches a bare ".", so the
+    # "." in "p.m." parsed as the number and the "m" as the millions suffix --
+    # float(".") then raised ValueError and took the whole run down. A date is
+    # not a financial token; it must simply not match.
+    assert normalize_financial_token("2:00 p.m. NDT June 14, 2018") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "p.m.",
+        "a.m.",
+        ".",
+        ".M",
+        "..K",
+        "e.g. B",
+        "N.B. see notes",
+    ],
+)
+def test_digitless_tokens_never_parse_as_numbers(text: str) -> None:
+    # A suffix letter next to punctuation is prose, not a magnitude. Anything
+    # without a digit must return None rather than reaching float().
+    assert normalize_financial_token(text) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("$4.8M", (4.8, 1_000_000.0, None)),
+        ("$.5M", (0.5, 1_000_000.0, None)),  # leading decimal is still a number
+        ("500K", (500.0, 1_000.0, None)),
+        ("$3Bn", (3.0, 1_000_000_000.0, None)),
+        ("1.5MM", (1.5, 1_000_000.0, None)),
+        ("4.8 million", (4.8, 1_000_000.0, None)),
+        ("($4.8M)", (-4.8, 1_000_000.0, None)),
+        ("27.3%", (27.3, 1.0, "%")),
+    ],
+)
+def test_real_scale_tokens_still_parse(text: str, expected: tuple) -> None:
+    # The guard above must not cost recall on the notations CIMs actually use.
+    assert normalize_financial_token(text) == expected
