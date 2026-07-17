@@ -21,3 +21,4 @@ tests/test_data/
 # DS-W3-8 inspection overlays -- regenerated debug images, may contain
 # confidential CIM page content, never source.
 parser_service/out/
+.claude*
