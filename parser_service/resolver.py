@@ -16,7 +16,15 @@ unrelated text — the failure mode this ticket exists to remove.
 import logging
 import re
 
-from .schemas import BBox, CharBox, PageIndex, ParagraphIndex, ParagraphSpan, Span
+from .schemas import (
+    BBox,
+    CharBox,
+    PageIndex,
+    ParagraphIndex,
+    ParagraphSpan,
+    Span,
+    TableCellRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +138,85 @@ def resolve(quote: str, page: PageIndex) -> Span | None:
         return None
 
     start, end = found
+    chars = page.char_map[start:end]
+    return Span(
+        char_start=start,
+        char_end=end,
+        page=page.page,
+        bbox=union_bbox(chars),
+        line_bboxes=_line_bboxes(chars),
+    )
+
+
+def _chars_in_cell(page: PageIndex, cell: TableCellRecord) -> list[int]:
+    """Indices of the page chars whose centres lie inside `cell`'s box.
+
+    Centre-point containment rather than full overlap: a glyph box can spill a
+    fraction of a point past a tight cell border without belonging to the
+    neighbour, and a stricter test would drop the first or last character of a
+    value and turn a resolvable cell into a miss.
+    """
+    if cell.x0 is None or cell.top is None or cell.x1 is None or cell.bottom is None:
+        return []
+    return [
+        i
+        for i, char in enumerate(page.char_map)
+        if char.page == cell.page
+        and cell.x0 <= (char.x0 + char.x1) / 2 <= cell.x1
+        and cell.top <= (char.top + char.bottom) / 2 <= cell.bottom
+    ]
+
+
+def resolve_in_cell(quote: str, page: PageIndex, cell: TableCellRecord) -> Span | None:
+    """Resolve a quote inside one table cell's own region, or None.
+
+    Same trust rule as `resolve` -- the shared exact-span core, fail-closed --
+    but searching only the characters that sit inside the cell's box instead of
+    the whole page.
+
+    This exists because page-wide search cannot cite a repeated value, and
+    financial tables repeat values constantly. PTL PDF-page 11:
+
+        Gross Margin %   27.3%   21.2%   21.2%   21.2%
+
+    Searching the page for "21.2%" finds three matches, so `resolve` fails
+    closed and all three real figures are dropped -- a recall gap DS-W3-8's
+    harness renders as three red boxes. But the ambiguity is an artefact of the
+    question, not the document: the caller knows exactly which cell it is
+    reading, and each cell's box contains exactly one "21.2%". Scoping the
+    search to the cell asks a question that has one answer.
+
+    The returned span is still page-relative, because a citation must address
+    the page the reader sees, not a cell-local offset.
+
+    Requires the cell's characters to be contiguous in reading order, and fails
+    closed otherwise. A non-contiguous run means the cell's box encloses text
+    that the page index interleaves with another cell's, so no single
+    (char_start, char_end) could describe it, and a span that silently spanned
+    the gap would cite the neighbour's text too.
+    """
+    indices = _chars_in_cell(page, cell)
+    if not indices:
+        return None
+
+    if indices != list(range(indices[0], indices[-1] + 1)):
+        logger.warning(
+            "Cell (%d,%d) on page %d encloses a non-contiguous char run; not citable",
+            cell.row,
+            cell.col,
+            page.page,
+        )
+        return None
+
+    offset = indices[0]
+    cell_text = page.text[offset : indices[-1] + 1]
+    found = find_exact_span(
+        quote, cell_text, where=f"page {page.page} cell ({cell.row},{cell.col})"
+    )
+    if found is None:
+        return None
+
+    start, end = (offset + found[0], offset + found[1])
     chars = page.char_map[start:end]
     return Span(
         char_start=start,

@@ -1119,3 +1119,49 @@ def test_ptl_page_11_revenue_claim_persists_with_full_provenance(
 
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)
+
+
+def test_repeated_table_value_is_cited_per_cell_not_dropped() -> None:
+    # DS-W3-8's harness rendered this as three red boxes on PTL p.11: the Gross
+    # Margin % row prints 21.2% three times, so a page-wide search has three
+    # answers and DS-W3-3 fails closed on all of them -- three real
+    # income-statement figures silently dropped. The emitter knows which cell it
+    # is reading, so the question it asks should be cell-scoped, and each cell
+    # holds exactly one 21.2%.
+    page = make_page("Gross Margin % 27.3% 21.2% 21.2% 21.2%")
+    assert page.text.count("21.2%") == 3
+
+    spans: list[tuple[int, int]] = []
+    for nth in range(3):
+        start = -1
+        for _ in range(nth + 1):
+            start = page.text.index("21.2%", start + 1)
+        cell = _cell(
+            row=1,
+            col=nth + 2,
+            text="21.2%",
+            x0=min(b.x0 for b in page.char_map[start : start + 5]),
+            top=min(b.top for b in page.char_map[start : start + 5]),
+            x1=max(b.x1 for b in page.char_map[start : start + 5]),
+            bottom=max(b.bottom for b in page.char_map[start : start + 5]),
+        )
+        table = _table([cell], num_rows=2, num_cols=5, header_row=None)
+        claim = emit_pdf_table_cell_claim(
+            "PTL Group",
+            "grossMarginPct",
+            table,
+            cell,
+            page,
+            value_type="percent",
+            file="ptl.pdf",
+            flag_log=FlagLog(),
+        )
+
+        assert claim.status == "proposed", "a repeated table value must still be citable"
+        location = _pdf_location(claim)
+        assert location.char_start is not None and location.char_end is not None
+        spans.append((location.char_start, location.char_end))
+        assert page.text[location.char_start : location.char_end] == "21.2%"
+
+    # Each cell cites its OWN instance -- three distinct spans, not one repeated.
+    assert len(set(spans)) == 3
