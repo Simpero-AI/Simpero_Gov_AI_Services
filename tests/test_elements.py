@@ -8,8 +8,8 @@ no real corpus or Docling pipeline run needed.
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
-from services.parser.parser_service.elements import extract_chart_elements, extract_table_elements
-from services.parser.parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
+from parser_service.elements import extract_chart_elements, extract_table_elements
+from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
 
 if TYPE_CHECKING:
     from docling_core.types.doc.document import (

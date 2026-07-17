@@ -21,8 +21,8 @@ import openpyxl
 import pytest
 from jsonschema import Draft202012Validator
 
-from services.parser.parser_service.elements import ChartElement, TableElement
-from services.parser.parser_service.emit import (
+from parser_service.elements import ChartElement, TableElement
+from parser_service.emit import (
     FLAG_TYPES,
     Claim,
     FlagLog,
@@ -34,7 +34,7 @@ from services.parser.parser_service.emit import (
     log_chart_element_flags,
     log_table_element_flags,
 )
-from services.parser.parser_service.schemas import (
+from parser_service.schemas import (
     BBox,
     CharBox,
     PageIndex,
@@ -43,9 +43,9 @@ from services.parser.parser_service.schemas import (
     XlsxCellRecord,
     XlsxSheetRecord,
 )
-from services.parser.parser_service.xlsx_parser import parse_xlsx_bytes
+from parser_service.xlsx_parser import parse_xlsx_bytes
 
-SCHEMA_PATH = Path(__file__).parent.parent.parent / "contracts" / "claims.schema.json"
+SCHEMA_PATH = Path(__file__).parent.parent / "contracts" / "claims.schema.json"
 
 
 def _pdf_location(claim: Claim) -> PdfLocation:
@@ -677,7 +677,7 @@ def test_corrupted_fact_fails_schema_validation_loudly(validator: Draft202012Val
 def test_pydantic_boundary_rejects_unknown_status() -> None:
     from pydantic import ValidationError
 
-    from services.parser.parser_service.emit import Claim, ClaimValue, PdfLocation
+    from parser_service.emit import Claim, ClaimValue, PdfLocation
 
     with pytest.raises(ValidationError):
         Claim(
@@ -695,7 +695,7 @@ def test_pydantic_boundary_rejects_the_retired_confidence_key() -> None:
     # fail here rather than silently emit a key the spine will not store.
     from pydantic import ValidationError
 
-    from services.parser.parser_service.emit import Claim, ClaimValue, PdfLocation
+    from parser_service.emit import Claim, ClaimValue, PdfLocation
 
     with pytest.raises(ValidationError):
         Claim(
@@ -710,7 +710,7 @@ def test_pydantic_boundary_rejects_the_retired_confidence_key() -> None:
 def test_pydantic_boundary_rejects_unknown_field() -> None:
     from pydantic import ValidationError
 
-    from services.parser.parser_service.emit import ClaimValue
+    from parser_service.emit import ClaimValue
 
     with pytest.raises(ValidationError):
         ClaimValue(
@@ -1093,7 +1093,7 @@ def test_ptl_page_11_revenue_claim_persists_with_full_provenance(
             "Real PTL CIM not available on this machine (confidential document, "
             "never committed to this repo)."
         )
-    from services.parser.parser_service.docling_parser import parse_pdf_bytes
+    from parser_service.docling_parser import parse_pdf_bytes
 
     result = parse_pdf_bytes(pdf_path.read_bytes())
     page = result.pages[10]  # PDF page index 11 (0-indexed 10): income statement.

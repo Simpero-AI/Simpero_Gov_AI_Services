@@ -1,0 +1,62 @@
+[project]
+name = "simpero-gov-ai-services"
+version = "0.1.0"
+description = "Document parse service: PDF, XLSX and DOCX to an exactly-citable index"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic-settings>=2.0.0",
+    "docling>=2.0.0",
+    "pypdf>=6.4.0",
+    "openpyxl>=3.1.5",
+    # document_cache imports boto3 lazily, so the process never pays for it
+    # unless a Spaces cache is actually configured. It stays a hard dependency
+    # regardless: Spaces is the intended cache in deployment, and an optional
+    # extra would only move the failure to the first cache write in production.
+    "boto3>=1.34.0",
+]
+
+[dependency-groups]
+dev = [
+    # DS-W3-8's inspection harness renders page overlays. It is a developer CLI
+    # (`python -m parser_service.inspect`), never imported by the service, so
+    # these stay out of [project].dependencies: the image installs from there and
+    # would otherwise carry a PDF rasterizer and the whole imaging stack it can
+    # never invoke.
+    "pypdfium2>=4.0.0",
+    "pillow>=11.0.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+    "pyright>=1.1.411",
+    "reportlab>=4.4.0",
+    "ruff>=0.6.0",
+    "jsonschema>=4.0.0",
+    "python-docx>=1.2.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "local_corpus: supplementary tests against real corpus documents available only on some local machines (not committed, may contain confidential content). Always explicitly skipped, never silently, when the fixture isn't present. Not required for CI; do not rely on these for coverage.",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["parser_service"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+"contracts/*" = ["E501"]

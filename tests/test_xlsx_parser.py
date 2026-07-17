@@ -22,10 +22,10 @@ from openpyxl.chart import BarChart, Reference
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.formula import DataTableFormula
 
-from services.parser.parser_service.errors import ParseError
-from services.parser.parser_service.main import app
-from services.parser.parser_service.schemas import XlsxCellRecord, XlsxSheetRecord
-from services.parser.parser_service.xlsx_parser import (
+from parser_service.errors import ParseError
+from parser_service.main import app
+from parser_service.schemas import XlsxCellRecord, XlsxSheetRecord
+from parser_service.xlsx_parser import (
     _formula_text,
     determine_xlsx_scale,
     parse_xlsx_bytes,
@@ -312,7 +312,7 @@ def test_corrupt_xlsx_rejected() -> None:
 
 
 def test_too_many_sheets_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    from services.parser.parser_service import config
+    from parser_service import config
 
     config.get_settings.cache_clear()
     monkeypatch.setenv("PARSER_MAX_SHEETS", "2")
@@ -546,7 +546,7 @@ def test_large_integer_beyond_float_precision_is_kept_exact() -> None:
     # it verbatim as a string rather than lying -- exact-or-drop. (This is unit
     # tested directly: openpyxl's own writer floats big ints, so a synthetic
     # round-trip can't construct the input.)
-    from services.parser.parser_service.xlsx_parser import _normalize_value
+    from parser_service.xlsx_parser import _normalize_value
 
     big = 2**53 + 1
     assert float(big) != big  # sanity: really beyond float precision
@@ -572,7 +572,7 @@ def test_quoted_percent_literal_is_not_treated_as_percentage() -> None:
 
 
 def test_oversized_uncompressed_workbook_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    from services.parser.parser_service import config
+    from parser_service import config
 
     config.get_settings.cache_clear()
     monkeypatch.setenv("PARSER_MAX_OOXML_UNCOMPRESSED_BYTES", "100")

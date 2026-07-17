@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from services.parser.parser_service.resolver import resolve, union_bbox
-from services.parser.parser_service.schemas import CharBox, PageIndex
+from parser_service.resolver import resolve, union_bbox
+from parser_service.schemas import CharBox, PageIndex
 
 # parse_pdf_bytes (and the heavy docling import behind it) is pulled in lazily by
 # the local_corpus fixture only — the fast tests below need nothing from docling.
@@ -246,7 +246,7 @@ def ptl_page_11() -> PageIndex:
             "Real PTL CIM not available on this machine (confidential document, "
             "never committed to this repo)."
         )
-    from services.parser.parser_service.docling_parser import parse_pdf_bytes
+    from parser_service.docling_parser import parse_pdf_bytes
 
     result = parse_pdf_bytes(pdf_path.read_bytes())
     # PDF page index 11 is the income statement (0-indexed 10).

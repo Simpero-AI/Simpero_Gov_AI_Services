@@ -15,13 +15,13 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from pydantic import ValidationError
 
-from services.parser.parser_service.schemas import (
+from parser_service.schemas import (
     CharBox,
     PageIndex,
     TableCellRecord,
     TableRecord,
 )
-from services.parser.parser_service.table_extract import (
+from parser_service.table_extract import (
     _build_table_record,
     _reconstruct_bbox,
     extract_tables,

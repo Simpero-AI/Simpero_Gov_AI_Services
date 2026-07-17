@@ -22,7 +22,7 @@ from PIL import Image
 from PIL.Image import Image as PILImage
 from reportlab.pdfgen import canvas
 
-from services.parser.parser_service.inspect import (
+from parser_service.inspect import (
     BoxAnnotation,
     classify_token,
     detect_numeric_tokens,
@@ -31,7 +31,7 @@ from services.parser.parser_service.inspect import (
     main,
     render_page_overlay,
 )
-from services.parser.parser_service.schemas import BBox, CharBox, PageIndex
+from parser_service.schemas import BBox, CharBox, PageIndex
 
 
 def make_pdf(lines: list[str]) -> bytes:
@@ -357,7 +357,7 @@ def test_ptl_page_11_renders_green_no_red_on_verified_values(tmp_path: Path) -> 
             "Real PTL CIM not available on this machine (confidential document, "
             "never committed to this repo)."
         )
-    from services.parser.parser_service.docling_parser import parse_pdf_bytes
+    from parser_service.docling_parser import parse_pdf_bytes
 
     result = parse_pdf_bytes(pdf_path.read_bytes())
     page = result.pages[10]  # PDF page index 11 (0-indexed 10): income statement.

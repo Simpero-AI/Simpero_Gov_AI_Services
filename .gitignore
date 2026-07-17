@@ -1,0 +1,23 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.so
+.claude
+
+# Parser runtime cache (regenerated locally per-PDF, not source)
+cache/
+
+# Real corpus documents copied here by the local_corpus tests. Confidential
+# CIM content -- never source, and never committed.
+tests/test_data/
+
+# DS-W3-8 inspection overlays -- regenerated debug images, may contain
+# confidential CIM page content, never source.
+parser_service/out/

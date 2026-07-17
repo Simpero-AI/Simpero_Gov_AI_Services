@@ -15,11 +15,11 @@ import pytest
 from docx import Document
 from fastapi.testclient import TestClient
 
-from services.parser.parser_service.docx_parser import parse_docx_bytes
-from services.parser.parser_service.errors import ParseError
-from services.parser.parser_service.main import app
-from services.parser.parser_service.resolver import resolve_in_paragraph
-from services.parser.parser_service.schemas import ParagraphIndex
+from parser_service.docx_parser import parse_docx_bytes
+from parser_service.errors import ParseError
+from parser_service.main import app
+from parser_service.resolver import resolve_in_paragraph
+from parser_service.schemas import ParagraphIndex
 
 
 def _docx_bytes(paragraphs: list[str]) -> bytes:
@@ -112,7 +112,7 @@ def test_docx_with_no_extractable_text_rejected() -> None:
 def test_oversized_uncompressed_docx_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     # The shared OOXML decompression-bomb guard applies to DOCX exactly as it
     # does to XLSX -- both are a zip of XML.
-    from services.parser.parser_service import config
+    from parser_service import config
 
     config.get_settings.cache_clear()
     monkeypatch.setenv("PARSER_MAX_OOXML_UNCOMPRESSED_BYTES", "100")

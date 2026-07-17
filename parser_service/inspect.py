@@ -33,7 +33,7 @@ inside furniture DS-W3-1 tagged `is_boilerplate` (running headers/footers,
 confidentiality banners) are excluded for the same reason: they are not claims,
 so they are not misses.
 
-Run as: `uv run python -m services.parser.parser_service.inspect <cim.pdf>`
+Run as: `uv run python -m parser_service.inspect <cim.pdf>`
 Writes `<out_dir>/<doc>_page_NN.png` per page (default out_dir: the `out/`
 directory next to this module).
 """

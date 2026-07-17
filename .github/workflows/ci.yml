@@ -1,0 +1,186 @@
+name: CI
+
+# Runs on every PR into main, and on pushes to main (post-merge safety net).
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same PR/branch to save minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+# The parse service takes untrusted bytes and returns an index; it holds no
+# tenant data and talks to no database. So unlike the backend's pipeline, none
+# of these jobs need Postgres, Valkey or auth secrets — the whole suite runs on
+# a bare runner. That is a property of the split worth keeping: if a job here
+# ever starts needing a database, the boundary has been crossed by mistake.
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. LINT — ruff (style + a class of real bugs: unused vars, unreachable code)
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+  # ---------------------------------------------------------------------------
+  # 2. TYPECHECK — pyright.
+  #    Load-bearing for the PageIndex / char_map invariants: a type error here
+  #    is exactly the kind of drift that silently breaks provenance.
+  # ---------------------------------------------------------------------------
+  typecheck:
+    name: Typecheck (pyright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: pyright
+        run: uv run pyright
+
+  # ---------------------------------------------------------------------------
+  # 3. TEST — pytest over all three lanes (PDF, XLSX, DOCX).
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # local_corpus tests are skipped here by design: they read real corpus
+      # documents that are not committed. They must skip explicitly, never
+      # silently — a skip that CI cannot see is coverage nobody is counting.
+      - name: pytest
+        run: uv run pytest tests/ -q
+
+  # ---------------------------------------------------------------------------
+  # 4. CONTRACT — the C3 seam.
+  #    This repo owns contracts/claims.schema.json and emits claims as JSON
+  #    across the seam to the backend, which validates against the SAME file.
+  #    This job checks the shape here; the backend pins this schema and runs
+  #    its own drift check. A silent drift at the seam is the exact failure
+  #    mode the product exists to prevent, so it fails CI on both sides.
+  # ---------------------------------------------------------------------------
+  contract:
+    name: Claims-schema contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Validate claims JSON against shared schema
+        run: uv run --with jsonschema pytest -q contracts/test_claims_contract.py
+
+  # ---------------------------------------------------------------------------
+  # 5. IMAGE — build the deployable parse service.
+  #    New with the split. In the monorepo nothing ever built this Dockerfile
+  #    in CI, so a change that broke the image was only discovered at deploy.
+  #    Build only (no push): proves the image assembles and the service imports
+  #    inside it, which is what a PR needs to know.
+  # ---------------------------------------------------------------------------
+  image:
+    name: Build parser image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The default docker driver cannot export a build cache. docling pulls
+      # PyTorch, so an uncached rebuild on every PR is minutes of runner time.
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: simpero-parser:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is only useful if the app it serves actually imports; a
+      # missing runtime dep otherwise surfaces on first request in production.
+      - name: Import smoke test
+        run: docker run --rm simpero-parser:ci python -c "from parser_service.main import app; print('parser import ok')"
+
+  # ---------------------------------------------------------------------------
+  # 6. AUDIT — pip-audit. Docling pulls a large ML dep tree; surface known CVEs
+  #    in transitive deps. Non-blocking for now so a brand-new advisory doesn't
+  #    wedge every PR — flip to blocking once the dep tree is stable.
+  # ---------------------------------------------------------------------------
+  audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: pip-audit
+        continue-on-error: true
+        run: uv run --with pip-audit pip-audit

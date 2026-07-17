@@ -1,7 +1,7 @@
 import io
 
-from services.parser.parser_service.config import ParserSettings
-from services.parser.parser_service.document_cache import (
+from parser_service.config import ParserSettings
+from parser_service.document_cache import (
     NullDocumentCache,
     SpacesDocumentCache,
     build_document_cache,

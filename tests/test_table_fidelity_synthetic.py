@@ -14,9 +14,9 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 
-from services.parser.parser_service.docling_parser import parse_pdf_bytes
-from services.parser.parser_service.schemas import TableRecord
-from services.parser.parser_service.table_extract import extract_tables
+from parser_service.docling_parser import parse_pdf_bytes
+from parser_service.schemas import TableRecord
+from parser_service.table_extract import extract_tables
 
 
 def _income_statement_pdf() -> bytes:

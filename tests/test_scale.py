@@ -13,13 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from services.parser.parser_service.scale import (
+from parser_service.scale import (
     ScaleResult,
     determine_scale,
     normalize_financial_token,
     scale_phrase_in_text,
 )
-from services.parser.parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
+from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
 
 
 def _page(text: str, page_no: int = 1) -> PageIndex:
@@ -494,7 +494,7 @@ def test_determine_scale_column_header_honors_a_merged_banner_span() -> None:
 
 
 def _ptl_pdf_path() -> Path | None:
-    dest_dir = Path(__file__).parent.parent / "test_data"
+    dest_dir = Path(__file__).parent / "test_data"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / "1st-App-H-PTL-Group-CIM.pdf"
     if not dest_path.exists():
@@ -512,8 +512,8 @@ def ptl_page_11_and_tables() -> tuple[PageIndex, list[TableRecord]]:
             "Real PTL CIM not available on this machine (confidential document, "
             "never committed to this repo)."
         )
-    from services.parser.parser_service.docling_parser import parse_pdf_bytes
-    from services.parser.parser_service.table_extract import extract_tables, tables_on_page
+    from parser_service.docling_parser import parse_pdf_bytes
+    from parser_service.table_extract import extract_tables, tables_on_page
 
     result = parse_pdf_bytes(pdf_path.read_bytes())
     assert result.document is not None
@@ -538,7 +538,7 @@ def test_ptl_page_11_revenue_scales_from_page_header(
     revenue_cell = _cell_by_label(table, "Revenue", col=1)
     assert revenue_cell.text_normalized == "$15,295"
 
-    from services.parser.parser_service.resolver import resolve
+    from parser_service.resolver import resolve
 
     span = resolve("$15,295", page)
     assert span is not None
@@ -564,7 +564,7 @@ def test_ptl_page_11_gross_margin_percent_is_not_rescaled(
     ptl_page_11_and_tables: tuple[PageIndex, list[TableRecord]],
 ) -> None:
     page, _tables = ptl_page_11_and_tables
-    from services.parser.parser_service.resolver import resolve
+    from parser_service.resolver import resolve
 
     span = resolve("27.3%", page)
     assert span is not None

@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from services.parser.parser_service.docling_parser import parse_pdf_bytes
-from services.parser.parser_service.schemas import TableRecord
-from services.parser.parser_service.table_extract import extract_tables, tables_on_page
+from parser_service.docling_parser import parse_pdf_bytes
+from parser_service.schemas import TableRecord
+from parser_service.table_extract import extract_tables, tables_on_page
 
 pytestmark = pytest.mark.local_corpus
 

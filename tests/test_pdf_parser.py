@@ -9,15 +9,15 @@ from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from reportlab.pdfgen import canvas
 
-from services.parser.parser_service.docling_parser import (
+from parser_service.docling_parser import (
     ParseError,
     normalize_numeric_tokens,
     parse_known_hashes,
     parse_pdf_bytes,
     tag_boilerplate,
 )
-from services.parser.parser_service.main import app
-from services.parser.parser_service.schemas import CharBox, PageIndex
+from parser_service.main import app
+from parser_service.schemas import CharBox, PageIndex
 
 client = TestClient(app)
 
