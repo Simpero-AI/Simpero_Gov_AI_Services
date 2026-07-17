@@ -139,7 +139,9 @@ VALID_DOCX_CLAIM = {
 }
 
 # No citation exists in the source: emitted `missing`, never fabricated, never a
-# partial citation. Surfaces to users as "Missing".
+# partial citation. Surfaces to users as "Missing". The location records the page
+# that was searched -- where we LOOKED -- and carries no char span, because there
+# is nothing to point at. It must not invent one.
 VALID_MISSING_CLAIM = {
     "entity": "TargetCo",
     "attribute": "churnRate",
@@ -154,8 +156,6 @@ VALID_MISSING_CLAIM = {
         "kind": "pdf",
         "file": "deck.pdf",
         "page": 4,
-        "char_start": 0,
-        "char_end": 0,
     },
     "status": "missing",
     "verification_method": None,
@@ -244,6 +244,27 @@ def test_docx_location_requires_char_span(validator: Draft202012Validator) -> No
     bad = json.loads(json.dumps(VALID_DOCX_CLAIM))
     del bad["location"]["char_end"]
     assert list(validator.iter_errors(bad)), "docx location must carry a full char span"
+
+
+def test_missing_claim_must_not_carry_a_char_span(validator: Draft202012Validator) -> None:
+    # The other half of all-or-nothing, and the sharper half. A `missing` claim
+    # found nothing, so char_start=0/char_end=0 is not "no span" -- it is a
+    # citation to the top of the page, which a highlight UI would happily draw.
+    # The schema used to require the span unconditionally, which forced exactly
+    # this fabrication; it is now rejected outright.
+    bad = json.loads(json.dumps(VALID_MISSING_CLAIM))
+    bad["location"]["char_start"] = 0
+    bad["location"]["char_end"] = 0
+    assert list(validator.iter_errors(bad)), "a missing claim must not fabricate a span"
+
+
+def test_missing_claim_still_records_where_it_looked(validator: Draft202012Validator) -> None:
+    # Dropping the span does not license dropping the locator: "we searched
+    # page 4 and found nothing" is the useful claim; "we found nothing
+    # somewhere" is not.
+    bad = json.loads(json.dumps(VALID_MISSING_CLAIM))
+    del bad["location"]["page"]
+    assert list(validator.iter_errors(bad)), "a missing claim must still cite the page searched"
 
 
 def test_file_is_optional_data_source_id_is_the_identity(validator: Draft202012Validator) -> None:

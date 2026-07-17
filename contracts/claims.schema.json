@@ -71,12 +71,12 @@
     },
 
     "location": {
-      "description": "Typed union by kind. PDF => page/char span; XLSX => sheet/cell_ref; DOCX => paragraph. One claims spine stores all three: the format-specific columns are null per row. Location is always exact, zero tolerance.",
+      "description": "Typed union by kind. PDF => page/char span; XLSX => sheet/cell_ref; DOCX => paragraph/char span. One claims spine stores all three: the format-specific columns are null per row.\n\nThe location says WHERE WE LOOKED; the char span says WHERE IT IS. The locator (page / sheet+cell_ref / paragraph) is always required, because a claim always knows where it was searched for. The span is required the moment the claim asserts it found something -- see the all-or-nothing rule in allOf. Where a span exists it is exact, zero tolerance.",
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "page", "char_start", "char_end"],
+          "required": ["kind", "page"],
           "properties": {
             "kind": { "const": "pdf" },
             "file": {
@@ -129,7 +129,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "paragraph", "char_start", "char_end"],
+          "required": ["kind", "paragraph"],
           "properties": {
             "kind": { "const": "docx" },
             "file": {
@@ -170,7 +170,7 @@
         "partially_verified",
         "verified"
       ],
-      "description": "How much trust the claim has earned. The parse service emits only the reachable subset: `proposed` (extracted, citation attached, not yet checked — PDF/DOCX), `cited` (XLSX, where a byte-exact cell read or a re-executed formula leaves nothing to check), or `missing` (no citation exists in the source). Verify moves proposed -> cited|rejected; the corroboration pass moves cited -> conflicted|inconclusive|partially_verified|verified. An extractor must never assert cited for text it has not had checked."
+      "description": "How much trust the claim has earned. The parse service emits only the reachable subset:\n- `proposed` — citation attached, not yet checked. Covers PDF/DOCX prose and tables, AND an XLSX formula cell: the cell reference is byte-exact, but the value is pending, because this service never executes formulas (re-execution happens outside it) and the file's own cached result is never trusted as a substitute.\n- `cited` — nothing left to check. At parse time this is reachable only for a literal XLSX cell (`direct_read`): reading the bytes IS the verification. A formula reaches `cited` later, once re-executed (`formula_reexecution`).\n- `missing` — no citation exists in the source.\nVerify moves proposed -> cited|rejected; the corroboration pass moves cited -> conflicted|inconclusive|partially_verified|verified. An extractor must never assert cited for a value it has not had checked — which is why an unexecuted formula is `proposed`, not `cited`."
     },
 
     "verification_method": {
@@ -218,6 +218,38 @@
   },
 
   "allOf": [
+    {
+      "$comment": "All-or-nothing provenance, enforced. A claim that is not `missing` asserts it FOUND something, so it must carry the exact span proving where. Only `missing` -- which asserts the opposite -- may omit it. Previously the span was unconditionally required, which forced a missing claim to fabricate char_start=0/char_end=0: a zero span reads as a citation to the top of the page, so the schema was mandating exactly the approximate citation this rule exists to forbid. XLSX is exempt because a cell reference IS the whole citation; there is no sub-cell span to give.",
+      "if": {
+        "properties": {
+          "status": { "not": { "const": "missing" } },
+          "location": { "properties": { "kind": { "enum": ["pdf", "docx"] } } }
+        },
+        "required": ["status", "location"]
+      },
+      "then": {
+        "properties": {
+          "location": { "required": ["char_start", "char_end"] }
+        }
+      }
+    },
+    {
+      "$comment": "The other half of all-or-nothing: a `missing` claim asserts that nothing was found, so it must not carry a span AT ALL -- not even char_start=0/char_end=0. A zero span is not an absence, it is a citation to the first character of the page, and a consumer highlighting it would point the user at unrelated text while the claim says nothing was found. Requiring the span unconditionally is what produced that fabrication in the first place, so both halves are enforced here: found => span, missing => no span.",
+      "if": {
+        "properties": { "status": { "const": "missing" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "location": {
+            "properties": {
+              "char_start": false,
+              "char_end": false
+            }
+          }
+        }
+      }
+    },
     {
       "$comment": "Mirrors the claims-table CHECK: verification_method records how trust was earned, so it must be present once a claim has actually been checked.",
       "if": {
