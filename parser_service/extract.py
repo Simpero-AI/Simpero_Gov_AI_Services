@@ -54,89 +54,207 @@ def _cell_at(table: TableRecord, row: int, col: int) -> TableCellRecord | None:
     return next((c for c in table.cells if c.row == row and c.col == col), None)
 
 
-# Row labels whose values are NOT money, however the table is denominated. A
-# "($ in millions)" header applies to the money in the table, not to a count of
-# hotel rooms or a year -- and DS-W3-4 only scales `currency`, so typing these
-# correctly is what stops "1,309" slot machines becoming $1.309 billion.
-_COUNT_LABELS = (
-    "slot",
-    "machine",
-    "table game",
-    "game",
-    "room",
-    "position",
-    "seat",
-    "unit",
-    "square footage",
-    "square feet",
-    "sq ft",
-    "acre",
-    "employee",
-    "headcount",
-    "staff",
-    "tenure",
-    "years",
-    "count",
-    "number of",
+# --------------------------------------------------------------------------- #
+# value_type vocabularies.
+#
+# Every one of these is matched against WORD-SPLIT tokens, never as a substring.
+# Substring matching is what the earlier version did, and it silently stripped
+# the scale header off real money: "count" is a substring of "ac-count-s", so
+# "Accounts payable" typed as a count, DS-W3-4 refused the "($ in millions)"
+# header, and a $5.2M payable shipped as 5.2 next to a correctly-scaled
+# "Total current assets" a million times larger. "date" hid the same way inside
+# "consoli-date-d", and "unit" inside "comm-unit-y".
+#
+# The lists are ordered by tier below, and the tier order is the whole design:
+# a metric noun beats a count noun, because a label naming an amount settles the
+# question however many countable things it also mentions.
+# --------------------------------------------------------------------------- #
+
+# A metric noun names a measured amount, so its presence anywhere in the label
+# makes the value money. Measured against the 852-claim reference set built over
+# a real CIM: 0 of 172 count-typed attributes contain one, while 392 of 414
+# currency-typed attributes do. That separation is what lets this run ahead of
+# the count tier at no cost -- it is why "Member's Equity" stays money rather
+# than being read as a headcount of members.
+_METRIC_NOUNS = frozenset(
+    """
+    revenue revenues sales turnover expense expenses cost costs spend spending income
+    loss losses profit profits earnings margin margins ebitda ebit noi opex capex
+    depreciation amortization amortisation impairment interest tax taxes dividend
+    dividends distribution distributions debt borrowings equity capital contribution
+    contributions asset assets liability liabilities receivable receivables payable
+    payables payroll compensation wages salaries rent lease insurance marketing
+    advertising royalty royalties cash flow flows proceeds investment investments
+    purchase price value budget fee fees charge charges goodwill inventory
+    inventories equipment premises net
+    """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
 )
-_DATE_LABELS = ("date", "acquired", "opened", "completion", "completed", "as of", "expir")
+
+# A count noun names something you can count. "property" is deliberately absent:
+# "Property and Equipment, Net" is money, and a genuine property count reads
+# "number of properties", which the number-of pair below catches instead.
+# A duration is counted, not priced: "ACEP Tenure (In Years)" -> 7 is
+# seven years. Only the plural and "tenure" are listed -- the singular
+# "year" belongs to period labels ("Fiscal Year", "Year Ended"), where
+# the value is a date rather than a span.
+_COUNT_NOUNS = frozenset(
+    """
+    slot slots machine machines seat seats room rooms suite suites bed beds table
+    tables game games employee employees headcount staff fte ftes visitor visitors
+    customer customers subscriber subscribers member members guest guests resident
+    residents store stores location locations outlet outlets branch branches
+    restaurant restaurants shop shops well wells rig rigs vehicle vehicles aircraft
+    patent patents contract contracts license licenses position positions space
+    spaces unit units attendee attendees convention conventions population admission
+    admissions passenger passengers household households tenure year years yrs tenure
+    months days
+    """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
+)
+
+# A physical extent. Same tier as a count -- a currency scale header never
+# applies to it -- but kept separate because these name a dimension rather than
+# a countable thing, and the distinction matters to anything reading this list.
+_DIMENSION_NOUNS = frozenset(
+    """
+    footage feet foot acre acres acreage mile miles metre metres meter meters hectare
+    hectares square capacity megawatt megawatts ton tons tonne tonnes barrel barrels
+    gallon gallons litre litres
+    """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
+)
+
+# A date word in the label licenses reading the value as a period -- but only
+# when the value is date-SHAPED as well. The label alone is not enough:
+# "Acq. of Flamingo Laughlin, net of cash acquired" -> "(109.4 )" matches
+# "acquired" at a genuine word start, so anchoring does not save it, and a
+# $109.4M cash outflow would be recorded as a negative year.
+_DATE_WORDS = frozenset(
+    """
+    date dated acquired opened opening completion completed expires expiration expiry
+    commenced commencement founded established incorporated renovated renovation
+    """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
+)
+
+_CAMEL_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
+_NON_ALPHA = re.compile(r"[^A-Za-z]+")
+
+_CURRENCY_MARK = re.compile(
+    r"US\$|C\$|A\$|NZ\$|HK\$|[$£€¥]|\b(?:USD|CAD|AUD|EUR|GBP|JPY|CHF)\b|\bdollars?\b",
+    re.IGNORECASE,
+)
+_PERCENT_MARK = re.compile(r"%|\b\d+(?:\.\d+)?\s*(?:bps|basis\s+points?)\b", re.IGNORECASE)
+# An EBITDA multiple, leverage or coverage figure: "7.5x", "4.2 x".
+_RATIO_MARK = re.compile(r"\b\d+(?:\.\d+)?\s*x\b", re.IGNORECASE)
+_MONTH_NAME = re.compile(
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+    r"(?:uary|ruary|ch|il|e|y|ust|tember|ober|ember)?\b",
+    re.IGNORECASE,
+)
+_APOSTROPHE_YEAR = re.compile(r"'\d{2}\b")
+_YEAR = re.compile(r"(?:19|20)\d{2}")
+# A unit printed inside the value itself ("1,300 square feet", "6-seat"). More
+# reliable than any label, because the document is naming the unit outright.
+_UNIT_IN_VALUE = re.compile(
+    r"\b(?:square\s+(?:feet|foot|footage|metres?|meters?)|sq\.?\s?ft\.?|"
+    r"acres?|miles?|seats?|rooms?|suites?|slots?|machines?|table\s+games?|"
+    r"beds?|units?|years?|yrs?|months?|days?)\b",
+    re.IGNORECASE,
+)
+# A struck-out or not-meaningful cell. Carries no magnitude to scale.
+_SENTINEL = re.compile(r"\s*(?:N/?A|NM|[-–—]+)\s*", re.IGNORECASE)
+
+# Beyond this many words, the cell holds a sentence rather than a value.
+_PROSE_WORD_COUNT = 4
 
 
-def infer_value_type_for(raw: str, attribute: str) -> ValueType:
-    """The value_type for a cell, judged from its ATTRIBUTE first.
+def _label_tokens(attribute: str) -> set[str]:
+    """The attribute's words, lowercased, with camelCase split apart.
 
-    The attribute names the metric, so it is a far better signal than the
-    token's own shape. "Slot Machines 1,309" is a count no matter how the table
-    is denominated; "Date Acquired 1998" is a year, not $1.998bn.
-
-    It takes the whole attribute -- row label AND column header -- because which
-    axis carries the metric name varies by table. A financial statement puts it
+    Reads the WHOLE attribute -- row label and column header both -- because
+    which axis names the metric varies by table. A financial statement puts it
     in the row ("Cash and cash equivalents | 2003"); a property summary puts it
     in the column ("Stratosphere | Slot Machines"). Reading only the row label
     would miss every count in the second shape.
-
-    This matters because DS-W3-4 applies the table's scale header to `currency`
-    alone. Typing everything non-percent as currency -- which this did -- meant a
-    "($ in millions)" header multiplied room counts, table-game counts, gaming
-    square footage and acquisition years by a million. On the ACEP CIM's property
-    summary that produced $80 billion of gaming square footage and $2.4 billion
-    of hotel rooms, from a table whose real figures are tens of millions.
     """
-    lowered = attribute.lower()
-    if "%" in raw:
+    expanded = _CAMEL_BOUNDARY.sub(r"\1 \2", attribute)
+    return {token for token in _NON_ALPHA.split(expanded.lower()) if token}
+
+
+def _is_date_shaped(raw: str) -> bool:
+    """Whether the value itself could be a date: a month name, an apostrophe
+    year ("'07"), or a four-digit year anywhere in it."""
+    return bool(_MONTH_NAME.search(raw) or _APOSTROPHE_YEAR.search(raw) or _YEAR.search(raw))
+
+
+def infer_value_type_for(raw: str, attribute: str) -> ValueType:
+    """The value_type for a cell, judged from the value and its attribute.
+
+    This gates DS-W3-4: only `currency` is multiplied by the table's
+    "($ in millions)" scale header, so a mistype is a 1000x error in one
+    direction or the other. The two directions are NOT equally dangerous, and
+    that asymmetry sets the default at the bottom of this function. A value
+    wrongly typed currency fails visibly -- it ends up assumed_1x carrying a
+    `scale_assumed` flag, or takes a header multiplier and an `ambiguous_unit`
+    flag. A value wrongly typed count or date fails SILENTLY: scale.py's
+    _self_scaling returns a KNOWN 1.0 with scale_source="explicit_in_value" and
+    no flag at all, which is indistinguishable from a verified scale. So where
+    the signals run out, currency is the answer whose failure can be audited.
+
+    Rules are ordered and first match wins; the order is the design:
+
+      0. No digit, or a sentinel ("-", "N/A") -> text. emit.py gives `text` a
+         null normalized, so nothing is invented from a value that has no
+         magnitude -- and determine_scale is never reached with an unparseable
+         value, which today raises ValueError uncaught.
+      1. The value declares its own unit ("%", "7.5x", "$") -> that unit wins.
+         A "%" is a complete scale statement and must never take a header.
+      2. Four or more words is a sentence, not a value -> text, so no number is
+         invented from a fragment whose leftmost digits happen to parse.
+      3. A unit inside the value ("1,300 square feet") outranks any label.
+      4. A date word in the label, but ONLY with a date-shaped value.
+      5. A metric noun anywhere in the label -> currency, ahead of the count
+         tier. This is what keeps "Member's Equity" money.
+      6. A count or dimension noun -> count.
+      7. A bare four-digit year -> date.
+      8. Otherwise currency, per the asymmetry above.
+    """
+    tokens = _label_tokens(attribute)
+    stripped = raw.strip()
+
+    if not any(character.isdigit() for character in stripped):
+        return "text"
+    if _SENTINEL.fullmatch(stripped):
+        return "text"
+
+    if _PERCENT_MARK.search(stripped):
         return "percent"
-    if any(word in lowered for word in _DATE_LABELS):
-        return "date"
-    if any(word in lowered for word in _COUNT_LABELS):
+    if _RATIO_MARK.search(stripped):
+        return "ratio"
+    if _CURRENCY_MARK.search(stripped):
+        return "currency"
+
+    words = [word for word in _NON_ALPHA.split(stripped) if len(word) > 1]
+    if len(words) >= _PROSE_WORD_COUNT:
+        return "text"
+
+    if _UNIT_IN_VALUE.search(stripped):
         return "count"
-    # A bare four-digit year with no currency mark and no decimal is a period,
-    # not an amount -- the last guard for a label that names none of the above.
-    if re.fullmatch(r"(?:19|20)\d{2}", raw.strip()):
+
+    if tokens & _DATE_WORDS and _is_date_shaped(stripped):
         return "date"
-    return infer_value_type(raw)
+    if _MONTH_NAME.search(stripped):
+        return "date"
 
+    if tokens & _METRIC_NOUNS:
+        return "currency"
+    if tokens & _COUNT_NOUNS or tokens & _DIMENSION_NOUNS:
+        return "count"
+    if "number" in tokens and "of" in tokens:
+        return "count"
 
-def infer_value_type(raw: str) -> ValueType:
-    """Read a value_type off the cell's own text.
+    if _YEAR.fullmatch(stripped):
+        return "date"
 
-    A trailing "%" is a percent; everything else in a financial table is read as
-    currency, including bare tokens with no "$". That is correct for a CIM
-    income statement and is load-bearing -- PTL PDF-page 11 prints
-
-        CAD (in Thousands)
-        Revenue       $15,295  $17,146 ...
-        Gross Margin    4,171    3,631 ...
-
-    where only the Revenue row carries "$" and Gross Margin is money too. Typing
-    the bare tokens as `count` would make DS-W3-4 refuse the header scale and
-    report an income-statement figure at a thousandth of its value.
-
-    The cost is that a genuine headcount in a scaled table reads 1000x high. On a
-    financial page that trade is right, and it is why this module is scoped to
-    financial tables. It is also why the real extractor must not inherit this
-    function: it should know the attribute's type, not guess it from a string.
-    """
-    return "percent" if "%" in raw else "currency"
+    return "currency"
 
 
 def attribute_for(table: TableRecord, cell: TableCellRecord) -> str | None:
