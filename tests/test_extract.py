@@ -141,6 +141,28 @@ def test_money_is_not_mistyped_by_a_word_that_merely_contains_a_count_or_date_wo
 @pytest.mark.parametrize(
     ("raw", "attribute", "expected"),
     [
+        # Trailing "net" is the accounting qualifier -- net of depreciation or
+        # allowance -- and the value is money either way.
+        ("2.5", "Customer list, net | 2005", "currency"),
+        ("47.2", "Property and equipment, net | 2003", "currency"),
+        # Leading "net" qualifies the noun that follows, and that noun is often
+        # countable. Typing these currency would let a "($ in millions)" header
+        # multiply a room count by a million.
+        ("1,200", "Net rooms added", "count"),
+        ("4,500", "Net new subscribers | 2024", "count"),
+        ("312", "Net units shipped", "count"),
+        # A real metric noun still wins from either position.
+        ("88.1", "Net revenues | 2005", "currency"),
+        ("9.1", "Net cash provided by operating activities | 2004", "currency"),
+    ],
+)
+def test_net_names_an_amount_only_when_it_trails(raw: str, attribute: str, expected: str) -> None:
+    assert infer_value_type_for(raw, attribute) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "attribute", "expected"),
+    [
         # A value that declares its own unit needs no label at all.
         ("27.3%", "Gross Margin", "percent"),
         ("150 bps", "Spread over LIBOR", "percent"),

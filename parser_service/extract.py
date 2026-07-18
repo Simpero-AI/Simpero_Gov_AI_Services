@@ -86,9 +86,18 @@ _METRIC_NOUNS = frozenset(
     payables payroll compensation wages salaries rent lease insurance marketing
     advertising royalty royalties cash flow flows proceeds investment investments
     purchase price value budget fee fees charge charges goodwill inventory
-    inventories equipment premises net
+    inventories equipment premises
     """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
 )
+
+# "net" only names an amount when it TRAILS, which is the accounting qualifier:
+# "Property and equipment, net", "Customer list, net" -- net of depreciation or
+# allowance, and money either way. Leading, it qualifies whatever noun follows,
+# and that noun is often countable: "Net rooms added", "Net new subscribers",
+# "Net units shipped" are counts, and typing them currency would let a
+# "($ in millions)" header multiply a room count by a million. Position is the
+# whole signal here, so it cannot live in the set above.
+_TRAILING_METRIC_NOUN = "net"
 
 # A count noun names something you can count. "property" is deliberately absent:
 # "Property and Equipment, Net" is money, and a genuine property count reads
@@ -166,17 +175,29 @@ _SENTINEL = re.compile(r"\s*(?:N/?A|NM|[-–—]+)\s*", re.IGNORECASE)
 _PROSE_WORD_COUNT = 4
 
 
-def _label_tokens(attribute: str) -> set[str]:
-    """The attribute's words, lowercased, with camelCase split apart.
+def _label_tokens(attribute: str) -> list[str]:
+    """The attribute's words in order, lowercased, with camelCase split apart.
 
     Reads the WHOLE attribute -- row label and column header both -- because
     which axis names the metric varies by table. A financial statement puts it
     in the row ("Cash and cash equivalents | 2003"); a property summary puts it
     in the column ("Stratosphere | Slot Machines"). Reading only the row label
     would miss every count in the second shape.
+
+    Order is preserved because one word's meaning depends on it: see
+    _TRAILING_METRIC_NOUN.
     """
     expanded = _CAMEL_BOUNDARY.sub(r"\1 \2", attribute)
-    return {token for token in _NON_ALPHA.split(expanded.lower()) if token}
+    return [token for token in _NON_ALPHA.split(expanded.lower()) if token]
+
+
+def _names_an_amount(tokens: list[str]) -> bool:
+    """Whether the label names a measured amount rather than a countable thing."""
+    if set(tokens) & _METRIC_NOUNS:
+        return True
+    # "net" counts only when it trails: "Customer list, net" is money, while
+    # "Net rooms added" is a room count.
+    return _TRAILING_METRIC_NOUN in tokens[1:]
 
 
 def _is_date_shaped(raw: str) -> bool:
@@ -218,6 +239,7 @@ def infer_value_type_for(raw: str, attribute: str) -> ValueType:
       8. Otherwise currency, per the asymmetry above.
     """
     tokens = _label_tokens(attribute)
+    vocabulary = set(tokens)
     stripped = raw.strip()
 
     if not any(character.isdigit() for character in stripped):
@@ -239,16 +261,16 @@ def infer_value_type_for(raw: str, attribute: str) -> ValueType:
     if _UNIT_IN_VALUE.search(stripped):
         return "count"
 
-    if tokens & _DATE_WORDS and _is_date_shaped(stripped):
+    if vocabulary & _DATE_WORDS and _is_date_shaped(stripped):
         return "date"
     if _MONTH_NAME.search(stripped):
         return "date"
 
-    if tokens & _METRIC_NOUNS:
+    if _names_an_amount(tokens):
         return "currency"
-    if tokens & _COUNT_NOUNS or tokens & _DIMENSION_NOUNS:
+    if vocabulary & _COUNT_NOUNS or vocabulary & _DIMENSION_NOUNS:
         return "count"
-    if "number" in tokens and "of" in tokens:
+    if "number" in vocabulary and "of" in vocabulary:
         return "count"
 
     if _YEAR.fullmatch(stripped):
