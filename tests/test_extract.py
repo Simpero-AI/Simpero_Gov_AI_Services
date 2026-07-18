@@ -18,7 +18,12 @@ from pathlib import Path
 import pytest
 
 from parser_service.emit import FlagLog, PdfLocation
-from parser_service.extract import attribute_for, claims_from_table, infer_value_type
+from parser_service.extract import (
+    attribute_for,
+    claims_from_table,
+    infer_value_type,
+    infer_value_type_for,
+)
 from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
 
 
@@ -133,13 +138,63 @@ def test_attribute_is_row_label_alone_when_columns_are_unlabeled() -> None:
     assert attribute_for(table, cells[1]) == "Revenue"
 
 
-def test_attribute_ignores_headers_ds_w3_2_says_are_unreliable() -> None:
-    # column_headers_reliable=False means Docling marked a *data* row as the
-    # header (verified on Pitchbook p.17). A header we were told not to trust
-    # must not be baked into an attribute name.
-    cells = [_cell(0, 0, ""), _cell(0, 1, "116"), _cell(1, 0, "Revenue"), _cell(1, 1, "$15,295")]
+def test_attribute_uses_the_structural_header_even_when_docling_flags_disagree() -> None:
+    # column_headers_reliable reports whether DOCLING's per-cell column_header
+    # markers agree with the structural inference. It is a diagnostic about
+    # Docling, not a verdict on header_row -- and on every financial statement in
+    # a CIM those markers disagree while the structural header is perfectly good.
+    #
+    # This flag used to gate the attribute, so the column was dropped and all
+    # four years of a line item collapsed onto one name: four rows reading
+    # "Cash and cash equivalents" with four different numbers. Whether a header
+    # can be trusted is _infer_header_row's call, made structurally.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "2003"),
+        _cell(1, 0, "Cash and cash equivalents"),
+        _cell(1, 1, "$77.3"),
+    ]
     table = _table(cells, headers_reliable=False)
-    assert attribute_for(table, cells[3]) == "Revenue"
+    assert attribute_for(table, cells[3]) == "Cash and cash equivalents | 2003"
+
+
+# --------------------------------------------------------------------------- #
+# value_type from the row label -- what stops a scale header hitting a count.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("raw", "label", "expected"),
+    [
+        # Counts stay counts however the table is denominated. Before this, a
+        # "($ in millions)" header turned each of these into billions.
+        ("1,309", "Slot Machines", "count"),
+        ("2,444", "Hotel Rooms", "count"),
+        ("49", "Table Games", "count"),
+        ("80,000", "Gaming Square Footage", "count"),
+        ("7", "ACEP Tenure (In Years)", "count"),
+        # Dates are periods, not amounts.
+        ("1998", "Date Acquired", "date"),
+        ("March '07", "Completion Date of Recent Renovation", "date"),
+        # A bare year with an unhelpful label is still a year, not $2bn.
+        ("2006", "Aquarius", "date"),
+        # Money is still money -- including the bare form with no "$", which is
+        # the PTL case this module must not regress.
+        ("$15,295", "Revenue", "currency"),
+        ("4,171", "Gross Margin", "currency"),
+        ("$77.3", "Cash and cash equivalents", "currency"),
+        # Percent wins regardless of label.
+        ("27.3%", "Gross Margin %", "percent"),
+        # The metric can live in the COLUMN instead of the row -- a property
+        # summary is laid out that way, and reading only the row label
+        # ("Stratosphere") would type every count as currency.
+        ("1,309", "Stratosphere | Slot Machines", "count"),
+        ("2,444", "Stratosphere | Hotel Rooms (1)", "count"),
+        ("1998", "Stratosphere | Date Acquired", "date"),
+    ],
+)
+def test_value_type_is_judged_from_the_attribute(raw: str, label: str, expected: str) -> None:
+    assert infer_value_type_for(raw, label) == expected
 
 
 def test_attribute_is_none_when_the_row_has_no_label() -> None:

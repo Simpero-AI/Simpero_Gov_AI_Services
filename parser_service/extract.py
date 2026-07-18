@@ -37,6 +37,8 @@ never a wrong citation.
 
 from __future__ import annotations
 
+import re
+
 from .emit import Claim, FlagLog, emit_pdf_table_cell_claim
 from .scale import ValueType
 from .schemas import PageIndex, TableCellRecord, TableRecord
@@ -50,6 +52,68 @@ def _has_digit(text: str) -> bool:
 
 def _cell_at(table: TableRecord, row: int, col: int) -> TableCellRecord | None:
     return next((c for c in table.cells if c.row == row and c.col == col), None)
+
+
+# Row labels whose values are NOT money, however the table is denominated. A
+# "($ in millions)" header applies to the money in the table, not to a count of
+# hotel rooms or a year -- and DS-W3-4 only scales `currency`, so typing these
+# correctly is what stops "1,309" slot machines becoming $1.309 billion.
+_COUNT_LABELS = (
+    "slot",
+    "machine",
+    "table game",
+    "game",
+    "room",
+    "position",
+    "seat",
+    "unit",
+    "square footage",
+    "square feet",
+    "sq ft",
+    "acre",
+    "employee",
+    "headcount",
+    "staff",
+    "tenure",
+    "years",
+    "count",
+    "number of",
+)
+_DATE_LABELS = ("date", "acquired", "opened", "completion", "completed", "as of", "expir")
+
+
+def infer_value_type_for(raw: str, attribute: str) -> ValueType:
+    """The value_type for a cell, judged from its ATTRIBUTE first.
+
+    The attribute names the metric, so it is a far better signal than the
+    token's own shape. "Slot Machines 1,309" is a count no matter how the table
+    is denominated; "Date Acquired 1998" is a year, not $1.998bn.
+
+    It takes the whole attribute -- row label AND column header -- because which
+    axis carries the metric name varies by table. A financial statement puts it
+    in the row ("Cash and cash equivalents | 2003"); a property summary puts it
+    in the column ("Stratosphere | Slot Machines"). Reading only the row label
+    would miss every count in the second shape.
+
+    This matters because DS-W3-4 applies the table's scale header to `currency`
+    alone. Typing everything non-percent as currency -- which this did -- meant a
+    "($ in millions)" header multiplied room counts, table-game counts, gaming
+    square footage and acquisition years by a million. On the ACEP CIM's property
+    summary that produced $80 billion of gaming square footage and $2.4 billion
+    of hotel rooms, from a table whose real figures are tens of millions.
+    """
+    lowered = attribute.lower()
+    if "%" in raw:
+        return "percent"
+    if any(word in lowered for word in _DATE_LABELS):
+        return "date"
+    if any(word in lowered for word in _COUNT_LABELS):
+        return "count"
+    # A bare four-digit year with no currency mark and no decimal is a period,
+    # not an amount -- the last guard for a label that names none of the above.
+    if re.fullmatch(r"(?:19|20)\d{2}", raw.strip()):
+        return "date"
+    return infer_value_type(raw)
 
 
 def infer_value_type(raw: str) -> ValueType:
@@ -92,11 +156,20 @@ def attribute_for(table: TableRecord, cell: TableCellRecord) -> str | None:
         return None
     label = label_cell.text_normalized.strip()
 
-    # header_row is None for a table with unlabeled columns. The row label alone
-    # is then the whole attribute -- weaker, but honest. DS-W3-2 also marks
-    # column_headers_reliable=False for headers it does not trust; a header we
-    # were told not to trust must not be baked into an attribute name.
-    if table.header_row is None or not table.column_headers_reliable:
+    # header_row is None only when the columns are genuinely unlabeled; the row
+    # label alone is then the whole attribute -- weaker, but honest.
+    #
+    # Deliberately NOT gated on column_headers_reliable. That flag reports
+    # whether Docling's per-cell column_header markers agree with the structural
+    # inference -- a diagnostic about Docling, not a verdict on header_row.
+    # Gating on it discarded the column header on every financial statement in a
+    # CIM, because Docling's markers disagree there. The cost was severe: all
+    # four years of "Cash and cash equivalents" collapsed onto one attribute,
+    # four rows with the same name and different numbers, none of them usable.
+    # DS-W3-2's _infer_header_row now validates the row structurally -- it must
+    # span the value columns and read as labels or periods -- and that inference
+    # is the signal worth trusting.
+    if table.header_row is None:
         return label
 
     header_cell = _cell_at(table, table.header_row, cell.col)
@@ -145,7 +218,7 @@ def claims_from_table(
                 table,
                 cell,
                 page,
-                value_type=infer_value_type(raw),
+                value_type=infer_value_type_for(raw, attribute),
                 file=file,
                 flag_log=flag_log,
                 section=section,
