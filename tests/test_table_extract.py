@@ -23,6 +23,7 @@ from parser_service.schemas import (
 )
 from parser_service.table_extract import (
     _build_table_record,
+    _infer_header_row,
     _reconstruct_bbox,
     extract_tables,
     tables_on_page,
@@ -447,3 +448,83 @@ def test_extract_tables_threads_page_indices_for_fallback() -> None:
     with_index = extract_tables(doc, [page])
     assert with_index[0].cell_provenance_ok is True
     assert with_index[0].reconstructed_cells == 1
+
+
+def _rec(row: int, col: int, text: str) -> TableCellRecord:
+    """A TableCellRecord, which is what _infer_header_row reads (the module's
+    other _cell helper builds Docling-shaped stand-ins for _build_table_record)."""
+    return TableCellRecord(
+        row=row,
+        col=col,
+        row_span=1,
+        col_span=1,
+        text=text,
+        text_normalized=text,
+        column_header=False,
+        row_header=(col == 0),
+        page=1,
+        x0=0.0,
+        top=0.0,
+        x1=1.0,
+        bottom=1.0,
+        bbox_source="docling_native",
+    )
+
+
+def test_header_row_found_below_a_title_and_caption() -> None:
+    """A financial statement stacks rows before its columns:
+
+        row 0  Consolidated Balance Sheet        ($ in millions)   <- title
+        row 1  As of December 31,                                  <- caption
+        row 2           2003     2004                              <- the header
+        row 3  Cash and cash equivalents  $77.3  $75.2             <- data
+
+    Only row 2 spans the value columns, so only row 2 is the header. Taking row 0
+    named every value after the table's title and collapsed both years of a line
+    item onto one attribute.
+    """
+    cells = [
+        _rec(0, 0, "Consolidated Balance Sheet"),
+        _rec(0, 2, "($ in millions)"),
+        _rec(1, 1, "As of December 31,"),
+        _rec(2, 1, "2003"),
+        _rec(2, 2, "2004"),
+        _rec(3, 0, "Cash and cash equivalents"),
+        _rec(3, 1, "$77.3"),
+        _rec(3, 2, "$75.2"),
+        _rec(4, 0, "Accounts receivable"),
+        _rec(4, 1, "$10.1"),
+        _rec(4, 2, "$11.4"),
+    ]
+    assert _infer_header_row(cells) == 2
+
+
+def test_header_row_still_found_at_row_zero_for_a_plain_table() -> None:
+    # The common shape must not regress: labels on row 0, data beneath.
+    cells = [
+        _rec(0, 0, "Property"),
+        _rec(0, 1, "Slots"),
+        _rec(0, 2, "Hotel Rooms"),
+        _rec(1, 0, "Stratosphere"),
+        _rec(1, 1, "1,309"),
+        _rec(1, 2, "2,444"),
+        _rec(2, 0, "Aquarius"),
+        _rec(2, 1, "1,021"),
+        _rec(2, 2, "1,907"),
+    ]
+    assert _infer_header_row(cells) == 0
+
+
+def test_a_table_of_bare_figures_still_has_no_header() -> None:
+    # The Pitchbook case: the first row spanning the value columns IS data, so
+    # the table genuinely has no header and must say so rather than name columns
+    # after data values.
+    cells = [
+        _rec(0, 0, "Segment A"),
+        _rec(0, 1, "14.35"),
+        _rec(0, 2, "83.04"),
+        _rec(1, 0, "Segment B"),
+        _rec(1, 1, "12.10"),
+        _rec(1, 2, "77.90"),
+    ]
+    assert _infer_header_row(cells) is None

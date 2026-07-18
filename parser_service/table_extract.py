@@ -1,4 +1,6 @@
 import logging
+import re
+from collections import Counter
 from typing import Literal
 
 from docling_core.types.doc.document import (
@@ -34,6 +36,38 @@ def _looks_numeric(text: str) -> bool:
     return not any(ch.isalpha() for ch in stripped) and any(ch.isdigit() for ch in stripped)
 
 
+# A negative lookahead for a further digit, NOT \b: a word boundary fails on
+# "2006E" because "E" is a word character, and an estimate column is exactly the
+# spelling a CIM uses. This still refuses to match inside a longer number.
+_YEAR_RE = re.compile(r"^(?:19|20)\d{2}(?!\d)")
+
+
+def _looks_like_year(text: str) -> bool:
+    """A period column label: "2003", "2006E", "2008E (1)", "FY2005".
+
+    Year headers are the one kind of column label that reads as a figure, so the
+    all-text test alone would reject them and leave a financial statement with no
+    header at all.
+    """
+    stripped = text.strip().lstrip("FY").lstrip()
+    return bool(_YEAR_RE.match(stripped))
+
+
+def _value_columns(cells: list[TableCellRecord]) -> set[int]:
+    """The columns that actually carry figures, judged across the whole table.
+
+    A column counts when at least two rows put a figure in it, so a stray number
+    in a title or a footnote does not create a phantom data column.
+    """
+    counts: Counter[int] = Counter()
+    for row in {c.row for c in cells}:
+        figures = [c for c in cells if c.row == row and c.col >= 1 and _looks_numeric(c.text)]
+        if len(figures) >= 2:
+            for cell in figures:
+                counts[cell.col] += 1
+    return {col for col, n in counts.items() if n >= 2}
+
+
 def _infer_header_row(cells: list[TableCellRecord]) -> int | None:
     """Locate the header row from table structure, ignoring Docling's flag.
 
@@ -43,17 +77,51 @@ def _infer_header_row(cells: list[TableCellRecord]) -> int | None:
     labels above bare ratio columns). Relying on the flag there would invent
     column names out of data values.
 
-    Structural rule: row 0 is the header row only if it actually carries
-    non-empty value-column labels (col >= 1) and none of them read as figures.
-    Otherwise this table has no header row and we say so (None) instead of
-    guessing.
+    Structural rule: the header row is the TOPMOST row that spans the table's
+    value columns. A column label has to sit above the column it labels, so this
+    naturally skips the rows that do not span them — a title banner
+    ("Consolidated Balance Sheet"), a scale banner ("($ in millions)"), a period
+    caption ("As of December 31,") — and lands on the row that does.
+
+    Looking only at row 0, as this did originally, breaks on every financial
+    statement in a CIM, because they stack three rows before the data:
+
+        row 0  Consolidated Balance Sheet          ($ in millions)   <- title
+        row 1  As of December 31,                                    <- caption
+        row 2           2003     2004     2005     2006E             <- the header
+        row 5  Cash and cash equivalents  $77.3  $75.2 ...           <- data
+
+    Row 0 was returned as the header there, so every value in the table was
+    named after the title instead of its year, and all four years of a line item
+    collapsed onto one indistinguishable attribute.
+
+    The first row spanning the value columns is the header rather than data
+    because a header precedes its data by definition. It only counts as one if
+    its labels are either all text ("Slots", "Hotel Rooms") or all periods
+    ("2003", "2006E") -- a spanning row of mixed figures is the first DATA row,
+    which is the Pitchbook case, and there the table genuinely has no header.
     """
-    labels = [c for c in cells if c.row == 0 and c.col >= 1 and c.text.strip()]
-    if not labels:
+    value_cols = _value_columns(cells)
+    if not value_cols:
+        # No column carries figures more than once, so there is nothing to align
+        # a header against. Fall back to the original row-0 rule.
+        labels = [c for c in cells if c.row == 0 and c.col >= 1 and c.text.strip()]
+        if not labels or any(_looks_numeric(c.text) for c in labels):
+            return None
+        return 0
+
+    for row in sorted({c.row for c in cells}):
+        occupied = {c.col for c in cells if c.row == row and c.text.strip()}
+        if not value_cols.issubset(occupied):
+            continue
+        labels = [c for c in cells if c.row == row and c.col in value_cols and c.text.strip()]
+        if all(not _looks_numeric(c.text) for c in labels):
+            return row
+        if all(_looks_like_year(c.text) for c in labels):
+            return row
+        # The first row spanning the value columns is already data: no header.
         return None
-    if any(_looks_numeric(c.text) for c in labels):
-        return None
-    return 0
+    return None
 
 
 def _reconstruct_bbox(
