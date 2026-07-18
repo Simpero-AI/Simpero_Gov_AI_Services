@@ -624,3 +624,60 @@ def test_digitless_tokens_never_parse_as_numbers(text: str) -> None:
 def test_real_scale_tokens_still_parse(text: str, expected: tuple) -> None:
     # The guard above must not cost recall on the notations CIMs actually use.
     assert normalize_financial_token(text) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Scale phrases with the currency INSIDE the parens -- "($ in millions)".
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "multiplier", "currency"),
+    [
+        # The spelling that was missed. A real Bear Stearns CIM prints this
+        # throughout; without it every currency figure normalized 1,000,000x too
+        # small, flagged assumed_1x.
+        ("($ in millions)", 1_000_000.0, None),
+        ("($ in thousands)", 1_000.0, None),
+        # An unambiguous symbol or code inside the parens does name a currency.
+        ("(US$ in millions)", 1_000_000.0, "USD"),
+        ("(C$ in thousands)", 1_000.0, "CAD"),
+        ("(£ in millions)", 1_000_000.0, "GBP"),
+        ("(€ in millions)", 1_000_000.0, "EUR"),
+        ("(USD in thousands)", 1_000.0, "USD"),
+        # Still-supported spellings must not regress.
+        ("CAD (in Thousands)", 1_000.0, "CAD"),
+        ("(in millions)", 1_000_000.0, None),
+        ("(000s)", 1_000.0, None),
+        ("($000s)", 1_000.0, None),
+        # A scale phrase that wraps across a line break -- real documents do
+        # this, and \s+ must span the newline.
+        ("(in\nmillions)", 1_000_000.0, None),
+    ],
+)
+def test_scale_phrase_spellings(text: str, multiplier: float, currency: str | None) -> None:
+    found = scale_phrase_in_text(text)
+    assert found is not None, f"{text!r} should be recognized as a scale phrase"
+    assert found[0] == multiplier
+    assert found[1] == currency
+
+
+def test_bare_dollar_names_a_magnitude_but_not_a_currency() -> None:
+    # "$" could be USD, CAD, AUD... The multiplier is trustworthy, the currency
+    # is not. Returning None here is what makes the caller raise ambiguous_unit
+    # instead of inventing a confident, wrong unit.
+    found = scale_phrase_in_text("($ in millions)")
+    assert found is not None
+    multiplier, currency, _ = found
+    assert multiplier == 1_000_000.0
+    assert currency is None
+
+
+def test_lowercase_word_is_still_not_read_as_a_currency_code() -> None:
+    # The [A-Z]{3} slots stay case-sensitive: a lowercase three-letter word next
+    # to a scale phrase must not be captured as a currency.
+    found = scale_phrase_in_text("the (in thousands) note")
+    assert found is not None
+    multiplier, currency, _ = found
+    assert multiplier == 1_000.0
+    assert currency is None

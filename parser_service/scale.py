@@ -212,18 +212,68 @@ _SCALE_WORD_MULTIPLIERS: dict[str, float] = {
     "billion": 1_000_000_000.0,
 }
 
-# "CAD (in Thousands)", "(in millions)": an optional leading ISO-style
-# currency code, then the "(in <word>)" scale phrase itself. Case-sensitivity
-# is scoped with (?i:...) to the phrase only -- if it covered the whole
-# pattern, a lowercase 3-letter word ("the (in thousands)") could be
-# misread as a currency code.
+# A currency mark that can sit INSIDE the parens, before "in". A bare "$" is
+# deliberately absent from this map: it could be USD, CAD, AUD or several
+# others, so the multiplier is trusted while the unit stays unknown -- which is
+# precisely what the ambiguous_unit flag exists to say.
+_SYMBOL_CURRENCIES: dict[str, str] = {
+    "US$": "USD",
+    "C$": "CAD",
+    "A$": "AUD",
+    "NZ$": "NZD",
+    "HK$": "HKD",
+    "£": "GBP",
+    "€": "EUR",
+    "¥": "JPY",
+}
+
+# "CAD (in Thousands)", "(in millions)", "($ in millions)", "(US$ in millions)".
+#
+# The currency may sit OUTSIDE the parens ("CAD (in Thousands)") or INSIDE them
+# ahead of "in" ("($ in millions)"). Only the first spelling was recognized
+# originally, so the far more common CIM convention silently lost its scale:
+# every currency figure in such a document normalized a thousand or a million
+# times too small, flagged assumed_1x. Verified against a real Bear Stearns CIM,
+# which prints "($ in millions)" throughout.
+#
+# Case-sensitivity is scoped with (?i:...) to "in" and the magnitude word only.
+# If it covered the whole pattern, a lowercase 3-letter word could be misread as
+# a currency code -- so both [A-Z]{3} slots stay case-sensitive.
+_CURRENCY_MARK = r"US\$|C\$|A\$|NZ\$|HK\$|\$|£|€|¥|[A-Z]{3}"
+
 _SCALE_PHRASE_RE = re.compile(
     r"(?:(?P<currency>[A-Z]{3})\s+)?"
-    r"(?i:\(\s*in\s+(?P<word>thousands?|millions?|billions?)\s*\))"
+    r"\(\s*"
+    rf"(?:(?P<insym>{_CURRENCY_MARK})\s*)?"
+    r"(?i:in)\s+"
+    r"(?i:(?P<word>thousands?|millions?|billions?))"
+    r"\s*\)"
 )
 
-# "(000s)" / "(000's)": always thousands, no currency slot of its own.
-_PAREN_000_RE = re.compile(r"\(\s*000(?:'s|s)?\s*\)", re.IGNORECASE)
+# "(000s)" / "(000's)" / "($000s)": always thousands. Any currency is only a
+# bare symbol here, so there is no trustworthy currency slot of its own.
+_PAREN_000_RE = re.compile(r"\(\s*(?:\$\s*)?000(?:'s|s)?\s*\)", re.IGNORECASE)
+
+
+def _phrase_currency(match: re.Match[str]) -> str | None:
+    """The currency a scale phrase names, or None when it names none that can be
+    trusted.
+
+    A bare "$" resolves to None on purpose: the phrase genuinely declares a
+    magnitude but not *which* dollar, so the multiplier is applied while the unit
+    stays unknown and the caller raises ambiguous_unit. Guessing USD here would
+    convert a known unknown into a silent, confident error.
+    """
+    outside = match.group("currency")
+    if outside:
+        return outside
+    inside = match.group("insym")
+    if not inside:
+        return None
+    if len(inside) == 3 and inside.isalpha():
+        return inside
+    return _SYMBOL_CURRENCIES.get(inside)
+
 
 _ScalePhraseMatch = tuple[int, int, float, str | None]
 
@@ -240,7 +290,7 @@ def _find_scale_phrases(text: str) -> list[_ScalePhraseMatch]:
     stripped form "CAD (in Thousands)" with no extra .strip() needed at the
     regex boundary itself; callers still strip defensively before use."""
     matches: list[_ScalePhraseMatch] = [
-        (m.start(), m.end(), _scale_word_multiplier(m.group("word")), m.group("currency"))
+        (m.start(), m.end(), _scale_word_multiplier(m.group("word")), _phrase_currency(m))
         for m in _SCALE_PHRASE_RE.finditer(text)
     ]
     matches += [(m.start(), m.end(), 1_000.0, None) for m in _PAREN_000_RE.finditer(text)]
