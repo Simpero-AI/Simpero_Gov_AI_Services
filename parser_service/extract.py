@@ -309,8 +309,56 @@ def infer_value_type_for(raw: str, attribute: str) -> ValueType:
     return "currency"
 
 
-def attribute_for(table: TableRecord, cell: TableCellRecord) -> str | None:
-    """The table's own name for this cell: "<row label> | <column header>".
+def section_banners(table: TableRecord) -> dict[int, str]:
+    """Each row's governing in-table section banner, by row index.
+
+    A financial statement groups its rows under banners that are themselves rows:
+    a label with no figures beside it.
+
+        row 1   TURNOVER                                      <- banner
+        row 4     Coffee Shop        41    92    94
+        row 11  COST OF SALES                                 <- banner
+        row 14    Coffee Shop        31    71    72
+
+    Those banners carry meaning that nothing else in the table does, and without
+    them two of these rows are the same claim. "Coffee Shop | YEAR 1" appears
+    twice with different numbers and no way to tell which is revenue and which is
+    the cost of earning it.
+
+    They also name the rows the table leaves unlabelled. A section subtotal is
+    printed as figures with an empty label cell, so `attribute_for` had nothing to
+    call it and the value was dropped -- 431 cells on one CIM, including every
+    turnover and cost-of-sales total.
+
+    A row counts as a banner when its label column is filled and no cell beside it
+    holds a digit. That is deliberately strict: a row with any figure in it is
+    data, whatever it is called.
+    """
+    rows: dict[int, dict[int, str]] = {}
+    for cell in table.cells:
+        rows.setdefault(cell.row, {})[cell.col] = cell.text_normalized.strip()
+
+    governing: dict[int, str] = {}
+    current: str | None = None
+    for row in sorted(rows):
+        if row == table.header_row:
+            continue
+        cells = rows[row]
+        label = cells.get(_LABEL_COL, "")
+        has_figures = any(col >= 1 and text and _has_digit(text) for col, text in cells.items())
+        if label and not has_figures:
+            current = label
+            continue
+        if current is not None:
+            governing[row] = current
+    return governing
+
+
+def attribute_for(
+    table: TableRecord, cell: TableCellRecord, banner: str | None = None
+) -> str | None:
+    """The table's own name for this cell:
+    "<section banner> | <row label> | <column header>".
 
     Deliberately the source document's words rather than a product attribute
     (`revenueLatestUsd`). Mapping a CIM's phrasing onto a fixed vocabulary is the
@@ -318,13 +366,26 @@ def attribute_for(table: TableRecord, cell: TableCellRecord) -> str | None:
     from a string match would be a silent, confident error of exactly the kind
     this codebase refuses elsewhere.
 
-    Returns None when the row has no label, because a value whose own table
-    cannot say what it is has no attribute to claim.
+    The banner is included because without it the name is not unique inside its
+    own table: "Coffee Shop | YEAR 1" is both a revenue line and a cost line on
+    the same page. It also makes the name true to what the document says, which
+    is what lets value typing get these right -- a row under TURNOVER is money
+    however countable its own noun sounds.
+
+    Returns None when the row has no label AND no banner governs it, because a
+    value nothing in the table can name has no attribute to claim.
     """
     label_cell = _cell_at(table, cell.row, _LABEL_COL)
-    if label_cell is None or not label_cell.text_normalized.strip():
-        return None
-    label = label_cell.text_normalized.strip()
+    label = label_cell.text_normalized.strip() if label_cell else ""
+    if not label:
+        # An unlabelled row under a banner is that section's own line -- a
+        # subtotal, in every case seen so far. The banner is the table's word
+        # for it, so it is a name the document supplies rather than one invented
+        # here.
+        if not banner:
+            return None
+        label = banner
+        banner = None
 
     # header_row is None only when the columns are genuinely unlabeled; the row
     # label alone is then the whole attribute -- weaker, but honest.
@@ -339,13 +400,15 @@ def attribute_for(table: TableRecord, cell: TableCellRecord) -> str | None:
     # DS-W3-2's _infer_header_row now validates the row structurally -- it must
     # span the value columns and read as labels or periods -- and that inference
     # is the signal worth trusting.
+    parts = [banner, label] if banner else [label]
+
     if table.header_row is None:
-        return label
+        return " | ".join(parts)
 
     header_cell = _cell_at(table, table.header_row, cell.col)
     if header_cell is None or not header_cell.text_normalized.strip():
-        return label
-    return f"{label} | {header_cell.text_normalized.strip()}"
+        return " | ".join(parts)
+    return " | ".join([*parts, header_cell.text_normalized.strip()])
 
 
 def claims_from_table(
@@ -368,7 +431,13 @@ def claims_from_table(
     value cannot be cited comes back `missing` rather than being dropped
     silently. That matters: a dropped cell is invisible, a `missing` claim is a
     recall gap you can see.
+
+    Rows are read under their in-table section banner (see section_banners), so a
+    line keeps the heading the document filed it under. That is what separates
+    the two "Coffee Shop" rows on a P&L, and what names the unlabelled subtotal
+    rows that were previously dropped for having nothing to call them.
     """
+    banners = section_banners(table)
     claims: list[Claim] = []
     for cell in sorted(table.cells, key=lambda c: (c.row, c.col)):
         if cell.col == _LABEL_COL or cell.row == table.header_row:
@@ -377,7 +446,7 @@ def claims_from_table(
         if not raw or not _has_digit(raw):
             continue
 
-        attribute = attribute_for(table, cell)
+        attribute = attribute_for(table, cell, banners.get(cell.row))
         if attribute is None:
             continue
 
