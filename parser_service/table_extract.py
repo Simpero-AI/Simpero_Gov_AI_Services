@@ -15,8 +15,8 @@ from .schemas import PageIndex, TableCellRecord, TableRecord
 logger = logging.getLogger(__name__)
 
 
-def _bbox_is_valid(bbox) -> bool:
-    """A cell coordinate is citable only if present and geometrically real —
+def bbox_is_valid(bbox) -> bool:
+    """A coordinate is citable only if present and geometrically real —
     positive width and non-zero height. Origin-agnostic (x always increases
     left to right; height is checked as non-zero, not signed). Catches dropped
     or inverted rects that a bare None check would pass as valid provenance."""
@@ -124,11 +124,11 @@ def _infer_header_row(cells: list[TableCellRecord]) -> int | None:
     return None
 
 
-def _reconstruct_bbox(
+def reconstruct_bbox(
     text_normalized: str, page_index: PageIndex
 ) -> tuple[float, float, float, float] | None:
-    """Recover a cell's coordinates from the page's positioned index when Docling
-    exposed no valid cell bbox: resolve the cell text against the page via the
+    """Recover an item's coordinates from the page's positioned index when Docling
+    exposed no valid bbox: resolve the cell text against the page via the
     DS-W3-3 exact-span resolver (fail closed on absent/ambiguous — a reconstructed
     coordinate is never a guess). The page index is normalized, so match on
     text_normalized."""
@@ -154,11 +154,11 @@ def _build_table_record(table: TableItem, page_index: PageIndex | None) -> Table
         text_normalized = normalize_numeric_text(cell.text)
         bbox = cell.bbox
         source: Literal["docling_native", "reconstructed"] | None
-        if bbox is not None and _bbox_is_valid(bbox):
+        if bbox is not None and bbox_is_valid(bbox):
             x0, top, x1, bottom = bbox.l, bbox.t, bbox.r, bbox.b
             source = "docling_native"
         else:
-            rebuilt = _reconstruct_bbox(text_normalized, page_index) if page_index else None
+            rebuilt = reconstruct_bbox(text_normalized, page_index) if page_index else None
             if rebuilt is not None:
                 x0, top, x1, bottom = rebuilt
                 source = "reconstructed"
