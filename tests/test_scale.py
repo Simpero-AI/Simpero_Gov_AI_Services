@@ -170,6 +170,75 @@ def test_scale_phrase_in_text_returns_none_when_absent() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Non-dollar thousands markers.
+#
+# Only the dollar spellings were recognised, so a sterling document lost its
+# scale outright: measured over a 102-page UK CIM, 89% of cited claims fell back
+# to assumed_1x and every currency figure normalized a thousandth of its value.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "currency"),
+    [
+        # How a UK statement writes it: in the column header cell, unparenthesised.
+        ("£'000", "GBP"),
+        ("£000", "GBP"),
+        ("YEAR 1 £'000", "GBP"),
+        ("PRO-FORMA 5 YEAR BALANCE SHEET £'000's", "GBP"),
+        # Parenthesised, as it appears in prose and table titles.
+        ("(£'000s)", "GBP"),
+        ("(£000's)", "GBP"),
+        ("(£ in thousands)", "GBP"),
+        ("€'000", "EUR"),
+        ("US$000", "USD"),
+        # The dollar and bare spellings that already worked must keep working.
+        ("($000s)", None),
+        ("(000s)", None),
+        ("(000)", None),
+        ("'000", None),
+    ],
+)
+def test_a_thousands_marker_is_read_whatever_its_currency(text: str, currency: str | None) -> None:
+    found = scale_phrase_in_text(text)
+    assert found is not None, f"{text!r} declares thousands"
+    multiplier, unit, _context = found
+    assert multiplier == 1_000.0
+    # "£" names GBP unambiguously, so unlike a bare "$" it settles the unit too.
+    assert unit == currency
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A currency mark alone is not a scale declaration. This is the header of
+        # the same document's appendix tables, which are denominated in FULL
+        # pounds -- reading it as thousands would multiply every one of them.
+        "£",
+        "Jan-06 £",
+        # An ordinary number contains "000" and must never declare a scale.
+        "£1,000",
+        "£42,012",
+        "12,000",
+        "1,000",
+        "Wet Sales 42,012",
+        "Total 1,059,922",
+        "$1,000,000",
+        "Room 1000",
+    ],
+)
+def test_a_bare_currency_mark_or_a_plain_number_declares_no_scale(text: str) -> None:
+    assert scale_phrase_in_text(text) is None
+
+
+def test_a_parenthesised_marker_is_reported_once_at_its_widest() -> None:
+    # "(£'000s)" contains "£'000", so both patterns match the same declaration.
+    # It must be reported once, as the full parenthesised span, or the
+    # nearest-wins rules could pick the inner one and truncate scale_context.
+    assert scale_phrase_in_text("(£'000s)") == (1_000.0, "GBP", "(£'000s)")
+
+
+# --------------------------------------------------------------------------- #
 # determine_scale -- full resolution order.
 # --------------------------------------------------------------------------- #
 

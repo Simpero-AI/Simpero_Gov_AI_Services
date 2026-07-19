@@ -250,29 +250,54 @@ _SCALE_PHRASE_RE = re.compile(
     r"\s*\)"
 )
 
-# "(000s)" / "(000's)" / "($000s)": always thousands. Any currency is only a
-# bare symbol here, so there is no trustworthy currency slot of its own.
-_PAREN_000_RE = re.compile(r"\(\s*(?:\$\s*)?000(?:'s|s)?\s*\)", re.IGNORECASE)
+# The zeros form of a thousands marker, in its two spellings.
+#
+# "(000s)", "($000s)", "(£'000s)" -- parenthesised, where a bare "000" is
+# already unambiguous, so the currency mark stays optional.
+#
+# "£'000", "'000", "$000" -- unparenthesised, which is how a UK statement writes
+# it in the column header cell itself:
+#
+#     YEAR 1   YEAR 2   YEAR 3
+#      £'000    £'000    £'000
+#
+# There the marker has no parentheses to delimit it, so something else must
+# stop it matching the tail of an ordinary number: "£1,000" and "12,000" both
+# contain "000". Two guards do it. A currency mark or an apostrophe is
+# REQUIRED, since neither appears mid-number, and a lookbehind refuses a match
+# preceded by a digit, comma or point. Without both, every "1,000" in a
+# document would declare itself a thousands header.
+#
+# Only dollars were recognised before, so a sterling document lost its scale
+# entirely: measured over a 102-page UK CIM, 89% of cited claims fell back to
+# assumed_1x and every currency figure normalized a thousand times too small.
+_ZEROS = r"'?000(?:'?[Ss])?"
+
+_PAREN_000_RE = re.compile(rf"\(\s*(?:(?P<sym>{_CURRENCY_MARK})\s*)?{_ZEROS}\s*\)")
+_BARE_000_RE = re.compile(rf"(?<![\d,.'])(?:(?P<sym>{_CURRENCY_MARK})\s*'?|')000(?:'?[Ss])?\b")
+
+
+def _mark_currency(mark: str | None) -> str | None:
+    """The currency a mark names, or None when it names none that can be trusted.
+
+    A bare "$" resolves to None on purpose: it genuinely declares a magnitude but
+    not *which* dollar, so the multiplier is applied while the unit stays unknown
+    and the caller raises ambiguous_unit. Guessing USD would convert a known
+    unknown into a silent, confident error. "£" carries no such ambiguity.
+    """
+    if not mark:
+        return None
+    if len(mark) == 3 and mark.isalpha():
+        return mark
+    return _SYMBOL_CURRENCIES.get(mark)
 
 
 def _phrase_currency(match: re.Match[str]) -> str | None:
-    """The currency a scale phrase names, or None when it names none that can be
-    trusted.
-
-    A bare "$" resolves to None on purpose: the phrase genuinely declares a
-    magnitude but not *which* dollar, so the multiplier is applied while the unit
-    stays unknown and the caller raises ambiguous_unit. Guessing USD here would
-    convert a known unknown into a silent, confident error.
-    """
+    """The currency a "(in thousands)" phrase names, from either slot."""
     outside = match.group("currency")
     if outside:
         return outside
-    inside = match.group("insym")
-    if not inside:
-        return None
-    if len(inside) == 3 and inside.isalpha():
-        return inside
-    return _SYMBOL_CURRENCIES.get(inside)
+    return _mark_currency(match.group("insym"))
 
 
 _ScalePhraseMatch = tuple[int, int, float, str | None]
@@ -293,9 +318,24 @@ def _find_scale_phrases(text: str) -> list[_ScalePhraseMatch]:
         (m.start(), m.end(), _scale_word_multiplier(m.group("word")), _phrase_currency(m))
         for m in _SCALE_PHRASE_RE.finditer(text)
     ]
-    matches += [(m.start(), m.end(), 1_000.0, None) for m in _PAREN_000_RE.finditer(text)]
-    matches.sort(key=lambda t: t[0])
-    return matches
+    for pattern in (_PAREN_000_RE, _BARE_000_RE):
+        matches += [
+            (m.start(), m.end(), 1_000.0, _mark_currency(m.group("sym")))
+            for m in pattern.finditer(text)
+        ]
+    # One declaration can match twice, because a parenthesised marker CONTAINS
+    # the bare one: "(£'000s)" holds "£'000", and "(£ in thousands)" holds
+    # nothing but would if the spellings overlapped further. Drop any span fully
+    # inside another so a single declaration is reported once, as its widest
+    # reading -- otherwise the nearest-wins rules below could pick the inner
+    # span and report a truncated scale_context for the same multiplier.
+    matches.sort(key=lambda t: (t[0], -t[1]))
+    kept: list[_ScalePhraseMatch] = []
+    for found in matches:
+        if any(outer[0] <= found[0] and found[1] <= outer[1] for outer in kept):
+            continue
+        kept.append(found)
+    return kept
 
 
 def scale_phrase_in_text(text: str) -> tuple[float, str | None, str] | None:
