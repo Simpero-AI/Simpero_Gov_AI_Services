@@ -24,8 +24,8 @@ from parser_service.schemas import (
 from parser_service.table_extract import (
     _build_table_record,
     _infer_header_row,
-    _reconstruct_bbox,
     extract_tables,
+    reconstruct_bbox,
     tables_on_page,
 )
 
@@ -363,9 +363,9 @@ def _page_index(text: str, x0: float = 100.0, y: float = 200.0, w: float = 6.0) 
     return PageIndex(page=1, text=text, char_map=boxes)
 
 
-def test_reconstruct_bbox_unique_match_unions_char_boxes() -> None:
+def testreconstruct_bbox_unique_match_unions_char_boxes() -> None:
     page = _page_index("Revenue 3,817 total")
-    bbox = _reconstruct_bbox("3,817", page)
+    bbox = reconstruct_bbox("3,817", page)
     assert bbox is not None
     x0, top, x1, bottom = bbox
     start = page.text.index("3,817")
@@ -375,10 +375,10 @@ def test_reconstruct_bbox_unique_match_unions_char_boxes() -> None:
     assert bottom > top
 
 
-def test_reconstruct_bbox_fails_closed_on_absent_or_ambiguous() -> None:
-    assert _reconstruct_bbox("9,999", _page_index("Revenue 3,817 total")) is None
-    assert _reconstruct_bbox("3,817", _page_index("3,817 versus 3,817 again")) is None
-    assert _reconstruct_bbox("", _page_index("anything")) is None
+def testreconstruct_bbox_fails_closed_on_absent_or_ambiguous() -> None:
+    assert reconstruct_bbox("9,999", _page_index("Revenue 3,817 total")) is None
+    assert reconstruct_bbox("3,817", _page_index("3,817 versus 3,817 again")) is None
+    assert reconstruct_bbox("", _page_index("anything")) is None
 
 
 def test_missing_bbox_is_reconstructed_from_page_index() -> None:

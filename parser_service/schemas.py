@@ -77,6 +77,54 @@ class TableCellRecord(BaseModel):
     bbox_source: Literal["docling_native", "reconstructed"] | None = None
 
 
+class TextBlockRecord(BaseModel):
+    """One non-table text item from the parsed document, with its coordinates.
+
+    The claim path reads doc.tables and nothing else, so roughly half of a CIM's
+    facts are never visited: measured against reference sets over two real CIMs,
+    44% and 59% of their claims sit in prose, chart labels and footnotes. Docling
+    already separates that content -- 1,426 text items across 78 pages on one
+    102-page CIM, against the 19 pages carrying a table -- and the parse result
+    discarded it.
+
+    This surfaces those blocks faithfully and decides nothing about them. Which
+    blocks are worth reading, and what a sentence asserts, are separate problems.
+    """
+
+    page: int = Field(ge=1)
+    # Position in document body order, preserved so a consumer can walk backwards
+    # to the section heading that governs a block. Nothing here attaches one.
+    order: int = Field(ge=0)
+    # Docling's own label ("text", "section_header", "caption", "footnote",
+    # "list_item", ...). ADVISORY ONLY, and specifically not to be trusted
+    # wholesale: on a real CIM its page_header label was assigned to a reproduced
+    # press clipping ("The Daily Northwestern {04.16.2002}"), which is why
+    # tag_boilerplate detects running furniture by repetition instead. Measure a
+    # label class before depending on it, as DS-W3-2 did for column_header.
+    label: str
+    # Verbatim item text exactly as Docling read it.
+    text: str
+    # `text` with split numeric tokens collapsed ("3 ,817" -> "3,817"), by the
+    # same rule as table cells and the flat page index (normalize.py). Parse
+    # numeric values from THIS field.
+    text_normalized: str
+    # TOP-LEFT origin, matching PageIndex.char_map, so a block's box is directly
+    # comparable with the citation surface. Docling reports a text item's prov
+    # bbox in BOTTOM-LEFT origin -- unlike its table CELL boxes, which are
+    # already top-left -- so this is converted on the way in. Reading prov.t as
+    # "top" would place every prose citation in the wrong half of the page, at a
+    # coordinate plausible enough to pass review.
+    x0: float | None
+    top: float | None
+    x1: float | None
+    bottom: float | None
+    # As TableCellRecord.bbox_source: "docling_native" when the layout supplied a
+    # usable box, "reconstructed" when it was recovered from the page's
+    # positioned index by exact-span match, None when neither resolved and the
+    # block therefore has no citable location.
+    bbox_source: Literal["docling_native", "reconstructed"] | None = None
+
+
 class TableRecord(BaseModel):
     page: int = Field(ge=1)
     num_rows: int = Field(ge=0)
