@@ -22,6 +22,7 @@ from parser_service.extract import (
     attribute_for,
     claims_from_table,
     infer_value_type_for,
+    section_banners,
 )
 from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
 
@@ -295,6 +296,119 @@ def test_attribute_uses_the_structural_header_even_when_docling_flags_disagree()
     ]
     table = _table(cells, headers_reliable=False)
     assert attribute_for(table, cells[3]) == "Cash and cash equivalents | 2003"
+
+
+# --------------------------------------------------------------------------- #
+# In-table section banners.
+# --------------------------------------------------------------------------- #
+
+
+def _pl_table() -> TableRecord:
+    """A P&L shaped like the real one: banner rows, and subtotals with no label.
+
+    r0            YEAR 1   YEAR 2
+    r1  TURNOVER                        <- banner
+    r2    Coffee Shop     41       92
+    r3                   577    1,309   <- section subtotal, no label
+    r4  COST OF SALES                   <- banner
+    r5    Coffee Shop     31       71
+    """
+    return _table(
+        [
+            _cell(0, 0, ""),
+            _cell(0, 1, "YEAR 1"),
+            _cell(0, 2, "YEAR 2"),
+            _cell(1, 0, "TURNOVER"),
+            _cell(2, 0, "Coffee Shop"),
+            _cell(2, 1, "41"),
+            _cell(2, 2, "92"),
+            _cell(3, 0, ""),
+            _cell(3, 1, "577"),
+            _cell(3, 2, "1,309"),
+            _cell(4, 0, "COST OF SALES"),
+            _cell(5, 0, "Coffee Shop"),
+            _cell(5, 1, "31"),
+            _cell(5, 2, "71"),
+        ]
+    )
+
+
+def test_a_label_row_with_no_figures_governs_the_rows_below_it() -> None:
+    banners = section_banners(_pl_table())
+    assert banners[2] == "TURNOVER"
+    assert banners[3] == "TURNOVER"
+    assert banners[5] == "COST OF SALES"
+    # The banner rows are not governed by themselves.
+    assert 1 not in banners
+    assert 4 not in banners
+
+
+def test_a_row_with_any_figure_is_data_however_it_is_titled() -> None:
+    # "GROSS PROFIT 312" reads like a heading and is not one.
+    table = _table(
+        [
+            _cell(0, 0, ""),
+            _cell(0, 1, "YEAR 1"),
+            _cell(1, 0, "GROSS PROFIT"),
+            _cell(1, 1, "312"),
+            _cell(2, 0, "Margin"),
+            _cell(2, 1, "54.0%"),
+        ]
+    )
+    assert section_banners(table) == {}
+
+
+def test_the_banner_separates_two_rows_that_would_otherwise_be_one_claim() -> None:
+    # "Coffee Shop | YEAR 1" appears twice on a real P&L with different numbers:
+    # once as revenue, once as the cost of earning it. Without the banner the
+    # two claims are the same string.
+    table = _pl_table()
+    banners = section_banners(table)
+    revenue = next(c for c in table.cells if c.row == 2 and c.col == 1)
+    cost = next(c for c in table.cells if c.row == 5 and c.col == 1)
+
+    assert attribute_for(table, revenue, banners.get(2)) == "TURNOVER | Coffee Shop | YEAR 1"
+    assert attribute_for(table, cost, banners.get(5)) == "COST OF SALES | Coffee Shop | YEAR 1"
+
+
+def test_the_banner_names_a_subtotal_row_the_table_left_unlabelled() -> None:
+    # A section subtotal is printed as figures with an empty label cell, so it
+    # had no attribute and was dropped -- 431 cells on one real CIM, including
+    # every turnover and cost-of-sales total.
+    table = _pl_table()
+    subtotal = next(c for c in table.cells if c.row == 3 and c.col == 1)
+    assert attribute_for(table, subtotal, "TURNOVER") == "TURNOVER | YEAR 1"
+
+
+def test_an_unlabelled_row_with_no_banner_still_has_no_name() -> None:
+    # Fail closed: a value nothing in the table can name has no attribute, and
+    # inventing one would be worse than the recall gap.
+    table = _pl_table()
+    subtotal = next(c for c in table.cells if c.row == 3 and c.col == 1)
+    assert attribute_for(table, subtotal, None) is None
+
+
+def test_the_banner_makes_a_countable_noun_read_as_the_money_it_is() -> None:
+    # "Coffee Shop" is a revenue line on a hospitality P&L, but "shop" is a
+    # count noun, so alone it typed as a count, refused the scale header and
+    # shipped 41 where the truth was 41,000 -- with no flag, because a
+    # non-currency type self-scales at a KNOWN 1.0.
+    assert infer_value_type_for("41", "Coffee Shop | YEAR 1") == "count"
+    assert infer_value_type_for("41", "TURNOVER | Coffee Shop | YEAR 1") == "currency"
+    assert infer_value_type_for("31", "COST OF SALES | Coffee Shop | YEAR 1") == "currency"
+
+
+def test_claims_from_table_reads_rows_under_their_banner() -> None:
+    page = make_page("TURNOVER Coffee Shop 41 92 577 1,309 COST OF SALES Coffee Shop 31 71")
+    claims = claims_from_table(
+        _pl_table(), page, entity="BarWash", file="bw.pdf", flag_log=FlagLog()
+    )
+    attributes = [c.attribute for c in claims]
+
+    assert "TURNOVER | Coffee Shop | YEAR 1" in attributes
+    assert "COST OF SALES | Coffee Shop | YEAR 1" in attributes
+    # The previously-nameless subtotal is now claimed.
+    assert "TURNOVER | YEAR 1" in attributes
 
 
 def test_attribute_is_none_when_the_row_has_no_label() -> None:
