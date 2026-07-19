@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+from parser_service.scale import scale_invariant_holds
+
 SCHEMA_PATH = Path(__file__).parent / "claims.schema.json"
 
 
@@ -123,7 +125,7 @@ VALID_DOCX_CLAIM = {
         "raw": "top three customers represent 62% of revenue",
         "normalized": None,
         "unit": None,
-        "scale_source": "assumed_1x",
+        "scale_source": "not_applicable",
         "value_type": "text",
     },
     "location": {
@@ -149,7 +151,7 @@ VALID_MISSING_CLAIM = {
         "raw": "",
         "normalized": None,
         "unit": None,
-        "scale_source": "assumed_1x",
+        "scale_source": "not_applicable",
         "value_type": "text",
     },
     "location": {
@@ -217,6 +219,63 @@ def test_unknown_scale_source_rejected(validator: Draft202012Validator) -> None:
     bad = json.loads(json.dumps(VALID_PDF_CLAIM))
     bad["value"]["scale_source"] = "guessed"
     assert list(validator.iter_errors(bad)), "unknown scale_source should be rejected"
+
+
+def test_a_value_with_a_magnitude_must_carry_its_multiplier_and_source(
+    validator: Draft202012Validator,
+) -> None:
+    # Recording the multiplier WITHOUT its source, or the source without the
+    # multiplier, proves nothing: one is a bare number nobody can audit, the
+    # other asserts a header was read while withholding what it said.
+    for field in ("scale_multiplier", "scale_source"):
+        bad = json.loads(json.dumps(VALID_PDF_CLAIM))
+        del bad["value"][field]
+        assert list(validator.iter_errors(bad)), f"a numeric value must carry {field}"
+
+
+def test_a_value_with_no_magnitude_needs_no_scale(validator: Draft202012Validator) -> None:
+    # Scale records how raw BECAME normalized. Where nothing was produced --
+    # value_type text, or an unevaluated formula stub -- there is nothing to
+    # describe, and demanding a multiplier would force a fabricated one.
+    ok = json.loads(json.dumps(VALID_PDF_CLAIM))
+    ok["value"] = {"raw": "four", "normalized": None, "unit": None, "value_type": "text"}
+    assert not list(validator.iter_errors(ok)), "text has no magnitude to scale"
+
+
+def test_the_scale_arithmetic_is_checked_outside_the_schema() -> None:
+    """normalized must be raw scaled by the multiplier.
+
+    JSON Schema cannot express arithmetic across fields, so the schema alone
+    cannot catch this and never will. Before scale_invariant_holds existed, a
+    claim reading raw="$15,295", normalized=999, scale_source="page_header"
+    validated perfectly clean -- a 15,000x error the contract had no opinion
+    about, and the exact shape of every defect found in the July 2026 audit.
+    """
+    assert scale_invariant_holds("$15,295", 15_295_000.0, 1_000.0)
+    assert not scale_invariant_holds("$15,295", 999.0, 1_000.0)
+    # The specific direction that keeps recurring: the multiplier was found but
+    # never applied, so the value ships a thousandth of its true magnitude.
+    assert not scale_invariant_holds("$15,295", 15_295.0, 1_000.0)
+    # A known 1x still has to add up.
+    assert scale_invariant_holds("27.3%", 27.3, 1.0)
+    assert not scale_invariant_holds("27.3%", 2_730.0, 1.0)
+    # Accounting negatives keep their sign through the multiplication.
+    assert scale_invariant_holds("(2.3 )", -2_300_000.0, 1_000_000.0)
+    # Absent inputs are not silently satisfied.
+    assert not scale_invariant_holds("$15,295", None, 1_000.0)
+    assert not scale_invariant_holds("$15,295", 15_295_000.0, None)
+
+
+def test_every_valid_fixture_satisfies_the_scale_arithmetic() -> None:
+    # The fixtures are what everything else in this file is judged against, so
+    # a fixture that violated the invariant would quietly license the defect.
+    for claim in (VALID_PDF_CLAIM, VALID_XLSX_CLAIM, VALID_XLSX_LITERAL_CLAIM, VALID_DOCX_CLAIM):
+        value = claim["value"]
+        if value.get("normalized") is None or value["value_type"] == "text":
+            continue
+        assert scale_invariant_holds(
+            value["raw"], value["normalized"], value.get("scale_multiplier")
+        ), f"fixture {claim['attribute']!r} violates normalized == raw x multiplier"
 
 
 def test_pdf_location_requires_char_span(validator: Draft202012Validator) -> None:

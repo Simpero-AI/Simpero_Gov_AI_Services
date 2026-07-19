@@ -35,7 +35,9 @@ from pydantic import BaseModel, Field
 
 from .schemas import PageIndex, TableCellRecord, TableRecord
 
-ScaleSource = Literal["explicit_in_value", "column_header", "page_header", "assumed_1x"]
+ScaleSource = Literal[
+    "explicit_in_value", "column_header", "page_header", "assumed_1x", "not_applicable"
+]
 
 # Mirrors the value.value_type enum in contracts/claims.schema.json. Kept here
 # with its sole current consumer; promote to schemas.py once the extractor and
@@ -138,6 +140,33 @@ def parse_bare_number(text: str) -> float | None:
     return _parse_number(text)
 
 
+def scale_invariant_holds(raw: str, normalized: float | None, multiplier: float | None) -> bool:
+    """Whether `normalized` really is `raw` scaled by `multiplier`.
+
+    The contract records all three and JSON Schema cannot express arithmetic across
+    fields, so without this a claim can assert raw="$15,295", normalized=999,
+    scale_source="page_header" and validate perfectly clean. That is not
+    hypothetical -- it is the shape of every defect found in the July 2026 parser
+    audit, and the contract had no opinion about any of them.
+
+    Compared with a RELATIVE tolerance because the multiplier is a float: both
+    27.3 * 1.0 and 15295 * 1000.0 must come back exact, while a genuine scale error
+    is off by three orders of magnitude and cannot slip through a 1e-9 window.
+
+    A value with no magnitude (value_type "text") is not subject to this; callers
+    exclude it before asking.
+    """
+    if normalized is None or multiplier is None:
+        return False
+    base = _parse_number(raw)
+    if base is None:
+        return False
+    expected = base * multiplier
+    if expected == 0.0:
+        return normalized == 0.0
+    return abs(normalized - expected) <= abs(expected) * 1e-9
+
+
 def normalize_financial_token(text: str) -> tuple[float, float, str | None] | None:
     """Port of the MVP's normalizeFinancialTokens, narrowed to the inline case
     this ticket owns: given a value token that states its own scale -- a
@@ -182,8 +211,21 @@ _SELF_SCALING_UNIT: dict[ValueType, str | None] = {
 def _self_scaling(raw: str, value_type: ValueType) -> ScaleResult:
     """A percent, ratio, count, or date is read at face value: its magnitude
     is not declared by a page/column scale header, so the multiplier is a
-    KNOWN 1.0. scale_source is explicit_in_value, not assumed_1x -- there is
-    nothing to assume and nothing to flag; the value's own type settles it.
+    KNOWN 1.0, and nothing is assumed and nothing is flagged.
+
+    That 1.0 is not_applicable, not explicit_in_value. The distinction is what
+    the source field is FOR: explicit_in_value means the token stated a
+    multiplier, which is why "$4.8M" normalizes to 4,800,000. Nothing here
+    states a multiplier. A percent or a ratio carries a unit mark, not a scale
+    mark, and a bare "1,309" hotel rooms carries neither -- in every case the
+    multiplier is 1.0 because the TYPE has no magnitude to scale, which is a
+    different fact about the world than the value having declared one.
+
+    Reporting these as explicit_in_value had 139 counts and 9 dates on a single
+    CIM claiming their own text declared a scale it never declared. The
+    multiplier was right and the provenance was a fiction, and provenance being
+    right is the entire reason this field exists. Both values still say "this
+    1.0 is known", which is what separates them from assumed_1x.
 
     (Known limitation: a count genuinely printed "in thousands", e.g. shares
     outstanding, is read at face value here rather than scaled. That fails
@@ -198,7 +240,7 @@ def _self_scaling(raw: str, value_type: ValueType) -> ScaleResult:
         normalized=number,
         unit=_SELF_SCALING_UNIT[value_type],
         scale_multiplier=1.0,
-        scale_source="explicit_in_value",
+        scale_source="not_applicable",
     )
 
 

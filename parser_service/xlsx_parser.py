@@ -356,7 +356,7 @@ def _percent_result(cell: XlsxCellRecord, raw: str) -> ScaleResult:
         normalized=_numeric_value(cell, raw),
         unit="%",
         scale_multiplier=1.0,
-        scale_source="explicit_in_value",
+        scale_source="not_applicable",
     )
 
 
@@ -402,7 +402,7 @@ def determine_xlsx_scale(
             normalized=_numeric_value(cell, raw),
             unit=_SELF_SCALING_UNIT[value_type],
             scale_multiplier=1.0,
-            scale_source="explicit_in_value",
+            scale_source="not_applicable",
         )
 
     # currency: inline marker -> column header -> sheet header -> assumed_1x.
