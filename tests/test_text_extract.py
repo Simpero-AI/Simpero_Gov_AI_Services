@@ -61,7 +61,11 @@ def _doc(items: list, *, page_height: float | None = PAGE_HEIGHT):
 
 def _bottom_left(left: float, top_from_bottom: float, right: float, bottom_from_bottom: float):
     return BoundingBox(
-        l=left, t=top_from_bottom, r=right, b=bottom_from_bottom, coord_origin=CoordOrigin.BOTTOMLEFT
+        l=left,
+        t=top_from_bottom,
+        r=right,
+        b=bottom_from_bottom,
+        coord_origin=CoordOrigin.BOTTOMLEFT,
     )
 
 
@@ -80,6 +84,7 @@ def test_a_prov_box_is_converted_to_the_origin_the_citation_surface_uses() -> No
 
     assert len(blocks) == 1
     block = blocks[0]
+    assert block.top is not None and block.bottom is not None
     assert block.top == pytest.approx(PAGE_HEIGHT - 680.0)
     assert block.bottom == pytest.approx(PAGE_HEIGHT - 667.0)
     assert block.top < block.bottom, "top-left origin: top is above bottom"
@@ -200,4 +205,4 @@ def test_real_cim_text_blocks_are_citable_and_top_left() -> None:
     for block in located:
         assert block.top is not None and block.bottom is not None
         assert block.top < block.bottom, f"top-left origin violated on page {block.page}"
-        assert 0 <= block.top, "a top-left coordinate is never negative"
+        assert block.top >= 0, "a top-left coordinate is never negative"
