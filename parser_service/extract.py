@@ -83,10 +83,10 @@ _METRIC_NOUNS = frozenset(
     depreciation amortization amortisation impairment interest tax taxes dividend
     dividends distribution distributions debt borrowings equity capital contribution
     contributions asset assets liability liabilities receivable receivables payable
-    payables payroll compensation wages salaries rent lease insurance marketing
+    payables payroll compensation wages salaries rent insurance marketing
     advertising royalty royalties cash flow flows proceeds investment investments
     purchase price value budget fee fees charge charges goodwill inventory
-    inventories equipment premises
+    inventories equipment premises benefits allowance allowances reserve reserves
     """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
 )
 
@@ -102,10 +102,6 @@ _TRAILING_METRIC_NOUN = "net"
 # A count noun names something you can count. "property" is deliberately absent:
 # "Property and Equipment, Net" is money, and a genuine property count reads
 # "number of properties", which the number-of pair below catches instead.
-# A duration is counted, not priced: "ACEP Tenure (In Years)" -> 7 is
-# seven years. Only the plural and "tenure" are listed -- the singular
-# "year" belongs to period labels ("Fiscal Year", "Year Ended"), where
-# the value is a date rather than a span.
 _COUNT_NOUNS = frozenset(
     """
     slot slots machine machines seat seats room rooms suite suites bed beds table
@@ -115,8 +111,29 @@ _COUNT_NOUNS = frozenset(
     restaurant restaurants shop shops well wells rig rigs vehicle vehicles aircraft
     patent patents contract contracts license licenses position positions space
     spaces unit units attendee attendees convention conventions population admission
-    admissions passenger passengers household households tenure year years yrs tenure
-    months days
+    admissions passenger passengers household households
+    """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
+)
+
+# A span of time, counted rather than priced: "ACEP Tenure (In Years)" -> 7 is
+# seven years. Kept apart from the count nouns because these same words spell a
+# PERIOD CAPTION -- "Year Ended December 31," , "Twelve Months Ended" -- and a
+# caption names when a figure was measured, not what it counts. A period caption
+# arrives here as a column header appended to the attribute, so treating its
+# words as counts silently strips the scale header off every money row beneath
+# it: "Total | Year Ended December 31," shipped 2,400 where the truth was
+# $2.4bn, beside a correctly-scaled sibling. _is_period_caption settles which
+# sense is meant.
+_DURATION_NOUNS = frozenset(
+    """
+    years yrs tenure months days
+    """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
+)
+
+# The words that mark a label as naming a reporting period rather than a span.
+_PERIOD_CAPTION_WORDS = frozenset(
+    """
+    ended ending fiscal quarter interim trailing
     """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
 )
 
@@ -200,6 +217,17 @@ def _names_an_amount(tokens: list[str]) -> bool:
     return _TRAILING_METRIC_NOUN in tokens[1:]
 
 
+def _is_period_caption(vocabulary: set[str]) -> bool:
+    """Whether the label names a reporting period ("Year Ended December 31,")
+    rather than a span of time ("Tenure (In Years)").
+
+    A period caption is a column header, so it is appended to every attribute in
+    its table. Reading its "Year"/"Months" as a count would type every money row
+    under it as a count, and a count never takes the scale header.
+    """
+    return bool(vocabulary & _PERIOD_CAPTION_WORDS)
+
+
 def _is_date_shaped(raw: str) -> bool:
     """Whether the value itself could be a date: a month name, an apostrophe
     year ("'07"), or a four-digit year anywhere in it."""
@@ -269,6 +297,8 @@ def infer_value_type_for(raw: str, attribute: str) -> ValueType:
     if _names_an_amount(tokens):
         return "currency"
     if vocabulary & _COUNT_NOUNS or vocabulary & _DIMENSION_NOUNS:
+        return "count"
+    if vocabulary & _DURATION_NOUNS and not _is_period_caption(vocabulary):
         return "count"
     if "number" in vocabulary and "of" in vocabulary:
         return "count"

@@ -163,6 +163,57 @@ def test_net_names_an_amount_only_when_it_trails(raw: str, attribute: str, expec
 @pytest.mark.parametrize(
     ("raw", "attribute", "expected"),
     [
+        # A period CAPTION says when a figure was measured. It arrives as a
+        # column header appended to every attribute in its table, so reading its
+        # "Year"/"Months" as a count strips the scale header off every money row
+        # underneath -- a subtotal shipping 1,000,000x smaller than the line it
+        # totals, unflagged.
+        ("2,400", "Total | Year Ended December 31,", "currency"),
+        ("143.1", "Casino | Year Ended December 31, 2006", "currency"),
+        ("73.5", "Total | Twelve Months Ended December 31, 2006", "currency"),
+        ("88.2", "Food and beverage | Fiscal Year 2005", "currency"),
+        # A SPAN of time is still counted.
+        ("7", "ACEP Tenure (In Years)", "count"),
+        ("25", "General Manager Tenure Years", "count"),
+        ("12", "Lease term in months", "count"),
+        # A count noun with no metric noun must not de-scale a real expense line.
+        ("1,234", "Employee benefits | 2005", "currency"),
+    ],
+)
+def test_a_period_caption_is_not_a_count_of_periods(
+    raw: str, attribute: str, expected: str
+) -> None:
+    assert infer_value_type_for(raw, attribute) == expected
+
+
+def test_vocabularies_do_not_contain_words_they_document_as_excluded() -> None:
+    """A mechanical rewrite of these lists once scraped quoted words out of the
+    surrounding COMMENTS and into the vocabulary they were documenting as
+    excluded -- the singular "year" landed in _COUNT_NOUNS from a comment saying
+    it was deliberately left out. Nothing about that failure is visible in a
+    diff or in a corpus measurement, so it is asserted directly.
+    """
+    from parser_service.extract import (
+        _COUNT_NOUNS,
+        _DURATION_NOUNS,
+        _METRIC_NOUNS,
+        _PERIOD_CAPTION_WORDS,
+    )
+
+    # "year" singular spells a period caption, never a count.
+    assert "year" not in _COUNT_NOUNS
+    assert "year" not in _DURATION_NOUNS
+    # The tiers are consulted in order, so an overlap would make the later one
+    # unreachable for that word.
+    assert not _METRIC_NOUNS & _COUNT_NOUNS
+    assert not _METRIC_NOUNS & _DURATION_NOUNS
+    assert not _COUNT_NOUNS & _DURATION_NOUNS
+    assert not _DURATION_NOUNS & _PERIOD_CAPTION_WORDS
+
+
+@pytest.mark.parametrize(
+    ("raw", "attribute", "expected"),
+    [
         # A value that declares its own unit needs no label at all.
         ("27.3%", "Gross Margin", "percent"),
         ("150 bps", "Spread over LIBOR", "percent"),
