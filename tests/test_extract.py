@@ -18,7 +18,11 @@ from pathlib import Path
 import pytest
 
 from parser_service.emit import FlagLog, PdfLocation
-from parser_service.extract import attribute_for, claims_from_table, infer_value_type
+from parser_service.extract import (
+    attribute_for,
+    claims_from_table,
+    infer_value_type_for,
+)
 from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
 
 
@@ -94,23 +98,163 @@ def _table(
 
 
 # --------------------------------------------------------------------------- #
-# infer_value_type
+# value_type: the substring collisions this module exists to prevent.
+#
+# Every case here is a real line item. Matching the vocabularies as substrings
+# rather than whole words stripped the scale header off genuine money and
+# reported it a millionth of its value, next to correctly-scaled siblings.
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    ("raw", "attribute"),
     [
-        ("27.3%", "percent"),
-        ("$15,295", "currency"),
-        # No "$", but on a financial page a bare grouped number is money —
-        # PTL p.11's Gross Margin row prints exactly this. Typing it `count`
-        # would refuse the header scale and show it 1000x too small.
-        ("4,171", "currency"),
+        # "count" hides inside "ac-count-s". These four rows shipped as 4.4,
+        # 5.2, 5.9 and 6.7 on a "($ in millions)" balance sheet.
+        ("$5.2", "Accounts payable | 2004"),
+        ("(2.3 )", "Accounts payable and accrued expenses | 2005"),
+        ("$10.1", "Accounts receivable, net | 2003"),
+        # "date" hides inside "consoli-date-d" and "liqui-date-d".
+        ("1,234.5", "Consolidated net revenues | 2005"),
+        ("12.0", "Liquidated damages | 2004"),
+        # "unit" hides inside "comm-unit-y" and "opport-unit-y".
+        ("3.4", "Community reinvestment expense | 2005"),
+        # "machine" hides inside "Machine-ry".
+        ("88.1", "Machinery and equipment | 2004"),
+        # A metric noun outranks a count noun in the same label.
+        ("201.0", "Member's Equity | 2004"),
+        ("28.2", "Member contribution | 2004"),
+        ("2.5", "Customer list, net | 2005"),
+        ("47.2", "Property and equipment, net | 2003"),
+        # "acquired" is a genuine word here, so anchoring alone does not save
+        # it -- the value is not date-shaped, which is what settles it.
+        ("(109.4 )", "Acq. of Flamingo Laughlin, net of cash acquired | 2004"),
+        ("0.3", "Cash acquired from subsidiary contributed by parent | 2003"),
     ],
 )
-def test_infer_value_type(raw: str, expected: str) -> None:
-    assert infer_value_type(raw) == expected
+def test_money_is_not_mistyped_by_a_word_that_merely_contains_a_count_or_date_word(
+    raw: str, attribute: str
+) -> None:
+    assert infer_value_type_for(raw, attribute) == "currency"
+
+
+@pytest.mark.parametrize(
+    ("raw", "attribute", "expected"),
+    [
+        # Trailing "net" is the accounting qualifier -- net of depreciation or
+        # allowance -- and the value is money either way.
+        ("2.5", "Customer list, net | 2005", "currency"),
+        ("47.2", "Property and equipment, net | 2003", "currency"),
+        # Leading "net" qualifies the noun that follows, and that noun is often
+        # countable. Typing these currency would let a "($ in millions)" header
+        # multiply a room count by a million.
+        ("1,200", "Net rooms added", "count"),
+        ("4,500", "Net new subscribers | 2024", "count"),
+        ("312", "Net units shipped", "count"),
+        # A real metric noun still wins from either position.
+        ("88.1", "Net revenues | 2005", "currency"),
+        ("9.1", "Net cash provided by operating activities | 2004", "currency"),
+    ],
+)
+def test_net_names_an_amount_only_when_it_trails(raw: str, attribute: str, expected: str) -> None:
+    assert infer_value_type_for(raw, attribute) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "attribute", "expected"),
+    [
+        # A period CAPTION says when a figure was measured. It arrives as a
+        # column header appended to every attribute in its table, so reading its
+        # "Year"/"Months" as a count strips the scale header off every money row
+        # underneath -- a subtotal shipping 1,000,000x smaller than the line it
+        # totals, unflagged.
+        ("2,400", "Total | Year Ended December 31,", "currency"),
+        ("143.1", "Casino | Year Ended December 31, 2006", "currency"),
+        ("73.5", "Total | Twelve Months Ended December 31, 2006", "currency"),
+        ("88.2", "Food and beverage | Fiscal Year 2005", "currency"),
+        # A SPAN of time is still counted.
+        ("7", "ACEP Tenure (In Years)", "count"),
+        ("25", "General Manager Tenure Years", "count"),
+        ("12", "Lease term in months", "count"),
+        # A count noun with no metric noun must not de-scale a real expense line.
+        ("1,234", "Employee benefits | 2005", "currency"),
+    ],
+)
+def test_a_period_caption_is_not_a_count_of_periods(
+    raw: str, attribute: str, expected: str
+) -> None:
+    assert infer_value_type_for(raw, attribute) == expected
+
+
+def test_vocabularies_do_not_contain_words_they_document_as_excluded() -> None:
+    """A mechanical rewrite of these lists once scraped quoted words out of the
+    surrounding COMMENTS and into the vocabulary they were documenting as
+    excluded -- the singular "year" landed in _COUNT_NOUNS from a comment saying
+    it was deliberately left out. Nothing about that failure is visible in a
+    diff or in a corpus measurement, so it is asserted directly.
+    """
+    from parser_service.extract import (
+        _COUNT_NOUNS,
+        _DURATION_NOUNS,
+        _METRIC_NOUNS,
+        _PERIOD_CAPTION_WORDS,
+    )
+
+    # "year" singular spells a period caption, never a count.
+    assert "year" not in _COUNT_NOUNS
+    assert "year" not in _DURATION_NOUNS
+    # The tiers are consulted in order, so an overlap would make the later one
+    # unreachable for that word.
+    assert not _METRIC_NOUNS & _COUNT_NOUNS
+    assert not _METRIC_NOUNS & _DURATION_NOUNS
+    assert not _COUNT_NOUNS & _DURATION_NOUNS
+    assert not _DURATION_NOUNS & _PERIOD_CAPTION_WORDS
+
+
+@pytest.mark.parametrize(
+    ("raw", "attribute", "expected"),
+    [
+        # A value that declares its own unit needs no label at all.
+        ("27.3%", "Gross Margin", "percent"),
+        ("150 bps", "Spread over LIBOR", "percent"),
+        ("7.5x", "TEV / EBITDA", "ratio"),
+        ("$15,295", "Revenue | 2019F", "currency"),
+        ("1,300 square feet", "Stratosphere", "count"),
+        ("4 acres", "Site", "count"),
+        # No "$", but on a financial page a bare grouped number is money --
+        # PTL p.11's Gross Margin row prints exactly this. Typing it `count`
+        # would refuse the header scale and show it 1000x too small.
+        ("4,171", "Gross Margin", "currency"),
+        ("$77.3", "Cash and cash equivalents | 2003", "currency"),
+        # Genuine counts stay counts however the table is denominated.
+        ("1,309", "Stratosphere | Slot Machines", "count"),
+        ("2,444", "Stratosphere | Hotel Rooms (1)", "count"),
+        ("2,444", "Hotel Rooms", "count"),
+        ("49", "Table Games", "count"),
+        ("80,000", "Gaming Square Footage", "count"),
+        ("22,154", "Conventions Held", "count"),
+        ("412", "Licensed Beds", "count"),
+        ("1,284", "Number of units", "count"),
+        # A duration is counted, not priced.
+        ("7", "ACEP Tenure (In Years)", "count"),
+        # Dates need BOTH a date label and a date-shaped value.
+        ("1998", "Date Acquired", "date"),
+        ("1998", "Stratosphere | Date Acquired", "date"),
+        ("March '07", "Completion Date of Recent Renovation", "date"),
+        # A bare year with an unhelpful label is still a year, not $2bn.
+        ("2006", "Aquarius", "date"),
+        # No magnitude to scale: emit.py gives these a null normalized rather
+        # than inventing a number from whatever digits parse first.
+        ("four", "propertyCount", "text"),
+        ("-", "Member contribution | 2003", "text"),
+        ("N/A", "Occupancy | 2005", "text"),
+        ("In 2001 and 2002, the Company expanded", "slotFloorExpansion", "text"),
+    ],
+)
+def test_value_type_is_judged_from_the_value_and_its_attribute(
+    raw: str, attribute: str, expected: str
+) -> None:
+    assert infer_value_type_for(raw, attribute) == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -133,13 +277,24 @@ def test_attribute_is_row_label_alone_when_columns_are_unlabeled() -> None:
     assert attribute_for(table, cells[1]) == "Revenue"
 
 
-def test_attribute_ignores_headers_ds_w3_2_says_are_unreliable() -> None:
-    # column_headers_reliable=False means Docling marked a *data* row as the
-    # header (verified on Pitchbook p.17). A header we were told not to trust
-    # must not be baked into an attribute name.
-    cells = [_cell(0, 0, ""), _cell(0, 1, "116"), _cell(1, 0, "Revenue"), _cell(1, 1, "$15,295")]
+def test_attribute_uses_the_structural_header_even_when_docling_flags_disagree() -> None:
+    # column_headers_reliable reports whether DOCLING's per-cell column_header
+    # markers agree with the structural inference. It is a diagnostic about
+    # Docling, not a verdict on header_row -- and on every financial statement in
+    # a CIM those markers disagree while the structural header is perfectly good.
+    #
+    # This flag used to gate the attribute, so the column was dropped and all
+    # four years of a line item collapsed onto one name: four rows reading
+    # "Cash and cash equivalents" with four different numbers. Whether a header
+    # can be trusted is _infer_header_row's call, made structurally.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "2003"),
+        _cell(1, 0, "Cash and cash equivalents"),
+        _cell(1, 1, "$77.3"),
+    ]
     table = _table(cells, headers_reliable=False)
-    assert attribute_for(table, cells[3]) == "Revenue"
+    assert attribute_for(table, cells[3]) == "Cash and cash equivalents | 2003"
 
 
 def test_attribute_is_none_when_the_row_has_no_label() -> None:
