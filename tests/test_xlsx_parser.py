@@ -490,7 +490,7 @@ def test_count_is_not_scaled_by_a_sheet_header() -> None:
 
     result = determine_xlsx_scale(sheet, headcount, value_type="count")
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.normalized == 1200.0
     assert result.unit is None
@@ -504,7 +504,7 @@ def test_ratio_is_not_scaled_by_a_column_header() -> None:
 
     result = determine_xlsx_scale(sheet, ratio, value_type="ratio")
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.normalized == 1.2
     assert result.unit == "ratio"
@@ -519,7 +519,7 @@ def test_date_cell_is_not_scaled_by_a_header() -> None:
 
     result = determine_xlsx_scale(sheet, date_cell, value_type="date")
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.unit is None
 

@@ -757,7 +757,7 @@ def test_emit_pdf_claim_self_scaling_value_types(
     )
 
     assert claim.status == "proposed"
-    assert claim.value.scale_source == "explicit_in_value"
+    assert claim.value.scale_source == "not_applicable"
     assert claim.value.unit == expected_unit
     if expected_normalized is not None:
         assert claim.value.normalized == expected_normalized

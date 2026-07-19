@@ -249,6 +249,9 @@ def test_determine_scale_explicit_in_value_short_circuits_context() -> None:
         "$4.8M", page, char_start=page.text.index("$4.8M"), value_type="currency"
     )
 
+    # "$4.8M" states a real multiplier, so this is the genuine explicit_in_value
+    # case -- distinct from a count whose 1.0 comes from its type having no
+    # magnitude to scale, which is not_applicable.
     assert result.scale_source == "explicit_in_value"
     assert result.scale_multiplier == 1_000_000.0
     assert result.normalized == 4_800_000.0
@@ -262,7 +265,7 @@ def test_determine_scale_percent_ignores_a_preceding_page_scale_header() -> None
     page = _page(text)
     result = determine_scale("27.3%", page, char_start=text.index("27.3%"), value_type="percent")
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.normalized == 27.3
     assert result.unit == "%"
@@ -444,7 +447,7 @@ def test_determine_scale_count_is_not_rescaled_by_page_header() -> None:
     page = _page(text)
     result = determine_scale("1200", page, char_start=text.index("1200"), value_type="count")
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.normalized == 1200.0
     assert result.unit is None
@@ -456,7 +459,7 @@ def test_determine_scale_ratio_is_not_rescaled_by_page_header() -> None:
     page = _page(text)
     result = determine_scale("1.2", page, char_start=text.index("1.2"), value_type="ratio")
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.normalized == 1.2
     assert result.unit == "ratio"
@@ -470,7 +473,7 @@ def test_determine_scale_percent_without_percent_sign_is_not_rescaled() -> None:
     page = _page(text)
     result = determine_scale("27.3", page, char_start=text.index("27.3"), value_type="percent")
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.normalized == 27.3
     assert result.unit == "%"
@@ -481,7 +484,7 @@ def test_determine_scale_date_is_not_rescaled() -> None:
     page = _page(text)
     result = determine_scale("2024", page, char_start=text.index("2024"), value_type="date")
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.normalized == 2024.0
     assert result.unit is None
@@ -513,7 +516,7 @@ def test_determine_scale_count_ignores_a_column_scale_header() -> None:
         cell=value,
     )
 
-    assert result.scale_source == "explicit_in_value"
+    assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
     assert result.normalized == 1200.0
 

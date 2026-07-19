@@ -222,14 +222,14 @@ def test_classify_red_when_ambiguous() -> None:
     assert ann.bbox.x1 > ann.bbox.x0
 
 
-def test_classify_percent_is_always_explicit_in_value() -> None:
+def test_classify_percent_scale_source_is_not_applicable() -> None:
     page = make_page("Gross margin 27.3% this year")
     token = detect_numeric_tokens(page.text)[0]
 
     ann = classify_token(token, page)
 
     assert ann.color == "green"
-    assert "explicit_in_value" in ann.label
+    assert "not_applicable" in ann.label
 
 
 def test_classify_red_box_position_matches_resolver_span_when_available() -> None:

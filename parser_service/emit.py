@@ -48,7 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .elements import ChartElement, TableElement
 from .resolver import resolve, resolve_in_cell
-from .scale import ScaleSource, ValueType, determine_scale
+from .scale import ScaleSource, ValueType, determine_scale, scale_invariant_holds
 from .schemas import BBox, PageIndex, TableCellRecord, TableRecord, XlsxCellRecord, XlsxSheetRecord
 from .xlsx_parser import determine_xlsx_scale
 
@@ -384,6 +384,19 @@ def emit_pdf_claim(
             flags.append("ambiguous_unit")
         if flags:
             flag_log.log_all(stage, element_id, flags, detail=scale_result.scale_context)
+        # The magnitude must be what the multiplier says it is. This cannot be a
+        # contract rule -- JSON Schema has no arithmetic across fields -- so it is
+        # asserted where the claim is MADE, not merely where it is validated. It
+        # holds by construction today; the assertion is here so that a future
+        # scale path cannot quietly stop satisfying it, which is precisely how
+        # every 1000x defect in the July 2026 audit reached the store.
+        if not scale_invariant_holds(
+            scale_result.raw, scale_result.normalized, scale_result.scale_multiplier
+        ):
+            raise AssertionError(
+                f"scale invariant violated: {scale_result.raw!r} x "
+                f"{scale_result.scale_multiplier} != {scale_result.normalized}"
+            )
         value = ClaimValue(
             raw=scale_result.raw,
             normalized=scale_result.normalized,

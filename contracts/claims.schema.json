@@ -55,12 +55,18 @@
         },
         "scale_multiplier": {
           "type": ["number", "null"],
-          "description": "What took raw -> normalized, e.g. 1000."
+          "description": "What took raw -> normalized, e.g. 1000. Required alongside scale_source for every value_type that has a magnitude -- see the scale allOf block. NOTE: JSON Schema cannot express arithmetic across fields, so it cannot check that normalized == parse(raw) * scale_multiplier. That invariant is enforced by scale.scale_invariant_holds, asserted in the contract test and on the emit path. Validating this document against the schema alone does NOT establish that the magnitude is right."
         },
         "scale_source": {
           "type": "string",
-          "enum": ["explicit_in_value", "column_header", "page_header", "assumed_1x"],
-          "description": "HOW scale was determined. assumed_1x must be distinguishable from a known 1x, and raises the scale_assumed flag."
+          "enum": [
+            "explicit_in_value",
+            "column_header",
+            "page_header",
+            "assumed_1x",
+            "not_applicable"
+          ],
+          "description": "HOW scale was determined. explicit_in_value: the token stated its own multiplier (\"$4.8M\", \"27.3%\"). column_header / page_header: read from a scale phrase, which is recorded with it. assumed_1x: nothing was found and the magnitude is UNKNOWN -- it must stay distinguishable from a known 1x, and raises the scale_assumed flag. not_applicable: a multiplier is meaningless for this value_type (a headcount, a date), which is a KNOWN 1x and raises nothing. Conflating the last two destroys the distinction this field exists to preserve: a count that borrowed explicit_in_value was claiming its own text stated a scale it never stated."
         },
         "value_type": {
           "type": "string",
@@ -263,6 +269,40 @@
       "then": {
         "required": ["verification_method"],
         "properties": { "verification_method": { "type": "string" } }
+      }
+    },
+    {
+      "$comment": "A value with a magnitude must say what took raw to normalized, and how that was determined. Both, or the pair proves nothing: a claim carrying scale_source=page_header with no multiplier asserts a header was read while withholding what it said, and a multiplier with no source is a bare number nobody can audit. This was NOT enforced, and the gap was not theoretical -- a claim reading raw=\"$15,295\", normalized=999, scale_source=\"page_header\" and no multiplier validated clean, a 15,000x error the contract had no opinion about. Every defect found in the July 2026 parser audit was a scale error of exactly this shape.\n\nExempt when there is no magnitude to describe: value_type=text, or a null normalized (an unevaluated XLSX formula stub, a missing claim). Scale records how raw BECAME normalized -- where no normalized value was produced, nothing happened, and demanding a multiplier would force a fabricated one.",
+      "if": {
+        "anyOf": [
+          {
+            "properties": {
+              "value": {
+                "properties": { "value_type": { "const": "text" } },
+                "required": ["value_type"]
+              }
+            },
+            "required": ["value"]
+          },
+          {
+            "properties": {
+              "value": {
+                "properties": { "normalized": { "type": "null" } },
+                "required": ["normalized"]
+              }
+            },
+            "required": ["value"]
+          }
+        ]
+      },
+      "then": true,
+      "else": {
+        "properties": {
+          "value": {
+            "required": ["scale_multiplier", "scale_source"],
+            "properties": { "scale_multiplier": { "type": "number" } }
+          }
+        }
       }
     }
   ]
