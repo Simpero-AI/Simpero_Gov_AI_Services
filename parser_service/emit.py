@@ -306,6 +306,7 @@ def emit_pdf_claim(
     table: TableRecord | None = None,
     cell: TableCellRecord | None = None,
     section: str | None = None,
+    value_text: str | None = None,
     document_id: str | None = None,
     document_name: str | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
@@ -315,6 +316,16 @@ def emit_pdf_claim(
     quote (DS-W3-3) -- never a fabricated or partially-cited value. `table`/
     `cell` are passed through to DS-W3-4's column-header scale lookup when the
     quote came from a table cell; omit both for prose.
+
+    `value_text` separates the two jobs the quote otherwise does at once. A table
+    cell's quote IS its value, so parsing the magnitude out of the quote is right
+    there. A prose quote is a SENTENCE CONTAINING the value, and parsing that the
+    same way takes the leftmost number in the sentence: "In 2003, 18,454 students
+    attended" yields 2003, and a parenthetical yields an accounting negative. Both
+    were observed on the first real page this ran against. Pass the value token
+    itself as `value_text` -- the quote still carries the citation, and the
+    magnitude comes from the token. Callers whose quote is already the value (every
+    table caller) omit it.
 
     When `cell` is given, the quote is resolved inside that cell's own region
     first: the caller knows which cell it read, so asking the page instead
@@ -365,7 +376,12 @@ def emit_pdf_claim(
         value = ClaimValue(raw=quote, normalized=None, unit=None, value_type=value_type)
     else:
         scale_result = determine_scale(
-            quote, page, span.char_start, value_type=value_type, table=table, cell=cell
+            value_text if value_text is not None else quote,
+            page,
+            span.char_start,
+            value_type=value_type,
+            table=table,
+            cell=cell,
         )
         flags = list(scale_result.flags)
         if (
