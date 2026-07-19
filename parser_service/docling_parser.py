@@ -59,19 +59,63 @@ def normalize_numeric_tokens(text: str, char_map: list[CharBox]) -> tuple[str, l
     return "".join(text[i] for i in keep), [char_map[i] for i in keep]
 
 
-def _real_char_cells(parsed_page) -> list | None:
-    """Return Docling's real per-character cells for this page, if it has any.
+def char_cells_by_page(pdf_bytes: bytes) -> dict[int, list]:
+    """Per-glyph cells for every page, read from docling-parse directly.
 
-    Checked live on every page rather than assumed, so real per-glyph
-    precision is picked up automatically if a future Docling version or
-    pipeline configuration ever provides it. As of this Docling version,
-    native (non-OCR) text extraction returns zero CHAR-unit cells — confirmed
-    empirically against this service's parse configuration — so this
-    currently always returns None in production, and every CharBox falls
-    back to word-level precision (see CharBox.precision).
+    Docling's pipeline drops these (see _real_char_cells), so they are read from
+    the parser underneath it -- the same library, already a dependency, no model
+    involved. Per-character geometry on a digital-born PDF is a deterministic
+    lookup, not a capability that has to be inferred.
+
+    Fails soft: a page that cannot be read contributes nothing and that page
+    keeps word precision, which is the behaviour this replaces rather than a new
+    failure mode.
     """
-    char_cells = list(parsed_page.iterate_cells(unit_type=TextCellUnit.CHAR))
-    return char_cells or None
+    try:
+        from docling_parse.pdf_parser import DoclingPdfParser
+    except ImportError:  # pragma: no cover - docling-parse ships with docling
+        return {}
+
+    cells: dict[int, list] = {}
+    try:
+        parser = DoclingPdfParser()
+        document = parser.load(BytesIO(pdf_bytes))
+        for page_no in range(1, document.number_of_pages() + 1):
+            try:
+                page = document.get_page(page_no)
+            except Exception:
+                continue
+            # Whitespace cells are dropped because the two sequences count it
+            # differently: char cells carry the spaces between words (a page
+            # opens [' ', ' ', 'B', 'e', 'a', 'r', ',']) while the word cells
+            # matched against them do not ('Bear,'). Left in, the very first
+            # word mismatches and _char_boxes_for_word disables the char path
+            # for the rest of the page -- which is exactly why every box on
+            # this corpus was word precision. A word's own text never contains
+            # a space, so nothing citable is lost.
+            #
+            # Boxes are converted to TOP-LEFT here, at the one place the page
+            # height is in hand. A cell arrives bottom-left while word cells and
+            # char_map are top-left, so an unconverted box lands the right
+            # distance from the wrong edge -- a footer at y=37 reading as y=37
+            # from the top. Merely un-inverting it (min/max) is not enough and
+            # looks like it worked: the box stops being upside down and stays in
+            # the wrong coordinate system.
+            height = page.dimension.height if page.dimension else None
+            if height is None:
+                continue
+            glyphs = []
+            for cell in page.char_cells:
+                if not cell.text.strip():
+                    continue
+                box = cell.rect.to_bounding_box().to_top_left_origin(height)
+                glyphs.append((cell.text, float(box.l), float(box.t), float(box.r), float(box.b)))
+            if glyphs:
+                cells[page_no] = glyphs
+    except Exception:
+        logger.warning("docling-parse char cells unavailable; falling back to word precision")
+        return {}
+    return cells
 
 
 def _char_boxes_for_word(
@@ -92,19 +136,20 @@ def _char_boxes_for_word(
     """
     if char_cells is not None and cursor + len(word_text) <= len(char_cells):
         candidate = char_cells[cursor : cursor + len(word_text)]
-        if all(cell.text == ch for cell, ch in zip(candidate, word_text, strict=True)):
-            cell_bboxes = [cell.rect.to_bounding_box() for cell in candidate]
+        if all(cell[0] == ch for cell, ch in zip(candidate, word_text, strict=True)):
+            # Already TOP-LEFT: char_cells_by_page converts at the source, where
+            # the page height is available.
             boxes = [
                 CharBox(
                     char=ch,
-                    x0=float(cb.l),
-                    top=float(cb.t),
-                    x1=float(cb.r),
-                    bottom=float(cb.b),
+                    x0=x0,
+                    top=top,
+                    x1=x1,
+                    bottom=bottom,
                     page=page_no,
                     precision="char",
                 )
-                for ch, cb in zip(word_text, cell_bboxes, strict=True)
+                for ch, (_, x0, top, x1, bottom) in zip(word_text, candidate, strict=True)
             ]
             return boxes, cursor + len(word_text), True
 
@@ -123,7 +168,9 @@ def _char_boxes_for_word(
     return boxes, cursor, False
 
 
-def _build_page_index(page: DoclingPage, page_no: int) -> PageIndex:
+def _build_page_index(
+    page: DoclingPage, page_no: int, supplied_char_cells: list | None = None
+) -> PageIndex:
     parsed_page = page.parsed_page
     if not parsed_page:
         return PageIndex(page=page_no, text="", char_map=[])
@@ -133,7 +180,9 @@ def _build_page_index(page: DoclingPage, page_no: int) -> PageIndex:
     if not words:
         return PageIndex(page=page_no, text="", char_map=[])
 
-    char_cells = _real_char_cells(parsed_page)
+    # Per-glyph geometry, or None -- in which case every box on this page is
+    # word precision, stated as such rather than estimated.
+    char_cells = supplied_char_cells
     char_cursor = 0
 
     # Resolve each word's BoundingRectangle (corner points) to a BoundingBox
@@ -395,7 +444,12 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             document_cache.put_json(f"{digest}.json", result.document.export_to_dict())
             logger.debug("cached DoclingDocument: sha256=%s", digest[:16])
 
-        page_indices = [_build_page_index(page, page.page_no) for page in result.pages]
+        # Per-glyph geometry the pipeline drops; see char_cells_by_page.
+        char_cells = char_cells_by_page(pdf_bytes)
+        page_indices = [
+            _build_page_index(page, page.page_no, char_cells.get(page.page_no))
+            for page in result.pages
+        ]
         tag_boilerplate(page_indices)
 
         # A blank page still yields an (empty) PageIndex rather than being absent,

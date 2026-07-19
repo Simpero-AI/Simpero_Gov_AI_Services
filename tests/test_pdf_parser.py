@@ -134,10 +134,26 @@ def test_parse_pdf_returns_page_index_and_char_coordinates() -> None:
     assert len({round(cb.x0, 1) for cb in glyphs}) > 5
     assert len({round(cb.top, 1) for cb in glyphs}) >= 2
 
-    # Docling does not expose per-character geometry for native (non-OCR)
-    # text extraction, so every box must honestly declare word-level
-    # precision rather than a fabricated per-glyph estimate.
-    assert all(cb.precision == "word" for cb in page.char_map)
+    # Per-glyph geometry, read from docling-parse rather than from Docling's
+    # pipeline (which drops char cells). Every box declares which it is, and a
+    # "word" box is an honest statement of word-level precision, never a
+    # fabricated per-glyph estimate.
+    assert all(cb.precision in ("char", "word") for cb in page.char_map)
+    assert any(cb.precision == "char" for cb in page.char_map), (
+        "a digital-born PDF must yield real per-character boxes"
+    )
+
+    # The whole point: a glyph's box is its own, not its word's. Letters within
+    # one word must have distinct x-extents -- if the word bbox leaked into the
+    # char path, every letter would share one box and exact-span highlighting
+    # would still be word-level while claiming otherwise.
+    chars = [cb for cb in page.char_map if cb.precision == "char"]
+    assert len({(round(cb.x0, 2), round(cb.x1, 2)) for cb in chars}) > len(chars) // 2
+
+    # TOP-LEFT, matching every other coordinate in the index. A char cell arrives
+    # bottom-left; storing it unconverted puts the citation the right distance
+    # from the wrong edge, which is not obviously wrong on inspection.
+    assert all(cb.top < cb.bottom for cb in page.char_map)
 
 
 def test_parse_endpoint_accepts_pdf_bytes() -> None:

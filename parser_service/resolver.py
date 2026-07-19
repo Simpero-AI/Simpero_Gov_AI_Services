@@ -148,21 +148,53 @@ def resolve(quote: str, page: PageIndex) -> Span | None:
     )
 
 
+# How far past a cell's border a glyph's centre may sit and still belong to it.
+#
+# Docling's cell rect can be NARROWER than the text inside it. Measured on a real
+# CIM: the cell holding "(6)" spans x 307.19..315.95 while its closing ")" spans
+# 315.66..318.17 -- the glyph is 88% outside its own cell, and its centre (316.92)
+# misses by a point.
+#
+# This never showed while every CharBox carried its whole WORD's box: all three
+# glyphs shared one centre, which sat comfortably inside. Real per-glyph geometry
+# made the test bite, dropping the last character and turning 130 resolvable cells
+# into `missing` on one document -- the exact failure this function's docstring
+# predicted a stricter test would cause.
+#
+# Sized against the gap between cells, not the glyph: adjacent value cells on that
+# page start ~26pt apart, so a few points cannot reach a neighbour's text. A pad
+# large enough to steal from the next cell would be a precision bug; this is two
+# orders of magnitude below that.
+#
+# HORIZONTAL ONLY, and that is not an oversight. Rows sit ~8pt apart, so the same
+# pad applied vertically reaches into the row above and below: tried at 3pt in
+# both axes it pulled neighbouring rows' digits into the cell, made quotes
+# ambiguous, and -- because ambiguity fails closed -- took `missing` on one
+# document from 879 to 1,474. The clipping this corrects is a horizontal
+# phenomenon (a glyph running past the right border); vertically the cell rect
+# already contains its text.
+_CELL_EDGE_TOLERANCE_PT = 3.0
+
+
 def _chars_in_cell(page: PageIndex, cell: TableCellRecord) -> list[int]:
-    """Indices of the page chars whose centres lie inside `cell`'s box.
+    """Indices of the page chars whose centres lie inside `cell`'s box, within a
+    small edge tolerance.
 
     Centre-point containment rather than full overlap: a glyph box can spill a
     fraction of a point past a tight cell border without belonging to the
     neighbour, and a stricter test would drop the first or last character of a
-    value and turn a resolvable cell into a miss.
+    value and turn a resolvable cell into a miss. The tolerance extends that
+    same reasoning to a border tight enough to clip the glyph outright -- see
+    _CELL_EDGE_TOLERANCE_PT.
     """
     if cell.x0 is None or cell.top is None or cell.x1 is None or cell.bottom is None:
         return []
+    pad = _CELL_EDGE_TOLERANCE_PT
     return [
         i
         for i, char in enumerate(page.char_map)
         if char.page == cell.page
-        and cell.x0 <= (char.x0 + char.x1) / 2 <= cell.x1
+        and cell.x0 - pad <= (char.x0 + char.x1) / 2 <= cell.x1 + pad
         and cell.top <= (char.top + char.bottom) / 2 <= cell.bottom
     ]
 
