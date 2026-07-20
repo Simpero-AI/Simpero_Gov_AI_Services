@@ -310,9 +310,15 @@ def test_a_value_token_not_present_in_the_quote_is_not_trusted() -> None:
         flag_log=FlagLog(),
         client=client,
     )
-    # Falls back to parsing the quote rather than accepting an uncopied token.
+    # The uncopied token is refused, and the quote it falls back to holds two
+    # numbers -- so which one is the value is unknown, and parsing it anyway
+    # takes the leftmost and calls the year a student count. The claim keeps its
+    # citation and records no magnitude instead. This assertion previously
+    # stopped at `status == "proposed"`, which the 2003 reading also satisfied.
     assert claims[0].status == "proposed"
     assert claims[0].value.raw == "In 2003, 18,454 students attended"
+    assert claims[0].value.value_type == "text"
+    assert claims[0].value.normalized is None
 
 
 def test_the_value_token_settles_the_magnitude_not_the_leftmost_number() -> None:
@@ -522,3 +528,75 @@ def test_a_prose_claim_does_not_inherit_a_table_banner() -> None:
     assert claims[0].value.normalized == 14.25, "this shipped as 14250.0"
     assert claims[0].value.scale_source == "assumed_1x"
     assert "scale_assumed" in claims[0].flags
+
+
+def test_an_unset_value_text_does_not_become_the_claims_raw() -> None:
+    # "" is a substring of every quote, so an unset value_text passed the
+    # verbatim check vacuously and was carried through as the value -- emitting
+    # a claim whose raw reads as the empty string.
+    page = _page("The market was estimated at £42 million in that year.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote="estimated at £42 million",
+                value_text="",
+                entity="market",
+                attribute="size",
+                value_type="currency",
+            )
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+
+    assert claims[0].value.raw != ""
+    assert claims[0].value.normalized == 42_000_000.0
+
+
+def test_a_sentence_holding_two_numbers_does_not_pick_one_and_kill_the_page() -> None:
+    """The second page-killer, found by review rather than by a run. When no
+    value token is named, the quote is parsed -- and a quote carrying both a
+    year and an inline multiplier reads 42 million through the suffix grammar
+    and 2003 through the fallback. scale_invariant_holds catches the mismatch by
+    raising, which is right, but the raise escaped and took the page with it,
+    exactly as the digitless ValueError did.
+    """
+    quote = "In 2003, the total market was greater than £42 million"
+    page = _page(f"{quote} overall. Turnover of £7,917 was recorded that year.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote=quote,
+                value_text="42000000",  # restated, so not trusted
+                entity="market",
+                attribute="size",
+                value_type="currency",
+            ),
+            ProposedClaim(
+                quote="Turnover of £7,917",
+                value_text="£7,917",
+                entity="BarWash",
+                attribute="turnover",
+                value_type="currency",
+            ),
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+
+    assert len(claims) == 2, "the sibling claim on the same page must survive"
+    assert claims[0].value.value_type == "text"
+    assert claims[0].value.normalized is None
+    assert claims[1].value.normalized == 7_917.0

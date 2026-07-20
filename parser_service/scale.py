@@ -112,7 +112,19 @@ class ScaleResult(BaseModel):
 # PDF-page 15 -- matched ".m" in "p.m." as "point million" and crashed
 # float("."). A leading decimal (".5M") is still accepted; a digitless token is
 # not a number and must not reach the parse.
-_NUMBER = r"(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
+#
+# The leading-decimal branch is guarded, because a "." before a digit is only a
+# decimal point when nothing else claims it. "c.250" is circa 250 -- idiomatic
+# in a UK CIM -- and without the lookbehind the branch starts the match at the
+# dot and reads 0.25. So do "No.5", "p.14" and a contents-page leader run
+# ("Business Overview.........12" -> 0.12). The lookbehind refuses a dot that
+# follows a word character or another dot, which is every one of those, while
+# ".5M" and "($.5)" are preceded by a boundary or a symbol and still match.
+#
+# This lives in _NUMBER rather than at one call site on purpose: the suffix
+# patterns interpolate it too, so guarding only the fallback parse would leave
+# "c.5M" reading 0.5 million.
+_NUMBER = r"(?:\d[\d,]*(?:\.\d+)?|(?<![\w.])\.\d+)"
 
 _MILLION_RE = re.compile(rf"(?P<sign>[-(])?\$?(?P<number>{_NUMBER})\s*[Mm](?:illion|M|m|n|N)?\b\)?")
 _BILLION_RE = re.compile(rf"(?P<sign>[-(])?\$?(?P<number>{_NUMBER})\s*[Bb](?:illion|B|b|n|N)?\b\)?")
@@ -177,6 +189,29 @@ def has_parseable_magnitude(text: str) -> bool:
     the parser instead of guessing gets one answer, not two.
     """
     return _parse_number(text) is not None
+
+
+def holds_one_number(text: str) -> bool:
+    """Whether `text` contains exactly one number, so "the value" is unambiguous.
+
+    A table cell's raw IS its value, so which number is meant never arises. A
+    prose quote is a sentence CONTAINING one, and when nothing names the value
+    token this module has to pick -- it picks the leftmost, and the leftmost is
+    routinely a year. "In 2003, 18,454 students attended" reads 2003.
+
+    That failure is normally silent, because the fallback parse and
+    scale_invariant_holds are the same reading, so the invariant confirms the
+    wrong number rather than catching it. It turns loud only when the sentence
+    also carries an inline multiplier: "In 2003, the total market was greater
+    than £42 million" takes 42 million through the suffix grammar and 2003
+    through the fallback, and the invariant then raises at emission -- which
+    aborted the entire page, the same blast radius the digitless ValueError had.
+
+    One number means one reading, and both defects go with it. Asking here
+    rather than at emission is what makes it answerable: a value nobody can
+    point at is a value with no magnitude, which the contract can express.
+    """
+    return len(_SIGNED_NUMBER_RE.findall(text)) == 1
 
 
 def parse_bare_number(text: str) -> float | None:

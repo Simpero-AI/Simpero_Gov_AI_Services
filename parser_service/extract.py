@@ -47,17 +47,34 @@ _LABEL_COL = 0
 
 
 def _is_a_figure(text: str) -> bool:
-    """Whether a cell holds a number, asked of the parser that will read it.
+    """Whether a cell holds a magnitude, asked of the parser that will read it.
 
-    This was `any(ch.isdigit() for ch in text)`, which answers a different
-    question than scale.py does: str.isdigit() is true for superscripts and
-    circled digits, `\\d` is not. A cell reading "m2" with a superscript two
-    therefore passed this gate, was typed currency by the default below, and
-    reached determine_scale -- which raised on it, uncaught. The docstring in
-    infer_value_type_for claimed that could not happen. It could; the two
+    Gates claim emission, so it must agree with scale.py or the disagreement
+    lands on determine_scale as a raise. It used to be
+    `any(ch.isdigit() for ch in text)`, and str.isdigit() is true for
+    superscripts and circled digits where `\\d` is not: a cell reading "m2" with
+    a superscript two passed, was typed currency by the default below, and
+    reached determine_scale -- which raises on it, uncaught. The docstring on
+    infer_value_type_for claimed that was unreachable. It was reachable; the two
     functions simply disagreed about what a digit is.
     """
     return has_parseable_magnitude(text)
+
+
+def _carries_cell_content(text: str) -> bool:
+    """Whether a row is a data row rather than a section banner.
+
+    Deliberately NOT _is_a_figure. A banner is a label row with nothing in its
+    value columns; "Floor area | m2" has something there, so it is a data row
+    whose value happens not to be a magnitude. Reading it as a banner makes it
+    govern every row beneath it, and "Revenue" two rows down comes back as
+    "Floor area | Revenue | 2019F".
+
+    So the looser digit test is right here and wrong at the claim gate: this
+    question is about layout, and that one is about whether scale.py can read
+    the value.
+    """
+    return any(ch.isdigit() for ch in text)
 
 
 def _cell_at(table: TableRecord, row: int, col: int) -> TableCellRecord | None:
@@ -355,7 +372,9 @@ def section_banners(table: TableRecord) -> dict[int, str]:
             continue
         cells = rows[row]
         label = cells.get(_LABEL_COL, "")
-        has_figures = any(col >= 1 and text and _is_a_figure(text) for col, text in cells.items())
+        has_figures = any(
+            col >= 1 and text and _carries_cell_content(text) for col, text in cells.items()
+        )
         if label and not has_figures:
             current = label
             continue

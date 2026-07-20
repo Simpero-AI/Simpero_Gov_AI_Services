@@ -17,6 +17,7 @@ from parser_service.scale import (
     ScaleResult,
     determine_scale,
     has_parseable_magnitude,
+    holds_one_number,
     normalize_financial_token,
     parse_bare_number,
     scale_invariant_holds,
@@ -971,3 +972,61 @@ def test_claiming_prose_while_handing_over_a_table_is_a_caller_bug() -> None:
             table=table,
             cell=cell,
         )
+
+
+# --------------------------------------------------------------------------- #
+# A dot is only a decimal point when nothing else claims it.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("c.250", 250.0),  # circa 250 -- idiomatic in a UK CIM
+        ("c.20%", 20.0),
+        ("c.5x", 5.0),
+        ("No.5", 5.0),
+        ("p.14", 14.0),
+        ("Business Overview.........12", 12.0),  # a contents-page leader run
+    ],
+)
+def test_an_abbreviation_dot_is_not_a_decimal_point(text: str, expected: float) -> None:
+    # Sharing _NUMBER between the two patterns fixed a divergence and introduced
+    # this: the leading-decimal branch let re.search start one character early
+    # whenever a dot preceded the first digit, so "c.250" read 0.25. Under a
+    # thousands banner that is a 1000x understatement carrying no flag, and
+    # scale_invariant_holds agreed with it -- the same silent shape the shared
+    # grammar was meant to remove.
+    assert parse_bare_number(text) == expected
+
+
+def test_a_circa_suffix_value_keeps_its_multiplier() -> None:
+    # The guard has to live in _NUMBER itself, not at the fallback-parse call
+    # site: the suffix patterns interpolate the same grammar, so guarding one
+    # place would leave "c.5M" reading half a million.
+    assert normalize_financial_token("c.5M") == (5.0, 1_000_000.0, None)
+    assert normalize_financial_token("c.5 million") == (5.0, 1_000_000.0, None)
+
+
+@pytest.mark.parametrize("text", [".5", "$.5", "(.5)", "-.5", ".5M", "$.5M", ".5B", ".75"])
+def test_a_real_leading_decimal_still_parses(text: str) -> None:
+    # The guard refuses a dot preceded by a word character or another dot. A
+    # genuine leading decimal is preceded by a boundary, a sign or a symbol.
+    assert parse_bare_number(text) is not None
+    assert abs(parse_bare_number(text) or 0) < 1.0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("£42 million", True),
+        ("18,454", True),
+        ("(7,499)", True),
+        ("27.3%", True),
+        ("In 2003, 18,454 students attended", False),
+        ("In 2003, the total market was greater than £42 million", False),
+        ("five years", False),
+    ],
+)
+def test_holds_one_number_says_whether_the_value_is_unambiguous(text: str, expected: bool) -> None:
+    assert holds_one_number(text) is expected

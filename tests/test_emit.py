@@ -158,6 +158,33 @@ def _table(
 # --------------------------------------------------------------------------- #
 
 
+def test_emit_pdf_claim_prose_origin_declines_the_page_header_scale() -> None:
+    # Same page and same value as the table case below; only the origin differs.
+    # Without this, emit_pdf_claim could stop forwarding `origin` entirely and
+    # every test in this module stayed green -- the parameter was covered only
+    # by one test in tests/test_propose.py.
+    page = make_page("CAD (in Thousands)\nRevenue $15,295 total", page_no=11)
+    flag_log = FlagLog(run_id="run-1")
+
+    claim = emit_pdf_claim(
+        "PTL Group",
+        "revenueTrailing5yrAvg",
+        "$15,295",
+        page,
+        origin="prose",
+        value_type="currency",
+        file="1st-App-H-PTL-Group-CIM.pdf",
+        flag_log=flag_log,
+    )
+
+    assert claim.value.normalized == 15_295.0
+    assert claim.value.scale_source == "assumed_1x"
+    assert claim.flags == ["scale_assumed"]
+    # The banner it turned down is recorded, so a declined header stays
+    # distinguishable from a page that never had one.
+    assert [entry.detail for entry in flag_log.entries] == ["CAD (in Thousands)"]
+
+
 def test_emit_pdf_claim_extracted_with_page_header_scale() -> None:
     page = make_page("CAD (in Thousands)\nRevenue $15,295 total", page_no=11)
     flag_log = FlagLog(run_id="run-1")

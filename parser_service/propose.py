@@ -45,7 +45,7 @@ import os
 from pydantic import BaseModel, Field
 
 from .emit import Claim, FlagLog, emit_pdf_claim
-from .scale import ValueType, has_parseable_magnitude
+from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
 
 logger = logging.getLogger(__name__)
@@ -214,7 +214,12 @@ def claims_from_prose(
         # exists to catch, and letting it through would put a magnitude in the
         # store that came from the model instead of the page. Falling back to the
         # quote is safe: that is what every table caller does.
-        value_text = proposal.value_text if proposal.value_text in proposal.quote else None
+        # `.strip()` before the containment test: "" and " " are substrings of
+        # almost any quote, so an unset value_text passed this vacuously and
+        # went on to be emitted as the claim's raw -- a claim whose value reads
+        # as the empty string.
+        named_value = proposal.value_text.strip()
+        value_text = proposal.value_text if named_value and named_value in proposal.quote else None
         if proposal.value_text and value_text is None:
             logger.warning(
                 "page %s: value_text %r is not inside the quote; parsing the quote instead",
@@ -239,16 +244,27 @@ def claims_from_prose(
         # AssertionError next to it, which must stay loud.
         value_type = proposal.value_type
         scaled_text = value_text if value_text is not None else proposal.quote
-        if value_type != "text" and not has_parseable_magnitude(scaled_text):
-            logger.warning(
-                "page %s: %r/%r typed %s has no numeric content in %r; emitting as text",
-                page.page,
-                proposal.entity,
-                proposal.attribute,
-                value_type,
-                scaled_text,
-            )
-            value_type = "text"
+        if value_type != "text":
+            if not has_parseable_magnitude(scaled_text):
+                reason = "has no numeric content"
+            elif not holds_one_number(scaled_text):
+                # A sentence holding several numbers, with no value token naming
+                # which one is meant. Parsing it anyway takes the leftmost, and
+                # the leftmost is routinely a year.
+                reason = "holds more than one number and none was named as the value"
+            else:
+                reason = ""
+            if reason:
+                logger.warning(
+                    "page %s: %r/%r typed %s %s in %r; emitting as text",
+                    page.page,
+                    proposal.entity,
+                    proposal.attribute,
+                    value_type,
+                    reason,
+                    scaled_text,
+                )
+                value_type = "text"
 
         claims.append(
             emit_pdf_claim(

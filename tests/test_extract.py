@@ -466,6 +466,30 @@ def test_skips_labels_headers_and_prose() -> None:
     assert [c.attribute for c in claims] == ["Revenue | 2019F"]
 
 
+def test_a_superscript_marked_cell_is_not_mistaken_for_a_figure() -> None:
+    # The gate that decides "does this cell hold a number" used
+    # `any(ch.isdigit() for ch in text)`, which is True for superscripts and
+    # circled digits while scale.py's "\d" is not. A unit like "m2" written with
+    # a superscript two, or a circled footnote mark, therefore passed the gate,
+    # was typed currency by the default, and reached determine_scale -- which
+    # raises on it, uncaught, taking the run with it. Both gates now ask the
+    # parser that will read the value.
+    page = make_page("2019F Floor area m\u00b2 Revenue $15,295")
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "2019F"),
+        _cell(1, 0, "Floor area"),
+        _cell(1, 1, "m\u00b2"),
+        _cell(2, 0, "Revenue"),
+        _cell(2, 1, "$15,295"),
+    ]
+    claims = claims_from_table(_table(cells), page, entity="E", file="f.pdf", flag_log=FlagLog())
+
+    assert [c.attribute for c in claims] == ["Revenue | 2019F"], (
+        "the superscript cell names a unit, not a magnitude"
+    )
+
+
 def test_an_uncitable_cell_is_missing_not_dropped() -> None:
     # The value is not on the page, so it cannot be cited. It must come back
     # `missing` rather than vanish: a dropped cell is invisible, a missing claim
