@@ -257,6 +257,7 @@ def claims_from_prose(
                 proposal.quote,
                 page,
                 value_type=value_type,
+                origin="prose",
                 file=file,
                 flag_log=flag_log,
                 value_text=value_text,

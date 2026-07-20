@@ -22,10 +22,25 @@ Resolution order for a currency value (first match wins):
   1. Inline in the value itself ("$4.8M", "500K") -> explicit_in_value.
   2. A scale phrase in the value's own table column, walking upward
      (DS-W3-2 table structure) -> column_header.
-  3. A scale phrase anywhere earlier on the page -> page_header.
+  3. A scale phrase anywhere earlier on the page, WHEN the value came from a
+     table -> page_header.
   4. Nothing found -> multiplier 1, scale_source=assumed_1x, flagged
      ("scale_assumed") -- never silent, never indistinguishable from a
      verified 1x.
+
+Step 3 is gated on origin because a "(in thousands)" banner is table furniture:
+it is set once over a grid and governs the figures in that grid. A sentence
+printed beside the grid is not in it, and states its own units in its own words.
+Reading the banner onto prose put "£14.25" of average customer spend into the
+store as £14,250 -- silently, since a page_header multiplier raises no flag. A
+prose value that declines a banner records the phrase it declined and falls to a
+flagged assumed_1x instead: an audible understatement in place of a silent
+overstatement, which is the trade this module makes everywhere else.
+
+This does not settle the general question. One page bearing two tables where
+only one carries a banner is still bled, and a per-share amount is currency that
+must never take an "(in millions)" header at all. "Is currency" and "takes the
+scale header" remain two questions with one answer between them.
 """
 
 import re
@@ -43,6 +58,14 @@ ScaleSource = Literal[
 # with its sole current consumer; promote to schemas.py once the extractor and
 # the claim emitter share it.
 ValueType = Literal["currency", "percent", "count", "ratio", "date", "text"]
+
+# Where a value was read from. Deliberately NOT a contract field: it decides
+# whether a page-level scale banner is allowed to bind, and that decision is
+# this module's, but the FACT it rests on belongs to the caller. Naming the fact
+# rather than the policy ("prose" rather than page_header_applies=False) means a
+# later refinement -- say, a banner inside the same text block -- changes only
+# this file.
+ValueOrigin = Literal["table", "prose"]
 
 
 class ScaleResult(BaseModel):
@@ -474,6 +497,7 @@ def determine_scale(
     char_start: int,
     *,
     value_type: ValueType,
+    origin: ValueOrigin,
     table: TableRecord | None = None,
     cell: TableCellRecord | None = None,
 ) -> ScaleResult:
@@ -485,13 +509,21 @@ def determine_scale(
     to scale. It is required, with no default, so a caller can never silently
     fall into currency scaling for a value that is not currency.
 
+    `origin` is required for the same reason and carries the same weight: it
+    decides whether a page-level banner may bind, which is a 1000x decision, and
+    a default would make it silently. It says where the value came from, which
+    is a different question from whether the caller happens to hold a
+    TableRecord -- a harness sweeping raw page text holds no table and is not
+    thereby reading prose.
+
     `char_start` is the value's position in `page.text` (from the DS-W3-3
     resolved Span) -- the page-header search only looks at text strictly
     before it, matching the ticket's "page-level scale phrase before the
     value". `table`/`cell` are the DS-W3-2 table record and the value's own
-    cell, when the value came from a table; omit both for prose values, which
-    skip straight from the inline check to the page-level one.
+    cell, for the column-header walk; a prose caller supplies neither.
     """
+    if origin == "prose" and (table is not None or cell is not None):
+        raise ValueError("origin='prose' contradicts a supplied table/cell")
     if value_type == "text":
         raise ValueError("determine_scale does not apply to value_type='text' (no magnitude)")
     if value_type != "currency":
@@ -525,8 +557,10 @@ def determine_scale(
                 scale_context=context,
             )
 
+    # Looked up unconditionally so that a DECLINED banner still reaches the
+    # audit trail; only the BINDING is gated.
     page_match = _page_header_scale(page.text, char_start)
-    if page_match is not None:
+    if page_match is not None and origin == "table":
         multiplier, currency, context = page_match
         return ScaleResult(
             raw=raw,
@@ -537,11 +571,16 @@ def determine_scale(
             scale_context=context,
         )
 
+    # assumed_1x now records what it turned down, so "there was no banner on
+    # this page" and "there was one and I was not entitled to it" never collapse
+    # into the same claim. emit.py already logs scale_context as the flag's
+    # detail, so the declined-banner population becomes queryable for free.
     return ScaleResult(
         raw=raw,
         normalized=number * 1.0,
         unit=None,
         scale_multiplier=1.0,
         scale_source="assumed_1x",
+        scale_context=None if page_match is None else page_match[2],
         flags=["scale_assumed"],
     )

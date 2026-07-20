@@ -48,7 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .elements import ChartElement, TableElement
 from .resolver import resolve, resolve_in_cell
-from .scale import ScaleSource, ValueType, determine_scale, scale_invariant_holds
+from .scale import ScaleSource, ValueOrigin, ValueType, determine_scale, scale_invariant_holds
 from .schemas import BBox, PageIndex, TableCellRecord, TableRecord, XlsxCellRecord, XlsxSheetRecord
 from .xlsx_parser import determine_xlsx_scale
 
@@ -301,6 +301,7 @@ def emit_pdf_claim(
     page: PageIndex,
     *,
     value_type: ValueType,
+    origin: ValueOrigin,
     file: str,
     flag_log: FlagLog,
     table: TableRecord | None = None,
@@ -389,6 +390,7 @@ def emit_pdf_claim(
             page,
             span.char_start,
             value_type=value_type,
+            origin=origin,
             table=table,
             cell=cell,
         )
@@ -497,6 +499,9 @@ def emit_pdf_table_cell_claim(
         cell.text_normalized,
         page,
         value_type=value_type,
+        # A table cell's origin is settled by construction: this entry point
+        # cannot be called without the table it came from.
+        origin="table",
         file=file,
         flag_log=flag_log,
         table=table,

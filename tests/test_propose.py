@@ -490,3 +490,35 @@ def test_a_value_type_of_text_is_left_alone() -> None:
 
     assert claims[0].value.value_type == "text"
     assert claims[0].value.raw == "Bar Wash Bristol"
+
+
+def test_a_prose_claim_does_not_inherit_a_table_banner() -> None:
+    """The Bar Wash pages 38-39 defect, end to end. The page carries a "£'000"
+    banner over a table; the sentence beside it quotes average customer spend.
+    Every one of the nine magnitude errors in the first full-document run was
+    this shape, and none of them flagged.
+    """
+    page = _page("Trading summary £'000. Average spend on alcohol and food was £14.25 per head.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote="£14.25 per head",
+                value_text="£14.25",
+                entity="BarWash",
+                attribute="average spend on alcohol and food",
+                value_type="currency",
+            )
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+
+    assert claims[0].value.normalized == 14.25, "this shipped as 14250.0"
+    assert claims[0].value.scale_source == "assumed_1x"
+    assert "scale_assumed" in claims[0].flags
