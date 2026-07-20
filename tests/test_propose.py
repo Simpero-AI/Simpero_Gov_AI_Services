@@ -346,3 +346,147 @@ def test_the_value_token_settles_the_magnitude_not_the_leftmost_number() -> None
     location = claims[0].location
     assert isinstance(location, PdfLocation)
     assert page.text[location.char_start : location.char_end] == "In 2003, 18,454 students attended"
+
+
+# --------------------------------------------------------------------------- #
+# One bad proposal must not cost the page.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_spelled_out_quantity_does_not_take_down_its_page() -> None:
+    """The measured defect: a proposal typed count whose value is "five years"
+    has no magnitude, determine_scale raises on it by contract, and the raise
+    escaped this loop and destroyed every other claim on the page. Twelve of 78
+    prose pages were lost this way on the first full-document run.
+    """
+    page = _page("The lease runs five years. Turnover reached £42 million.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote="five years",
+                value_text="five years",
+                entity="BarWash",
+                attribute="leaseTerm",
+                value_type="count",
+            ),
+            ProposedClaim(
+                quote="£42 million",
+                value_text="£42 million",
+                entity="BarWash",
+                attribute="turnover",
+                value_type="currency",
+            ),
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+
+    assert len(claims) == 2, "the sibling claim on the same page must survive"
+    assert claims[1].value.normalized == 42_000_000.0
+
+
+@pytest.mark.parametrize(
+    "value_text", ["five years", "eight minutes", "one manager", "three", "six years"]
+)
+def test_a_magnitude_less_value_is_typed_text_not_dropped(value_text: str) -> None:
+    # Every one of these was observed in a real run. The claim is kept: it has a
+    # verbatim quote and a resolved span, so it is a citable assertion that
+    # simply carries no number. Dropping it would make the loss invisible, which
+    # is the failure mode this module's docstring rejects by name.
+    page = _page(f"The agreement covers {value_text} from completion.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote=f"covers {value_text} from completion",
+                value_text=value_text,
+                entity="BarWash",
+                attribute="term",
+                value_type="count",
+            )
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+
+    assert len(claims) == 1
+    claim = claims[0]
+    assert claim.status == "proposed"
+    assert claim.value.value_type == "text"
+    assert claim.value.normalized is None
+    assert claim.value.raw == value_text
+    # The citation is untouched: a claim with no magnitude still points at the page.
+    location = claim.location
+    assert isinstance(location, PdfLocation)
+    assert page.text[location.char_start : location.char_end] == (
+        f"covers {value_text} from completion"
+    )
+
+
+def test_the_downgrade_tests_the_same_text_the_scaler_would_have_parsed() -> None:
+    # emit_pdf_claim parses value_text when given and the quote otherwise, so the
+    # guard must ask about the same string. Here value_text was not copied
+    # verbatim, so it is discarded and the QUOTE is what gets parsed -- and the
+    # quote does contain a number, so this must stay a real currency claim.
+    page = _page("Turnover reached £42 million last year.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote="£42 million",
+                value_text="forty-two million",
+                entity="BarWash",
+                attribute="turnover",
+                value_type="currency",
+            )
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+
+    assert claims[0].value.value_type == "currency"
+    assert claims[0].value.normalized == 42_000_000.0
+
+
+def test_a_value_type_of_text_is_left_alone() -> None:
+    # A proposal that already says it has no magnitude needs no downgrade and
+    # must not be re-examined for one.
+    page = _page("The venue trades as Bar Wash Bristol.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote="Bar Wash Bristol",
+                value_text="Bar Wash Bristol",
+                entity="BarWash",
+                attribute="tradingName",
+                value_type="text",
+            )
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+
+    assert claims[0].value.value_type == "text"
+    assert claims[0].value.raw == "Bar Wash Bristol"

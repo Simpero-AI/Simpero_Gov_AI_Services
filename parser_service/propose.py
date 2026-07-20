@@ -45,7 +45,7 @@ import os
 from pydantic import BaseModel, Field
 
 from .emit import Claim, FlagLog, emit_pdf_claim
-from .scale import ValueType
+from .scale import ValueType, has_parseable_magnitude
 from .schemas import PageIndex, TextBlockRecord
 
 logger = logging.getLogger(__name__)
@@ -221,13 +221,42 @@ def claims_from_prose(
                 page.page,
                 proposal.value_text,
             )
+
+        # Nothing the model says is trusted, including its claim that the value
+        # is a number. "five years", "one manager", "three" arrive typed count
+        # or date and carry no magnitude at all. determine_scale raises on those
+        # by contract -- correctly, since there is no honest ScaleResult for a
+        # value that has none -- and an escaping raise took down not the claim
+        # but the whole PAGE: 12 of 78 prose pages and 154 reference claims on
+        # the first full-document run.
+        #
+        # Typing it "text" keeps the claim, its verbatim quote, its resolved
+        # span and its bbox, and records no magnitude. A magnitude-less claim is
+        # visibly magnitude-less in the store and still counts in recall, which
+        # is this module's stance that a proposal the page cannot support
+        # becomes a measurable record rather than a silent drop. Catching the
+        # raise instead would swallow the claim AND the scale-invariant
+        # AssertionError next to it, which must stay loud.
+        value_type = proposal.value_type
+        scaled_text = value_text if value_text is not None else proposal.quote
+        if value_type != "text" and not has_parseable_magnitude(scaled_text):
+            logger.warning(
+                "page %s: %r/%r typed %s has no numeric content in %r; emitting as text",
+                page.page,
+                proposal.entity,
+                proposal.attribute,
+                value_type,
+                scaled_text,
+            )
+            value_type = "text"
+
         claims.append(
             emit_pdf_claim(
                 proposal.entity,
                 proposal.attribute,
                 proposal.quote,
                 page,
-                value_type=proposal.value_type,
+                value_type=value_type,
                 file=file,
                 flag_log=flag_log,
                 value_text=value_text,

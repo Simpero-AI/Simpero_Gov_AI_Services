@@ -373,7 +373,16 @@ def emit_pdf_claim(
 
     flags: list[str] = []
     if value_type == "text":
-        value = ClaimValue(raw=quote, normalized=None, unit=None, value_type=value_type)
+        # Same choice the scaled branch makes below: the quote is the citation
+        # and may be a whole clause, so where the caller named the value token
+        # it is the raw. Both are verbatim page text; this keeps a text claim
+        # from recording a sentence where it means "five years".
+        value = ClaimValue(
+            raw=value_text if value_text is not None else quote,
+            normalized=None,
+            unit=None,
+            value_type=value_type,
+        )
     else:
         scale_result = determine_scale(
             value_text if value_text is not None else quote,
