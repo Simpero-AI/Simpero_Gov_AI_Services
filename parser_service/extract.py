@@ -40,13 +40,40 @@ from __future__ import annotations
 import re
 
 from .emit import Claim, FlagLog, emit_pdf_table_cell_claim
-from .scale import ValueType
+from .scale import ValueType, has_parseable_magnitude
 from .schemas import PageIndex, TableCellRecord, TableRecord
 
 _LABEL_COL = 0
 
 
-def _has_digit(text: str) -> bool:
+def _is_a_figure(text: str) -> bool:
+    """Whether a cell holds a magnitude, asked of the parser that will read it.
+
+    Gates claim emission, so it must agree with scale.py or the disagreement
+    lands on determine_scale as a raise. It used to be
+    `any(ch.isdigit() for ch in text)`, and str.isdigit() is true for
+    superscripts and circled digits where `\\d` is not: a cell reading "m2" with
+    a superscript two passed, was typed currency by the default below, and
+    reached determine_scale -- which raises on it, uncaught. The docstring on
+    infer_value_type_for claimed that was unreachable. It was reachable; the two
+    functions simply disagreed about what a digit is.
+    """
+    return has_parseable_magnitude(text)
+
+
+def _carries_cell_content(text: str) -> bool:
+    """Whether a row is a data row rather than a section banner.
+
+    Deliberately NOT _is_a_figure. A banner is a label row with nothing in its
+    value columns; "Floor area | m2" has something there, so it is a data row
+    whose value happens not to be a magnitude. Reading it as a banner makes it
+    govern every row beneath it, and "Revenue" two rows down comes back as
+    "Floor area | Revenue | 2019F".
+
+    So the looser digit test is right here and wrong at the claim gate: this
+    question is about layout, and that one is about whether scale.py can read
+    the value.
+    """
     return any(ch.isdigit() for ch in text)
 
 
@@ -244,7 +271,7 @@ def infer_value_type_for(raw: str, attribute: str) -> ValueType:
     wrongly typed currency fails visibly -- it ends up assumed_1x carrying a
     `scale_assumed` flag, or takes a header multiplier and an `ambiguous_unit`
     flag. A value wrongly typed count or date fails SILENTLY: scale.py's
-    _self_scaling returns a KNOWN 1.0 with scale_source="explicit_in_value" and
+    _self_scaling returns a KNOWN 1.0 with scale_source="not_applicable" and
     no flag at all, which is indistinguishable from a verified scale. So where
     the signals run out, currency is the answer whose failure can be audited.
 
@@ -345,7 +372,9 @@ def section_banners(table: TableRecord) -> dict[int, str]:
             continue
         cells = rows[row]
         label = cells.get(_LABEL_COL, "")
-        has_figures = any(col >= 1 and text and _has_digit(text) for col, text in cells.items())
+        has_figures = any(
+            col >= 1 and text and _carries_cell_content(text) for col, text in cells.items()
+        )
         if label and not has_figures:
             current = label
             continue
@@ -443,7 +472,7 @@ def claims_from_table(
         if cell.col == _LABEL_COL or cell.row == table.header_row:
             continue
         raw = cell.text_normalized.strip()
-        if not raw or not _has_digit(raw):
+        if not raw or not _is_a_figure(raw):
             continue
 
         attribute = attribute_for(table, cell, banners.get(cell.row))

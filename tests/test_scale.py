@@ -16,7 +16,11 @@ import pytest
 from parser_service.scale import (
     ScaleResult,
     determine_scale,
+    has_parseable_magnitude,
+    holds_one_number,
     normalize_financial_token,
+    parse_bare_number,
+    scale_invariant_holds,
     scale_phrase_in_text,
 )
 from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
@@ -246,7 +250,7 @@ def test_a_parenthesised_marker_is_reported_once_at_its_widest() -> None:
 def test_determine_scale_explicit_in_value_short_circuits_context() -> None:
     page = _page("no scale phrase anywhere on this page $4.8M")
     result = determine_scale(
-        "$4.8M", page, char_start=page.text.index("$4.8M"), value_type="currency"
+        "$4.8M", page, char_start=page.text.index("$4.8M"), origin="table", value_type="currency"
     )
 
     # "$4.8M" states a real multiplier, so this is the genuine explicit_in_value
@@ -263,7 +267,9 @@ def test_determine_scale_percent_ignores_a_preceding_page_scale_header() -> None
     # percentage on a "(in Thousands)" page must not be multiplied by 1000.
     text = "CAD (in Thousands)\nGross Margin % 27.3%"
     page = _page(text)
-    result = determine_scale("27.3%", page, char_start=text.index("27.3%"), value_type="percent")
+    result = determine_scale(
+        "27.3%", page, char_start=text.index("27.3%"), origin="table", value_type="percent"
+    )
 
     assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
@@ -275,7 +281,7 @@ def test_determine_scale_page_header_found_before_value() -> None:
     text = "CAD (in Thousands)\nRevenue $15,295 total"
     page = _page(text)
     result = determine_scale(
-        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+        "$15,295", page, char_start=text.index("$15,295"), origin="table", value_type="currency"
     )
 
     assert result.scale_source == "page_header"
@@ -292,7 +298,7 @@ def test_determine_scale_page_header_strips_trailing_whitespace_in_context() -> 
     text = "CAD (in Thousands) \nRevenue $15,295 total"
     page = _page(text)
     result = determine_scale(
-        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+        "$15,295", page, char_start=text.index("$15,295"), origin="table", value_type="currency"
     )
 
     assert result.scale_context == "CAD (in Thousands)"
@@ -301,7 +307,9 @@ def test_determine_scale_page_header_strips_trailing_whitespace_in_context() -> 
 def test_determine_scale_paren_000_page_header() -> None:
     text = "Amounts in (000s)\nTotal $5,000"
     page = _page(text)
-    result = determine_scale("$5,000", page, char_start=text.index("$5,000"), value_type="currency")
+    result = determine_scale(
+        "$5,000", page, char_start=text.index("$5,000"), origin="table", value_type="currency"
+    )
 
     assert result.scale_source == "page_header"
     assert result.scale_multiplier == 1_000.0
@@ -314,7 +322,7 @@ def test_determine_scale_page_header_only_considers_text_before_the_value() -> N
     text = "Revenue $15,295 total, reported (in Millions) below"
     page = _page(text)
     result = determine_scale(
-        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+        "$15,295", page, char_start=text.index("$15,295"), origin="table", value_type="currency"
     )
 
     assert result.scale_source == "assumed_1x"
@@ -325,7 +333,7 @@ def test_determine_scale_page_header_nearest_phrase_wins() -> None:
     text = "(in Thousands) ... (in Millions) ... Revenue $15,295"
     page = _page(text)
     result = determine_scale(
-        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+        "$15,295", page, char_start=text.index("$15,295"), origin="table", value_type="currency"
     )
 
     assert result.scale_multiplier == 1_000_000.0
@@ -335,7 +343,9 @@ def test_determine_scale_page_header_nearest_phrase_wins() -> None:
 def test_determine_scale_lowercase_word_before_phrase_is_not_read_as_currency() -> None:
     text = "the (in thousands) figure is $500"
     page = _page(text)
-    result = determine_scale("$500", page, char_start=text.index("$500"), value_type="currency")
+    result = determine_scale(
+        "$500", page, char_start=text.index("$500"), origin="table", value_type="currency"
+    )
 
     assert result.scale_source == "page_header"
     assert result.unit is None
@@ -352,6 +362,7 @@ def test_determine_scale_column_header_walk_finds_scale_above_value() -> None:
         "$15,295",
         page,
         char_start=page.text.index("$15,295"),
+        origin="table",
         value_type="currency",
         table=table,
         cell=value,
@@ -374,6 +385,7 @@ def test_determine_scale_column_header_takes_precedence_over_page_header() -> No
         "$15,295",
         page,
         char_start=text.index("$15,295"),
+        origin="table",
         value_type="currency",
         table=table,
         cell=value,
@@ -399,6 +411,7 @@ def test_determine_scale_column_header_ignores_a_different_columns_header() -> N
         "$15,295",
         page,
         char_start=text.index("$15,295", 10),
+        origin="table",
         value_type="currency",
         table=table,
         cell=value,
@@ -412,7 +425,7 @@ def test_determine_scale_assumed_1x_is_flagged_never_silent() -> None:
     text = "Revenue $15,295 total, no scale phrase anywhere on this page"
     page = _page(text)
     result = determine_scale(
-        "$15,295", page, char_start=text.index("$15,295"), value_type="currency"
+        "$15,295", page, char_start=text.index("$15,295"), origin="table", value_type="currency"
     )
 
     assert result.scale_source == "assumed_1x"
@@ -426,11 +439,13 @@ def test_determine_scale_assumed_1x_is_flagged_never_silent() -> None:
 def test_determine_scale_raises_on_non_numeric_raw() -> None:
     page = _page("no digits here")
     with pytest.raises(ValueError):
-        determine_scale("not-a-number", page, char_start=0, value_type="currency")
+        determine_scale("not-a-number", page, char_start=0, origin="table", value_type="currency")
 
 
 def test_scale_result_is_the_contract_shaped_model() -> None:
-    result = determine_scale("$4.8M", _page("$4.8M"), char_start=0, value_type="currency")
+    result = determine_scale(
+        "$4.8M", _page("$4.8M"), char_start=0, origin="table", value_type="currency"
+    )
     assert isinstance(result, ScaleResult)
     assert result.raw == "$4.8M"
 
@@ -445,7 +460,9 @@ def test_determine_scale_count_is_not_rescaled_by_page_header() -> None:
     # statement is 1,200 people, not 1,200,000. Only currency is header-scaled.
     text = "Summary financials (in Thousands)\nHeadcount 1200"
     page = _page(text)
-    result = determine_scale("1200", page, char_start=text.index("1200"), value_type="count")
+    result = determine_scale(
+        "1200", page, char_start=text.index("1200"), origin="table", value_type="count"
+    )
 
     assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
@@ -457,7 +474,9 @@ def test_determine_scale_count_is_not_rescaled_by_page_header() -> None:
 def test_determine_scale_ratio_is_not_rescaled_by_page_header() -> None:
     text = "Leverage (in Thousands)\nDebt / EBITDA 1.2"
     page = _page(text)
-    result = determine_scale("1.2", page, char_start=text.index("1.2"), value_type="ratio")
+    result = determine_scale(
+        "1.2", page, char_start=text.index("1.2"), origin="table", value_type="ratio"
+    )
 
     assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
@@ -471,7 +490,9 @@ def test_determine_scale_percent_without_percent_sign_is_not_rescaled() -> None:
     # and restores the "%" unit.
     text = "Margins (in Thousands)\nGross Margin 27.3"
     page = _page(text)
-    result = determine_scale("27.3", page, char_start=text.index("27.3"), value_type="percent")
+    result = determine_scale(
+        "27.3", page, char_start=text.index("27.3"), origin="table", value_type="percent"
+    )
 
     assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
@@ -482,7 +503,9 @@ def test_determine_scale_percent_without_percent_sign_is_not_rescaled() -> None:
 def test_determine_scale_date_is_not_rescaled() -> None:
     text = "Fiscal years (in Thousands): 2024"
     page = _page(text)
-    result = determine_scale("2024", page, char_start=text.index("2024"), value_type="date")
+    result = determine_scale(
+        "2024", page, char_start=text.index("2024"), origin="table", value_type="date"
+    )
 
     assert result.scale_source == "not_applicable"
     assert result.scale_multiplier == 1.0
@@ -495,7 +518,7 @@ def test_determine_scale_text_value_type_is_rejected() -> None:
     # normalized value null, so scale capture does not apply.
     page = _page("North America")
     with pytest.raises(ValueError):
-        determine_scale("North America", page, char_start=0, value_type="text")
+        determine_scale("North America", page, char_start=0, origin="table", value_type="text")
 
 
 def test_determine_scale_count_ignores_a_column_scale_header() -> None:
@@ -511,6 +534,7 @@ def test_determine_scale_count_ignores_a_column_scale_header() -> None:
         "1200",
         page,
         char_start=page.text.index("1200"),
+        origin="table",
         value_type="count",
         table=table,
         cell=value,
@@ -528,7 +552,7 @@ def test_determine_scale_bracketed_negative_currency_is_negative() -> None:
     text = "CAD (in Thousands)\nNet income ($15,295)"
     page = _page(text)
     result = determine_scale(
-        "($15,295)", page, char_start=text.index("($15,295)"), value_type="currency"
+        "($15,295)", page, char_start=text.index("($15,295)"), origin="table", value_type="currency"
     )
 
     assert result.scale_source == "page_header"
@@ -549,6 +573,7 @@ def test_determine_scale_column_header_honors_a_merged_banner_span() -> None:
         "$15,295",
         page,
         char_start=page.text.index("$15,295"),
+        origin="table",
         value_type="currency",
         table=table,
         cell=value,
@@ -619,6 +644,7 @@ def test_ptl_page_11_revenue_scales_from_page_header(
         "$15,295",
         page,
         char_start=span.char_start,
+        origin="table",
         value_type="currency",
         table=table,
         cell=revenue_cell,
@@ -641,7 +667,9 @@ def test_ptl_page_11_gross_margin_percent_is_not_rescaled(
     span = resolve("27.3%", page)
     assert span is not None
 
-    result = determine_scale("27.3%", page, char_start=span.char_start, value_type="percent")
+    result = determine_scale(
+        "27.3%", page, char_start=span.char_start, origin="table", value_type="percent"
+    )
 
     assert result.scale_source == "explicit_in_value"
     assert result.normalized == 27.3
@@ -753,3 +781,252 @@ def test_lowercase_word_is_still_not_read_as_a_currency_code() -> None:
     multiplier, currency, _ = found
     assert multiplier == 1_000.0
     assert currency is None
+
+
+# --------------------------------------------------------------------------- #
+# One number grammar, used everywhere.
+#
+# The module had two spellings of "a number" and they disagreed about a leading
+# decimal. That mattered because the disagreement was between the parser and its
+# own invariant check -- the checker and the checked -- so one half of it was
+# loud and the other half was silent.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (".5", 0.5),
+        (".75", 0.75),
+        (".25", 0.25),
+        ("$.5", 0.5),
+        ("(.5)", -0.5),
+        ("15,295", 15_295.0),
+        ("($15,295)", -15_295.0),
+    ],
+)
+def test_the_fallback_parse_reads_a_leading_decimal(text: str, expected: float) -> None:
+    # _NUMBER always had the leading-decimal branch; the signed-number pattern
+    # did not, so ".75" read as 75 -- a hundred times too large.
+    assert parse_bare_number(text) == expected
+
+
+@pytest.mark.parametrize("raw", [".5M", "$.5M", ".5B", ".5K"])
+def test_a_leading_decimal_currency_satisfies_its_own_invariant(raw: str) -> None:
+    # The suffix path read ".5M" as 0.5 and normalized 500,000. The invariant
+    # re-parsed the same raw with the other pattern, read 5, expected 5,000,000
+    # and raised -- taking down the whole page it was emitted from. The two
+    # patterns now share one grammar, so they cannot report different numbers
+    # for the same token.
+    page = _page(f"Revenue {raw} total")
+    result = determine_scale(raw, page, char_start=8, origin="table", value_type="currency")
+
+    assert result.scale_source == "explicit_in_value"
+    assert scale_invariant_holds(result.raw, result.normalized, result.scale_multiplier)
+
+
+@pytest.mark.parametrize(
+    ("raw", "value_type", "expected"),
+    [
+        (".75", "ratio", 0.75),
+        (".5", "count", 0.5),
+        (".25", "percent", 0.25),
+    ],
+)
+def test_a_leading_decimal_self_scaling_value_is_not_multiplied_by_its_own_decimal(
+    raw: str, value_type: str, expected: float
+) -> None:
+    # The silent half. _self_scaling and scale_invariant_holds called the SAME
+    # fallback parse, so both were wrong identically: ".75" normalized to 75.0
+    # and the invariant CONFIRMED it. A 100x error that flags nothing is the
+    # failure direction this module exists to prevent.
+    page = _page(f"Leverage {raw} x")
+    result = determine_scale(raw, page, char_start=9, origin="table", value_type=value_type)  # pyright: ignore[reportArgumentType]
+
+    assert result.normalized == expected
+    assert scale_invariant_holds(result.raw, result.normalized, result.scale_multiplier)
+
+
+@pytest.mark.parametrize("text", ["p.m.", "a.m.", ".", ".M", "..K", "no digits here", ""])
+def test_a_digitless_token_still_has_no_magnitude(text: str) -> None:
+    # Widening the fallback parse must not widen it to punctuation: both
+    # branches of the shared grammar require a digit. float(".") once took a
+    # whole run down.
+    assert has_parseable_magnitude(text) is False
+    assert parse_bare_number(text) is None
+
+
+@pytest.mark.parametrize("text", ["²", "m²", "¹", "①"])
+def test_a_superscript_is_not_a_magnitude_however_isdigit_votes(text: str) -> None:
+    # str.isdigit() is True for these and the module's "\d" is not. Callers that
+    # hand-rolled a digit test therefore admitted tokens the parser then raised
+    # on -- a footnote mark or a "m2" unit reaching determine_scale as currency.
+    assert any(ch.isdigit() for ch in text), "premise: str.isdigit() disagrees here"
+    assert has_parseable_magnitude(text) is False
+
+
+@pytest.mark.parametrize("text", ["1,309", "$15,295", ".5", "27.3%", "٣", "１"])
+def test_a_real_number_is_a_magnitude_in_any_script(text: str) -> None:
+    assert has_parseable_magnitude(text) is True
+
+
+# --------------------------------------------------------------------------- #
+# A page banner captions a table, not a sentence.
+#
+# Bar Wash pages 38-39 print a "£'000" banner over a table and, beside it,
+# ordinary sentences quoting average customer spend as "£14.25". Those sentences
+# took the banner and went into the store as £14,250 -- silently, because a
+# page_header multiplier raises no flag.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_prose_value_does_not_take_the_page_banner() -> None:
+    text = "Trading summary £'000\nAverage spend on alcohol and food was £14.25 per head."
+    page = _page(text)
+    result = determine_scale(
+        "£14.25",
+        page,
+        char_start=text.index("£14.25"),
+        value_type="currency",
+        origin="prose",
+    )
+
+    assert result.normalized == 14.25, "the measured defect: this shipped as 14250.0"
+    assert result.scale_multiplier == 1.0
+    assert result.scale_source == "assumed_1x"
+    assert result.flags == ["scale_assumed"]
+
+
+def test_a_declined_banner_is_recorded_rather_than_forgotten() -> None:
+    # "there was no banner on this page" and "there was one and I was not
+    # entitled to it" must not collapse into the same assumed_1x. emit.py logs
+    # scale_context as the flag's detail, so this is what makes the declined
+    # population reviewable.
+    text = "Trading summary £'000\nAverage spend was £14.25 per head."
+    page = _page(text)
+    declined = determine_scale(
+        "£14.25", page, char_start=text.index("£14.25"), value_type="currency", origin="prose"
+    )
+    absent = determine_scale(
+        "£14.25",
+        _page("Average spend was £14.25 per head."),
+        char_start=18,
+        value_type="currency",
+        origin="prose",
+    )
+
+    assert declined.scale_context == "£'000"
+    assert absent.scale_context is None
+    assert declined.scale_source == absent.scale_source == "assumed_1x"
+
+
+def test_a_table_value_still_takes_the_page_banner() -> None:
+    # The PTL page-11 shape, and the reason the banner lookup exists at all: a
+    # statement figure whose own column carries no scale phrase.
+    text = "CAD (in Thousands)\nRevenue $15,295 total"
+    page = _page(text)
+    result = determine_scale(
+        "$15,295",
+        page,
+        char_start=text.index("$15,295"),
+        value_type="currency",
+        origin="table",
+    )
+
+    assert result.scale_source == "page_header"
+    assert result.normalized == 15_295_000.0
+
+
+def test_a_prose_value_still_reads_the_scale_it_states_itself() -> None:
+    # Prose almost always writes its own scale, and that short-circuits long
+    # before any banner is consulted -- which is why the trade above is cheap.
+    text = "Trading summary £'000\nThe market was worth £42 million in 2003."
+    page = _page(text)
+    result = determine_scale(
+        "£42 million",
+        page,
+        char_start=text.index("£42 million"),
+        value_type="currency",
+        origin="prose",
+    )
+
+    assert result.scale_source == "explicit_in_value"
+    assert result.normalized == 42_000_000.0
+    assert result.flags == []
+
+
+def test_claiming_prose_while_handing_over_a_table_is_a_caller_bug() -> None:
+    # The two arguments answer different questions, but not independent ones: a
+    # value cannot be prose and have come from a cell.
+    page = _page("Revenue $15,295")
+    cell = _cell(1, 1, "$15,295")
+    table = _table([_cell(0, 1, "CAD (in Thousands)"), cell], num_rows=2, num_cols=2)
+
+    with pytest.raises(ValueError, match="contradicts"):
+        determine_scale(
+            "$15,295",
+            page,
+            char_start=8,
+            value_type="currency",
+            origin="prose",
+            table=table,
+            cell=cell,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# A dot is only a decimal point when nothing else claims it.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("c.250", 250.0),  # circa 250 -- idiomatic in a UK CIM
+        ("c.20%", 20.0),
+        ("c.5x", 5.0),
+        ("No.5", 5.0),
+        ("p.14", 14.0),
+        ("Business Overview.........12", 12.0),  # a contents-page leader run
+    ],
+)
+def test_an_abbreviation_dot_is_not_a_decimal_point(text: str, expected: float) -> None:
+    # Sharing _NUMBER between the two patterns fixed a divergence and introduced
+    # this: the leading-decimal branch let re.search start one character early
+    # whenever a dot preceded the first digit, so "c.250" read 0.25. Under a
+    # thousands banner that is a 1000x understatement carrying no flag, and
+    # scale_invariant_holds agreed with it -- the same silent shape the shared
+    # grammar was meant to remove.
+    assert parse_bare_number(text) == expected
+
+
+def test_a_circa_suffix_value_keeps_its_multiplier() -> None:
+    # The guard has to live in _NUMBER itself, not at the fallback-parse call
+    # site: the suffix patterns interpolate the same grammar, so guarding one
+    # place would leave "c.5M" reading half a million.
+    assert normalize_financial_token("c.5M") == (5.0, 1_000_000.0, None)
+    assert normalize_financial_token("c.5 million") == (5.0, 1_000_000.0, None)
+
+
+@pytest.mark.parametrize("text", [".5", "$.5", "(.5)", "-.5", ".5M", "$.5M", ".5B", ".75"])
+def test_a_real_leading_decimal_still_parses(text: str) -> None:
+    # The guard refuses a dot preceded by a word character or another dot. A
+    # genuine leading decimal is preceded by a boundary, a sign or a symbol.
+    assert parse_bare_number(text) is not None
+    assert abs(parse_bare_number(text) or 0) < 1.0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("£42 million", True),
+        ("18,454", True),
+        ("(7,499)", True),
+        ("27.3%", True),
+        ("In 2003, 18,454 students attended", False),
+        ("In 2003, the total market was greater than £42 million", False),
+        ("five years", False),
+    ],
+)
+def test_holds_one_number_says_whether_the_value_is_unambiguous(text: str, expected: bool) -> None:
+    assert holds_one_number(text) is expected

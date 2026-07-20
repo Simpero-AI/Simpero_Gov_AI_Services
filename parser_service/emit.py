@@ -48,7 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .elements import ChartElement, TableElement
 from .resolver import resolve, resolve_in_cell
-from .scale import ScaleSource, ValueType, determine_scale, scale_invariant_holds
+from .scale import ScaleSource, ValueOrigin, ValueType, determine_scale, scale_invariant_holds
 from .schemas import BBox, PageIndex, TableCellRecord, TableRecord, XlsxCellRecord, XlsxSheetRecord
 from .xlsx_parser import determine_xlsx_scale
 
@@ -301,11 +301,13 @@ def emit_pdf_claim(
     page: PageIndex,
     *,
     value_type: ValueType,
+    origin: ValueOrigin,
     file: str,
     flag_log: FlagLog,
     table: TableRecord | None = None,
     cell: TableCellRecord | None = None,
     section: str | None = None,
+    value_text: str | None = None,
     document_id: str | None = None,
     document_name: str | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
@@ -315,6 +317,16 @@ def emit_pdf_claim(
     quote (DS-W3-3) -- never a fabricated or partially-cited value. `table`/
     `cell` are passed through to DS-W3-4's column-header scale lookup when the
     quote came from a table cell; omit both for prose.
+
+    `value_text` separates the two jobs the quote otherwise does at once. A table
+    cell's quote IS its value, so parsing the magnitude out of the quote is right
+    there. A prose quote is a SENTENCE CONTAINING the value, and parsing that the
+    same way takes the leftmost number in the sentence: "In 2003, 18,454 students
+    attended" yields 2003, and a parenthetical yields an accounting negative. Both
+    were observed on the first real page this ran against. Pass the value token
+    itself as `value_text` -- the quote still carries the citation, and the
+    magnitude comes from the token. Callers whose quote is already the value (every
+    table caller) omit it.
 
     When `cell` is given, the quote is resolved inside that cell's own region
     first: the caller knows which cell it read, so asking the page instead
@@ -362,10 +374,25 @@ def emit_pdf_claim(
 
     flags: list[str] = []
     if value_type == "text":
-        value = ClaimValue(raw=quote, normalized=None, unit=None, value_type=value_type)
+        # Same choice the scaled branch makes below: the quote is the citation
+        # and may be a whole clause, so where the caller named the value token
+        # it is the raw. Both are verbatim page text; this keeps a text claim
+        # from recording a sentence where it means "five years".
+        value = ClaimValue(
+            raw=value_text if value_text is not None else quote,
+            normalized=None,
+            unit=None,
+            value_type=value_type,
+        )
     else:
         scale_result = determine_scale(
-            quote, page, span.char_start, value_type=value_type, table=table, cell=cell
+            value_text if value_text is not None else quote,
+            page,
+            span.char_start,
+            value_type=value_type,
+            origin=origin,
+            table=table,
+            cell=cell,
         )
         flags = list(scale_result.flags)
         if (
@@ -472,6 +499,9 @@ def emit_pdf_table_cell_claim(
         cell.text_normalized,
         page,
         value_type=value_type,
+        # A table cell's origin is settled by construction: this entry point
+        # cannot be called without the table it came from.
+        origin="table",
         file=file,
         flag_log=flag_log,
         table=table,

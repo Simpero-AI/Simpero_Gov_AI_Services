@@ -172,8 +172,17 @@ def classify_token(token: NumericToken, page: PageIndex) -> BoxAnnotation:
         return BoxAnnotation(bbox=union_bbox(chars), color="red", label="MISS (unresolved)")
 
     try:
+        # This harness sweeps the whole page string with a regex, so it holds no
+        # table and cannot tell a statement figure from a sentence. It declares
+        # table origin deliberately rather than inheriting prose by accident:
+        # the miss this tool exists to make visible is an income-statement
+        # figure drawn at a thousandth of its value. Over-scaling a prose amount
+        # here is a wrong label on a picture; under-scaling a table figure hides
+        # the very defect the picture is for. Deciding it properly needs the
+        # token's bbox tested against the page's table cells -- worth doing, and
+        # not worth guessing at in the meantime.
         scale_result = determine_scale(
-            token.text, page, span.char_start, value_type=token.value_type
+            token.text, page, span.char_start, value_type=token.value_type, origin="table"
         )
     except ValueError as exc:
         return BoxAnnotation(bbox=span.bbox, color="red", label=f"MISS ({exc})")

@@ -158,6 +158,33 @@ def _table(
 # --------------------------------------------------------------------------- #
 
 
+def test_emit_pdf_claim_prose_origin_declines_the_page_header_scale() -> None:
+    # Same page and same value as the table case below; only the origin differs.
+    # Without this, emit_pdf_claim could stop forwarding `origin` entirely and
+    # every test in this module stayed green -- the parameter was covered only
+    # by one test in tests/test_propose.py.
+    page = make_page("CAD (in Thousands)\nRevenue $15,295 total", page_no=11)
+    flag_log = FlagLog(run_id="run-1")
+
+    claim = emit_pdf_claim(
+        "PTL Group",
+        "revenueTrailing5yrAvg",
+        "$15,295",
+        page,
+        origin="prose",
+        value_type="currency",
+        file="1st-App-H-PTL-Group-CIM.pdf",
+        flag_log=flag_log,
+    )
+
+    assert claim.value.normalized == 15_295.0
+    assert claim.value.scale_source == "assumed_1x"
+    assert claim.flags == ["scale_assumed"]
+    # The banner it turned down is recorded, so a declined header stays
+    # distinguishable from a page that never had one.
+    assert [entry.detail for entry in flag_log.entries] == ["CAD (in Thousands)"]
+
+
 def test_emit_pdf_claim_extracted_with_page_header_scale() -> None:
     page = make_page("CAD (in Thousands)\nRevenue $15,295 total", page_no=11)
     flag_log = FlagLog(run_id="run-1")
@@ -167,6 +194,7 @@ def test_emit_pdf_claim_extracted_with_page_header_scale() -> None:
         "revenueTrailing5yrAvg",
         "$15,295",
         page,
+        origin="table",
         value_type="currency",
         file="1st-App-H-PTL-Group-CIM.pdf",
         flag_log=flag_log,
@@ -191,6 +219,7 @@ def test_emit_pdf_claim_missing_on_unresolved_quote_logs_flag() -> None:
         "churnRate",
         "not-on-this-page",
         page,
+        origin="table",
         value_type="text",
         file="deck.pdf",
         flag_log=flag_log,
@@ -222,6 +251,7 @@ def test_emit_pdf_claim_missing_on_zero_text_page() -> None:
         "someMetric",
         "$1",
         page,
+        origin="table",
         value_type="currency",
         file="deck.pdf",
         flag_log=flag_log,
@@ -241,6 +271,7 @@ def test_emit_pdf_claim_ambiguous_quote_is_missing_not_fabricated() -> None:
         "revenue",
         "$15,295",
         page,
+        origin="table",
         value_type="currency",
         file="f.pdf",
         flag_log=flag_log,
@@ -259,6 +290,7 @@ def test_emit_pdf_claim_ambiguous_unit_when_header_has_no_currency_code() -> Non
         "revenue",
         "$4,000",
         page,
+        origin="table",
         value_type="currency",
         file="f.pdf",
         flag_log=flag_log,
@@ -279,6 +311,7 @@ def test_emit_pdf_claim_assumed_1x_flags_scale_assumed_not_ambiguous_unit() -> N
         "revenue",
         "$4,000",
         page,
+        origin="table",
         value_type="currency",
         file="f.pdf",
         flag_log=flag_log,
@@ -297,6 +330,7 @@ def test_emit_pdf_claim_text_value_type_skips_scale_and_stays_extracted() -> Non
         "segment",
         "Industrial Services",
         page,
+        origin="table",
         value_type="text",
         file="f.pdf",
         flag_log=flag_log,
@@ -316,6 +350,7 @@ def test_emit_pdf_claim_bbox_uses_line_boxes() -> None:
         "revenue",
         "Revenue\n$15,295",
         page,
+        origin="table",
         value_type="text",
         file="f.pdf",
         flag_log=flag_log,
@@ -581,6 +616,7 @@ def test_extracted_pdf_fact_json_conforms_to_schema(validator: Draft202012Valida
         "revenueTrailing5yrAvg",
         "$15,295",
         page,
+        origin="table",
         value_type="currency",
         file="f.pdf",
         flag_log=flag_log,
@@ -598,6 +634,7 @@ def test_missing_pdf_fact_json_conforms_to_schema(validator: Draft202012Validato
         "churnRate",
         "not-on-this-page",
         page,
+        origin="table",
         value_type="text",
         file="deck.pdf",
         flag_log=flag_log,
@@ -661,6 +698,7 @@ def test_corrupted_fact_fails_schema_validation_loudly(validator: Draft202012Val
         "revenueTrailing5yrAvg",
         "$15,295",
         page,
+        origin="table",
         value_type="currency",
         file="f.pdf",
         flag_log=flag_log,
@@ -751,6 +789,7 @@ def test_emit_pdf_claim_self_scaling_value_types(
         "someMetric",
         quote,
         page,
+        origin="table",
         value_type=value_type,
         file="f.pdf",
         flag_log=flag_log,
@@ -778,6 +817,7 @@ def test_emit_pdf_claim_ratio_value_with_no_numeric_content_raises() -> None:
             "segment",
             "Industrial",
             page,
+            origin="table",
             value_type="ratio",
             file="f.pdf",
             flag_log=flag_log,
@@ -795,6 +835,7 @@ def test_emit_pdf_claim_accounting_negative_currency() -> None:
         "netLoss",
         "($15,295)",
         page,
+        origin="table",
         value_type="currency",
         file="f.pdf",
         flag_log=flag_log,
@@ -901,6 +942,7 @@ def test_fact_to_json_omits_empty_flags_key() -> None:
         "segment",
         "Industrial",
         page,
+        origin="table",
         value_type="text",
         file="f.pdf",
         flag_log=flag_log,
@@ -918,6 +960,7 @@ def test_fact_to_json_includes_optional_passthrough_fields() -> None:
         "revenue",
         "$15,295",
         page,
+        origin="table",
         value_type="currency",
         file="f.pdf",
         flag_log=flag_log,
@@ -961,13 +1004,34 @@ def test_all_or_nothing_provenance_invariant_across_scenarios() -> None:
 
     scenarios = [
         emit_pdf_claim(
-            "TargetCo", "a", "$15,295", page, value_type="currency", file="f.pdf", flag_log=flag_log
+            "TargetCo",
+            "a",
+            "$15,295",
+            page,
+            origin="table",
+            value_type="currency",
+            file="f.pdf",
+            flag_log=flag_log,
         ),
         emit_pdf_claim(
-            "TargetCo", "b", "nowhere", page, value_type="currency", file="f.pdf", flag_log=flag_log
+            "TargetCo",
+            "b",
+            "nowhere",
+            page,
+            origin="table",
+            value_type="currency",
+            file="f.pdf",
+            flag_log=flag_log,
         ),
         emit_pdf_claim(
-            "TargetCo", "c", "Revenue", page, value_type="text", file="f.pdf", flag_log=flag_log
+            "TargetCo",
+            "c",
+            "Revenue",
+            page,
+            origin="table",
+            value_type="text",
+            file="f.pdf",
+            flag_log=flag_log,
         ),
     ]
     for claim in scenarios:
@@ -986,6 +1050,7 @@ def test_full_run_integration_across_all_emission_paths() -> None:
         "revenue",
         "$4,000",
         page,
+        origin="table",
         value_type="currency",
         file="f.pdf",
         flag_log=flag_log,
@@ -1104,6 +1169,7 @@ def test_ptl_page_11_revenue_claim_persists_with_full_provenance(
         "revenueTrailing5yrAvg",
         "$15,295",
         page,
+        origin="table",
         value_type="currency",
         file="1st-App-H-PTL-Group-CIM.pdf",
         flag_log=flag_log,
