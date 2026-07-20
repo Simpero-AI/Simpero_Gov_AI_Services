@@ -40,14 +40,24 @@ from __future__ import annotations
 import re
 
 from .emit import Claim, FlagLog, emit_pdf_table_cell_claim
-from .scale import ValueType
+from .scale import ValueType, has_parseable_magnitude
 from .schemas import PageIndex, TableCellRecord, TableRecord
 
 _LABEL_COL = 0
 
 
-def _has_digit(text: str) -> bool:
-    return any(ch.isdigit() for ch in text)
+def _is_a_figure(text: str) -> bool:
+    """Whether a cell holds a number, asked of the parser that will read it.
+
+    This was `any(ch.isdigit() for ch in text)`, which answers a different
+    question than scale.py does: str.isdigit() is true for superscripts and
+    circled digits, `\\d` is not. A cell reading "m2" with a superscript two
+    therefore passed this gate, was typed currency by the default below, and
+    reached determine_scale -- which raised on it, uncaught. The docstring in
+    infer_value_type_for claimed that could not happen. It could; the two
+    functions simply disagreed about what a digit is.
+    """
+    return has_parseable_magnitude(text)
 
 
 def _cell_at(table: TableRecord, row: int, col: int) -> TableCellRecord | None:
@@ -244,7 +254,7 @@ def infer_value_type_for(raw: str, attribute: str) -> ValueType:
     wrongly typed currency fails visibly -- it ends up assumed_1x carrying a
     `scale_assumed` flag, or takes a header multiplier and an `ambiguous_unit`
     flag. A value wrongly typed count or date fails SILENTLY: scale.py's
-    _self_scaling returns a KNOWN 1.0 with scale_source="explicit_in_value" and
+    _self_scaling returns a KNOWN 1.0 with scale_source="not_applicable" and
     no flag at all, which is indistinguishable from a verified scale. So where
     the signals run out, currency is the answer whose failure can be audited.
 
@@ -345,7 +355,7 @@ def section_banners(table: TableRecord) -> dict[int, str]:
             continue
         cells = rows[row]
         label = cells.get(_LABEL_COL, "")
-        has_figures = any(col >= 1 and text and _has_digit(text) for col, text in cells.items())
+        has_figures = any(col >= 1 and text and _is_a_figure(text) for col, text in cells.items())
         if label and not has_figures:
             current = label
             continue
@@ -443,7 +453,7 @@ def claims_from_table(
         if cell.col == _LABEL_COL or cell.row == table.header_row:
             continue
         raw = cell.text_normalized.strip()
-        if not raw or not _has_digit(raw):
+        if not raw or not _is_a_figure(raw):
             continue
 
         attribute = attribute_for(table, cell, banners.get(cell.row))

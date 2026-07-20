@@ -116,7 +116,17 @@ _PERCENT_RE = re.compile(rf"(?P<sign>[-(])?(?P<number>{_NUMBER})%\)?")
 # accounting-negative "(" so a bracketed negative ("($15,295)") is not read as
 # positive; a leading "$" is stripped. Used for values that carry no inline
 # scale marker, once the multiplier is settled from context.
-_SIGNED_NUMBER_RE = re.compile(r"(?P<sign>[-(])?\$?(?P<number>\d[\d,]*(?:\.\d+)?)")
+#
+# Shares _NUMBER with the suffix patterns rather than restating it. The two
+# spellings had drifted: this one lacked _NUMBER's leading-decimal branch, so
+# ".5M" parsed as 0.5 through the suffix path and as 5 here -- and here is what
+# both the fallback parse AND scale_invariant_holds use, i.e. the checker and
+# the checked. A currency ".5M" therefore normalized to 500,000 while the
+# invariant computed 5,000,000 and raised; a non-currency ".75" normalized to
+# 75.0 with the invariant agreeing, because both sides were wrong identically.
+# That second one is a silent 100x, which is the failure direction this module
+# exists to prevent. One grammar, used twice, cannot drift again.
+_SIGNED_NUMBER_RE = re.compile(rf"(?P<sign>[-(])?\$?(?P<number>{_NUMBER})")
 
 
 def _signed_number(match: re.Match[str]) -> float:
@@ -129,6 +139,21 @@ def _parse_number(text: str) -> float | None:
     if match is None:
         return None
     return _signed_number(match)
+
+
+def has_parseable_magnitude(text: str) -> bool:
+    """Whether `text` holds a number determine_scale can actually read.
+
+    determine_scale raises on a token with no numeric content, which is the
+    right contract -- there is no honest ScaleResult for a value that has no
+    magnitude, and returning 0.0 or 1.0 would fabricate one. But that
+    precondition was only ever stated by the raise, so callers hand-rolled
+    their own digit tests and got a different answer: str.isdigit() is true for
+    "m2" written with a superscript two, and for the circled digits some CIMs
+    use as footnote marks, while this module's `\\d` is not. A caller that asks
+    the parser instead of guessing gets one answer, not two.
+    """
+    return _parse_number(text) is not None
 
 
 def parse_bare_number(text: str) -> float | None:

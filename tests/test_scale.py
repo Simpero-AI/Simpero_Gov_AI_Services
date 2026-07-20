@@ -16,7 +16,10 @@ import pytest
 from parser_service.scale import (
     ScaleResult,
     determine_scale,
+    has_parseable_magnitude,
     normalize_financial_token,
+    parse_bare_number,
+    scale_invariant_holds,
     scale_phrase_in_text,
 )
 from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
@@ -753,3 +756,90 @@ def test_lowercase_word_is_still_not_read_as_a_currency_code() -> None:
     multiplier, currency, _ = found
     assert multiplier == 1_000.0
     assert currency is None
+
+
+# --------------------------------------------------------------------------- #
+# One number grammar, used everywhere.
+#
+# The module had two spellings of "a number" and they disagreed about a leading
+# decimal. That mattered because the disagreement was between the parser and its
+# own invariant check -- the checker and the checked -- so one half of it was
+# loud and the other half was silent.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (".5", 0.5),
+        (".75", 0.75),
+        (".25", 0.25),
+        ("$.5", 0.5),
+        ("(.5)", -0.5),
+        ("15,295", 15_295.0),
+        ("($15,295)", -15_295.0),
+    ],
+)
+def test_the_fallback_parse_reads_a_leading_decimal(text: str, expected: float) -> None:
+    # _NUMBER always had the leading-decimal branch; the signed-number pattern
+    # did not, so ".75" read as 75 -- a hundred times too large.
+    assert parse_bare_number(text) == expected
+
+
+@pytest.mark.parametrize("raw", [".5M", "$.5M", ".5B", ".5K"])
+def test_a_leading_decimal_currency_satisfies_its_own_invariant(raw: str) -> None:
+    # The suffix path read ".5M" as 0.5 and normalized 500,000. The invariant
+    # re-parsed the same raw with the other pattern, read 5, expected 5,000,000
+    # and raised -- taking down the whole page it was emitted from. The two
+    # patterns now share one grammar, so they cannot report different numbers
+    # for the same token.
+    page = _page(f"Revenue {raw} total")
+    result = determine_scale(raw, page, char_start=8, value_type="currency")
+
+    assert result.scale_source == "explicit_in_value"
+    assert scale_invariant_holds(result.raw, result.normalized, result.scale_multiplier)
+
+
+@pytest.mark.parametrize(
+    ("raw", "value_type", "expected"),
+    [
+        (".75", "ratio", 0.75),
+        (".5", "count", 0.5),
+        (".25", "percent", 0.25),
+    ],
+)
+def test_a_leading_decimal_self_scaling_value_is_not_multiplied_by_its_own_decimal(
+    raw: str, value_type: str, expected: float
+) -> None:
+    # The silent half. _self_scaling and scale_invariant_holds called the SAME
+    # fallback parse, so both were wrong identically: ".75" normalized to 75.0
+    # and the invariant CONFIRMED it. A 100x error that flags nothing is the
+    # failure direction this module exists to prevent.
+    page = _page(f"Leverage {raw} x")
+    result = determine_scale(raw, page, char_start=9, value_type=value_type)  # pyright: ignore[reportArgumentType]
+
+    assert result.normalized == expected
+    assert scale_invariant_holds(result.raw, result.normalized, result.scale_multiplier)
+
+
+@pytest.mark.parametrize("text", ["p.m.", "a.m.", ".", ".M", "..K", "no digits here", ""])
+def test_a_digitless_token_still_has_no_magnitude(text: str) -> None:
+    # Widening the fallback parse must not widen it to punctuation: both
+    # branches of the shared grammar require a digit. float(".") once took a
+    # whole run down.
+    assert has_parseable_magnitude(text) is False
+    assert parse_bare_number(text) is None
+
+
+@pytest.mark.parametrize("text", ["²", "m²", "¹", "①"])
+def test_a_superscript_is_not_a_magnitude_however_isdigit_votes(text: str) -> None:
+    # str.isdigit() is True for these and the module's "\d" is not. Callers that
+    # hand-rolled a digit test therefore admitted tokens the parser then raised
+    # on -- a footnote mark or a "m2" unit reaching determine_scale as currency.
+    assert any(ch.isdigit() for ch in text), "premise: str.isdigit() disagrees here"
+    assert has_parseable_magnitude(text) is False
+
+
+@pytest.mark.parametrize("text", ["1,309", "$15,295", ".5", "27.3%", "٣", "１"])
+def test_a_real_number_is_a_magnitude_in_any_script(text: str) -> None:
+    assert has_parseable_magnitude(text) is True
