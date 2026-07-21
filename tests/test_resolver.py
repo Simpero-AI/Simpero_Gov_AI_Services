@@ -368,3 +368,91 @@ def test_resolve_in_cell_ignores_a_repeat_outside_its_own_box() -> None:
 
     assert span is not None
     assert (span.char_start, span.char_end) == (first, first + 5)
+
+
+def test_a_glyph_clipped_by_a_tight_cell_border_still_belongs_to_that_cell() -> None:
+    """Docling's cell rect can be narrower than the text inside it.
+
+    Measured on a real CIM: the cell holding "(6)" spans x 307.19..315.95 while
+    its closing ")" spans 315.66..318.17 -- 88% outside its own cell. While every
+    CharBox carried its whole WORD's box this never showed, because all three
+    glyphs shared one centre that sat inside. Real per-glyph geometry made the
+    centre test bite and dropped the last character, turning 130 resolvable cells
+    into `missing` on one document.
+    """
+    text = "(6)"
+    char_map = [
+        CharBox(
+            char="(", x0=308.95, top=275.99, x1=311.46, bottom=282.66, page=1, precision="char"
+        ),
+        CharBox(
+            char="6", x0=311.46, top=275.99, x1=315.66, bottom=282.66, page=1, precision="char"
+        ),
+        CharBox(
+            char=")", x0=315.66, top=275.99, x1=318.17, bottom=282.66, page=1, precision="char"
+        ),
+    ]
+    page = PageIndex(page=1, text=text, char_map=char_map)
+    cell = TableCellRecord(
+        row=9,
+        col=1,
+        row_span=1,
+        col_span=1,
+        text="(6)",
+        text_normalized="(6)",
+        column_header=False,
+        row_header=False,
+        page=1,
+        x0=307.19,
+        top=274.39,
+        x1=315.95,
+        bottom=282.14,
+        bbox_source="docling_native",
+    )
+
+    span = resolve_in_cell("(6)", page, cell)
+    assert span is not None, "the value must resolve despite its last glyph overhanging"
+    assert (span.char_start, span.char_end) == (0, 3)
+
+
+def test_the_edge_tolerance_does_not_reach_the_row_above_or_below() -> None:
+    """The tolerance is horizontal only.
+
+    Rows sit ~8pt apart, so a vertical pad reaches the neighbouring row: applied
+    in both axes it pulled adjacent rows' digits into the cell, made quotes
+    ambiguous, and -- ambiguity failing closed -- took `missing` on one document
+    from 879 to 1,474.
+    """
+    text = "41\n41"
+    char_map = [
+        CharBox(char="4", x0=100.0, top=100.0, x1=104.0, bottom=108.0, page=1, precision="char"),
+        CharBox(char="1", x0=104.0, top=100.0, x1=108.0, bottom=108.0, page=1, precision="char"),
+        CharBox(char="\n", x0=108.0, top=100.0, x1=108.0, bottom=108.0, page=1, precision="char"),
+        # The row below, 2pt away -- inside a 3pt vertical pad, were there one.
+        CharBox(char="4", x0=100.0, top=110.0, x1=104.0, bottom=118.0, page=1, precision="char"),
+        CharBox(char="1", x0=104.0, top=110.0, x1=108.0, bottom=118.0, page=1, precision="char"),
+    ]
+    page = PageIndex(page=1, text=text, char_map=char_map)
+    cell = TableCellRecord(
+        row=1,
+        col=1,
+        row_span=1,
+        col_span=1,
+        text="41",
+        text_normalized="41",
+        column_header=False,
+        row_header=False,
+        page=1,
+        x0=99.0,
+        top=99.0,
+        x1=109.0,
+        bottom=109.0,
+        bbox_source="docling_native",
+    )
+
+    # Only the first row's "41" is in scope, so the quote resolves uniquely. If
+    # the tolerance were vertical, both rows would be in scope and this would
+    # fail closed to None.
+    span = resolve_in_cell("41", page, cell)
+    assert span is not None, "a vertical tolerance would make this ambiguous"
+    assert (span.char_start, span.char_end) == (0, 2)
