@@ -41,14 +41,18 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from .emit import Claim, FlagLog, emit_pdf_claim
+from .resolver import contains_flexible
 from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
 
 logger = logging.getLogger(__name__)
+
+_STAGE_ASSERTION = "prose_assertion"
 
 # Sonnet-always is the locked floor for extraction; Opus is the current default and the
 # quality-sensitive choice for a pass whose output enters the claims spine.
@@ -110,6 +114,172 @@ class ProposedClaim(BaseModel):
 
 class PageProposals(BaseModel):
     claims: list[ProposedClaim]
+
+
+# --------------------------------------------------------------------------- #
+# The qualitative arm.
+#
+# A separate call with a separate prompt, deliberately: `_SYSTEM` above is the
+# byte-identical cacheable prefix the measured numeric recall was obtained
+# under (91% of 79 human-selected stated facts on a real CIM, 95% on its
+# property matrix). Merging the two jobs into one prompt would put that number
+# back in play to save an API call, and it would have to be re-earned by
+# measurement rather than preserved by construction.
+#
+# The gap this closes was measured, not imagined: a human marked 34 passages in
+# a real CIM as claims the pipeline missed, and almost all were assertions with
+# no magnitude -- outsourcing decisions, common directorships, target market,
+# who the competitors are. The value-centric contract above cannot express them.
+# --------------------------------------------------------------------------- #
+
+# Read off those 34 marks rather than invented. There is deliberately no "other"
+# member: a sentence fitting nothing has nowhere to go, which is the point.
+# Known gaps -- IP, litigation, employment, environmental, insurance -- are
+# absent because the evidence did not contain them. Add a class from an observed
+# refusal on a real document, never from imagination.
+AssertionClass = Literal[
+    "related_party",
+    "operating_model",
+    "market_definition",
+    "competitive_position",
+    "commercial_terms",
+    "risk_or_dependency",
+    "plan_or_commitment",
+]
+
+# Enforced in code after parsing, never as a grammar `max_length`. A cap in the
+# output grammar turns an over-long response into a ValidationError that escapes
+# the call and destroys the whole page -- the exact blast radius already fixed
+# twice on this path.
+MAX_ASSERTIONS_PER_PAGE = 3
+
+
+_ASSERTION_SYSTEM = """\
+You extract QUALITATIVE claims from a page of a confidential information memorandum \
+(CIM) -- assertions about the business that carry no number -- so they can be stored with \
+exact provenance.
+
+A separate pass already extracts every stated figure on this page. Do not repeat one here. \
+If the point of a sentence is its number, it belongs to that pass, not to you.
+
+THE QUOTE IS THE WHOLE CONTRACT.
+
+`quote` must be copied VERBATIM from the page text you are given -- character for \
+character, including punctuation and capitalisation. Do not normalise it, reformat it, or \
+summarise it. It is resolved against the page by exact match and must appear there EXACTLY \
+ONCE. If the sentence appears more than once, extend the quote with adjacent words until it \
+is unique, keeping every character contiguous and verbatim. A restated sentence cannot be \
+located, so a claim carrying one is DISCARDED.
+
+THE ADMISSION TEST. Propose a claim only when ALL FOUR hold. Apply them in order and stop \
+at the first failure.
+
+1. SUBJECT. The quote names who or what the claim is about -- a named party, a named or \
+described competitor, a market, a site, a facility, or the subject company. Copy that noun \
+phrase into `subject_text`, verbatim from inside `quote`.
+   THE ONE EXCEPTION is the subject company named to you above. A CIM writes whole \
+paragraphs about itself without naming itself, and a sentence like "Directed primarily at \
+young people, typically student and young professionals" is a real claim about the subject \
+company with no subject of its own. When the subject is elided that way, set `subject_text` \
+to the clause carrying the assertion and `entity` to the subject company.
+   A pronoun whose referent is some OTHER party in a different sentence is not a subject: \
+extend the quote to include the referent, or drop the claim.
+
+2. PREDICATE. The sentence asserts something about that subject which a diligence request \
+could confirm or contradict from a document or a site visit -- a contract, a lease, a \
+filing, a company register, an org chart, a supplier list, a price list, a site plan, a \
+photograph, market data. Copy the clause that carries the assertion into `predicate_text`, \
+verbatim from inside `quote`. If the only way to check it is to ask someone's opinion, STOP.
+
+3. NEGATION. Ask: could a rival document state the OPPOSITE of this as a plain fact?
+   "dry cleaning facilities will not be available on-site" -> the opposite, "will be \
+available on-site", is a plain fact. ADMIT.
+   "an innovative and exciting format" -> the opposite, "an uninnovative format", is \
+nobody's stated fact. STOP.
+   This is the test that separates a claim from marketing copy, and it does NOT turn on \
+whether the sentence sounds dry. A sentence written in promotional language still passes if \
+a factual counter-assertion survives: "the main competitive advantages lie in the breadth \
+of the revenue model" passes, because "the advantage lies in price, not breadth" is a \
+statable fact and the breadth of a revenue model is checkable by counting its lines. "a \
+market that is clearly mature, but also saturated in terms of advertising and promotion" \
+passes, because "the market is not mature" is a plain factual counter-assertion.
+   Strip the evaluative words and test what is left. If nothing is left, STOP.
+   A superlative with no stated basis ("the leading operator"), a gradable quality \
+adjective ("state of the art", "convenient", "exciting", "relaxed"), and a future outcome \
+asserted with no mechanism ("will be highly profitable") all fail here.
+
+4. SELF-CONTAINED. `quote` together with `entity` states the whole claim. Nothing outside \
+the quote is needed to know what is being asserted.
+
+`entity` is who the claim is about, in the document's own words, and it must be READABLE IN \
+THE QUOTE -- it is `subject_text`, or a name appearing inside it. The single exception is \
+the subject company, given to you as context. Never name an entity you took from elsewhere \
+on the page: a subject the quote cannot support is a binding nothing can check.
+
+`attribute` names WHAT IS BEING ASSERTED, as a short noun phrase, with the evaluative words \
+removed: "on-site dry cleaning availability", "directors' other directorships", "target \
+customer segment", "basis of competitive advantage", "competitor collection point \
+locations". A few words, never a sentence, never a restatement of the quote, and never an \
+adjective standing alone.
+
+`assertion_class` is the closed list below. A claim fitting none of them is not one you \
+should propose, and saying so is the correct answer rather than a failure.
+  related_party        -- directors, shareholders, affiliates, common control, connected \
+companies, incorporation, a transaction with a connected person.
+  operating_model      -- what will or will not be provided, how, by whom, from where; \
+outsourcing, staffing, sites, opening arrangements, a service offered or excluded.
+  market_definition    -- who the customer is stated to be; which segment, demographic, \
+geography or channel; a stated qualitative property of the market itself such as maturity, \
+saturation, fragmentation or seasonality.
+  competitive_position -- who the competitors are said to be, and the advantage, \
+disadvantage or barrier asserted relative to them.
+  commercial_terms     -- leases, licences, contracts, tenure, exclusivity, renewal basis, \
+restrictive covenants, pricing policy stated without a figure.
+  risk_or_dependency   -- a stated dependence, constraint, contingency, regulatory \
+requirement, key person, single supplier, or condition the plan rests on.
+  plan_or_commitment   -- a forward step the business states it will take, with a \
+mechanism: entering a segment, expansion, rollout, funding or exit intention. Not an \
+outcome it merely hopes for.
+
+AT MOST THREE claims from this page, and AT MOST ONE per assertion_class. Order them most \
+substantive first -- the ones past the third are discarded, so a page returning six has \
+chosen which three it loses by the order it wrote them in.
+
+You are not summarising the page. Most CIM pages yield none or one, and a page whose prose \
+asserts nothing checkable yields NONE -- that is a correct answer, not a failure. Prefer \
+the sentence a buyer's lawyer would put on a diligence list.
+
+Page furniture is never a claim: a URL, a file path, a print date stamp, a running header \
+or a page number asserts nothing about the business.
+"""
+
+
+class ProposedAssertion(BaseModel):
+    """One model-proposed qualitative claim, before any verification.
+
+    Field order is evidence first, label last, and that is deliberate: naming
+    the class first invites the model to pick a category and then hunt for a
+    sentence to fit it, which manufactures claims. Quote, then the subject and
+    predicate copied out of it, then a label for what was copied.
+
+    `subject_text` and `predicate_text` are GUARD INPUTS, not stored fields.
+    They turn "the subject is in the span" and "the assertion is in the span"
+    from prompt exhortations into deterministic containment tests -- which
+    matters because prompt language has already been measured to fail here once
+    ("Do not default everything to the subject company" did not stop entities
+    being imported from elsewhere on the page).
+    """
+
+    quote: str = Field(description="Verbatim from the page, appearing exactly once.")
+    subject_text: str = Field(description="The subject noun phrase, verbatim from inside `quote`.")
+    predicate_text: str = Field(description="The asserting clause, verbatim from inside `quote`.")
+    entity: str = Field(description="Who the claim is about; must be readable in the quote.")
+    attribute: str = Field(description="What is asserted, as a noun phrase, evaluative words cut.")
+    assertion_class: AssertionClass
+
+
+class PageAssertions(BaseModel):
+    assertions: list[ProposedAssertion] = Field(default_factory=list)
 
 
 def prose_text(blocks: list[TextBlockRecord], page: PageIndex) -> str:
@@ -244,6 +414,7 @@ def claims_from_prose(
         # AssertionError next to it, which must stay loud.
         value_type = proposal.value_type
         scaled_text = value_text if value_text is not None else proposal.quote
+        downgrade_flags: list[str] = []
         if value_type != "text":
             if not has_parseable_magnitude(scaled_text):
                 reason = "has no numeric content"
@@ -265,6 +436,10 @@ def claims_from_prose(
                     scaled_text,
                 )
                 value_type = "text"
+                # A positive mark, so a guard downgrade is never mistaken for a
+                # qualitative claim. Both end up value_type "text"; only this
+                # flag says which one lost a magnitude it was supposed to have.
+                downgrade_flags.append("magnitude_unparseable")
 
         claims.append(
             emit_pdf_claim(
@@ -277,6 +452,8 @@ def claims_from_prose(
                 file=file,
                 flag_log=flag_log,
                 value_text=value_text,
+                claim_kind="quantitative",
+                extra_flags=downgrade_flags,
             )
         )
     resolved = sum(1 for claim in claims if claim.status != "missing")
@@ -292,3 +469,137 @@ def claims_from_prose(
 def api_key_present() -> bool:
     """Whether a credential is available, without reading its value."""
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
+def propose_assertions_for_page(
+    blocks: list[TextBlockRecord],
+    page: PageIndex,
+    *,
+    entity_hint: str,
+    file: str,
+    model: str = DEFAULT_MODEL,
+    client=None,
+) -> list[ProposedAssertion]:
+    """Ask the model for the qualitative claims one page's prose asserts.
+
+    Its own call and its own byte-identical system prompt, so this prefix caches
+    exactly as the numeric one does and neither job dilutes the other's context.
+    """
+    text = prose_text(blocks, page)
+    if not text.strip():
+        return []
+
+    if client is None:
+        import anthropic
+
+        client = anthropic.Anthropic()
+
+    response = client.messages.parse(
+        model=model,
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
+        system=[
+            {"type": "text", "text": _ASSERTION_SYSTEM, "cache_control": {"type": "ephemeral"}}
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Document: {file}\nPage: {page.page}\n"
+                    f"Subject company (context, not a default): {entity_hint}\n\n"
+                    f"Page text:\n{text}"
+                ),
+            }
+        ],
+        output_format=PageAssertions,
+    )
+    parsed = response.parsed_output
+    return list(parsed.assertions) if parsed else []
+
+
+def _within_budget(proposals: list[ProposedAssertion]) -> list[ProposedAssertion]:
+    """At most one per assertion_class, then at most MAX_ASSERTIONS_PER_PAGE.
+
+    Enforced here rather than in the output grammar on purpose: a grammar cap
+    turns an over-long response into a ValidationError that escapes the call and
+    takes the whole page with it, which is the blast radius this module has
+    already had to close twice. Model order is kept -- the prompt asks for most
+    substantive first, so a page that overruns chooses what it loses.
+
+    One-per-class is the sharper of the two bounds: it stops a competition page
+    returning three restatements of the same competitive_position.
+    """
+    seen: set[str] = set()
+    kept: list[ProposedAssertion] = []
+    for p in proposals:
+        if p.assertion_class in seen:
+            continue
+        seen.add(p.assertion_class)
+        kept.append(p)
+        if len(kept) == MAX_ASSERTIONS_PER_PAGE:
+            break
+    return kept
+
+
+def assertions_from_prose(
+    blocks: list[TextBlockRecord],
+    page: PageIndex,
+    *,
+    entity_hint: str,
+    file: str,
+    flag_log: FlagLog,
+    model: str = DEFAULT_MODEL,
+    client=None,
+) -> list[Claim]:
+    """Qualitative claims for one page, emitted through the same citation boundary.
+
+    The guards BLOCK here rather than flag, which is the opposite of the numeric
+    path's choice and deliberate: a numeric claim whose entity is unsupported
+    still carries a real magnitude read from the page, so dropping it would cost
+    measured recall for no gain. A qualitative claim whose asserting clause is
+    not in its span has nothing left that is true -- its value IS the text.
+    """
+    proposals = propose_assertions_for_page(
+        blocks, page, entity_hint=entity_hint, file=file, model=model, client=client
+    )
+    element_id = f"pdf:{file}:p{page.page}:assertion"
+    claims: list[Claim] = []
+    for proposal in _within_budget(proposals):
+        # Containment via the resolver's own grammar, not a hand-rolled `in`.
+        # Two different answers to "is this inside that" is how the digit-test
+        # precondition came to be implemented three incompatible ways.
+        unsupported = None
+        if not contains_flexible(proposal.quote, proposal.predicate_text):
+            unsupported = f"predicate {proposal.predicate_text!r}"
+        elif not contains_flexible(proposal.quote, proposal.subject_text):
+            unsupported = f"subject {proposal.subject_text!r}"
+        elif not (
+            contains_flexible(proposal.quote, proposal.entity) or proposal.entity == entity_hint
+        ):
+            unsupported = f"entity {proposal.entity!r}"
+        if unsupported is not None:
+            logger.warning(
+                "page %s: %s is not readable in the quote; dropping assertion",
+                page.page,
+                unsupported,
+            )
+            flag_log.log(_STAGE_ASSERTION, element_id, "quote_unresolved", detail=proposal.quote)
+            continue
+
+        claims.append(
+            emit_pdf_claim(
+                proposal.entity,
+                proposal.attribute,
+                proposal.quote,
+                page,
+                value_type="text",
+                origin="prose",
+                file=file,
+                flag_log=flag_log,
+                claim_kind="qualitative",
+                assertion_class=proposal.assertion_class,
+                stage=_STAGE_ASSERTION,
+            )
+        )
+    logger.info("page %s: %d qualitative claim(s)", page.page, len(claims))
+    return claims

@@ -79,6 +79,12 @@ FLAG_TYPES = frozenset(
         "empty_section",
         "formula_mismatch",
         "external_reference_unresolved",
+        # A claim the extractor typed numeric whose value text held no single
+        # readable number, so it was emitted as text. NOT a qualitative claim --
+        # without this the two text populations are indistinguishable in the store.
+        "magnitude_unparseable",
+        # The resolved span lies wholly inside repetition-tagged page furniture.
+        "cites_boilerplate",
     }
 )
 
@@ -189,6 +195,10 @@ class Claim(BaseModel):
     verification_method: VerificationMethod | None = None
     section: str | None = None
     flags: list[str] = Field(default_factory=list)
+    # Which extraction contract produced this row. Absent means quantitative, so
+    # every claim written before this field existed stays valid and unchanged.
+    claim_kind: Literal["quantitative", "qualitative"] | None = None
+    assertion_class: str | None = None
 
     def to_json(self) -> dict:
         out: dict = {
@@ -202,6 +212,10 @@ class Claim(BaseModel):
         # once status is cited or later, and forbids inventing one before that.
         if self.verification_method is not None:
             out["verification_method"] = self.verification_method
+        if self.claim_kind is not None:
+            out["claim_kind"] = self.claim_kind
+        if self.assertion_class is not None:
+            out["assertion_class"] = self.assertion_class
         if self.section is not None:
             out["section"] = self.section
         if self.flags:
@@ -308,6 +322,9 @@ def emit_pdf_claim(
     cell: TableCellRecord | None = None,
     section: str | None = None,
     value_text: str | None = None,
+    claim_kind: Literal["quantitative", "qualitative"] | None = None,
+    assertion_class: str | None = None,
+    extra_flags: list[str] | None = None,
     document_id: str | None = None,
     document_name: str | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
@@ -372,7 +389,25 @@ def emit_pdf_claim(
             section=section,
         )
 
-    flags: list[str] = []
+    # Seeded, not empty: a caller-supplied flag (e.g. magnitude_unparseable from
+    # the prose guard) must survive into the claim. The scaled branch below used
+    # to REASSIGN this list, which would have discarded every seeded flag
+    # silently -- it extends now.
+    flags: list[str] = list(extra_flags or [])
+
+    # The one chokepoint every PDF claim from every path crosses, which is why
+    # the check lives here rather than in a caller that a future path could
+    # route around. `all` rather than `any` mirrors inspect.is_boilerplate_token:
+    # a partially-tagged span is a real claim sitting beside furniture, and
+    # over-excluding would hide a real miss. Flag-only for now -- tag_boilerplate
+    # keys on repetition, so a repeated section header could be caught, and
+    # dropping on it would gamble measured recall on a heuristic never built to
+    # gate emission.
+    span_chars = page.char_map[span.char_start : span.char_end]
+    if span_chars and all(c.is_boilerplate for c in span_chars):
+        flags.append("cites_boilerplate")
+
+    scale_detail: str | None = None
     if value_type == "text":
         # Same choice the scaled branch makes below: the quote is the citation
         # and may be a whole clause, so where the caller named the value token
@@ -394,7 +429,7 @@ def emit_pdf_claim(
             table=table,
             cell=cell,
         )
-        flags = list(scale_result.flags)
+        flags.extend(scale_result.flags)
         if (
             value_type == "currency"
             and scale_result.unit is None
@@ -409,8 +444,7 @@ def emit_pdf_claim(
             # distinct from assumed_1x (no header at all), so flagged
             # separately: the multiplier is trusted, the currency is not.
             flags.append("ambiguous_unit")
-        if flags:
-            flag_log.log_all(stage, element_id, flags, detail=scale_result.scale_context)
+        scale_detail = scale_result.scale_context
         # The magnitude must be what the multiplier says it is. This cannot be a
         # contract rule -- JSON Schema has no arithmetic across fields -- so it is
         # asserted where the claim is MADE, not merely where it is validated. It
@@ -433,6 +467,11 @@ def emit_pdf_claim(
             scale_source=scale_result.scale_source,
         )
 
+    # Logged once for both branches. It used to sit inside the scaled branch,
+    # so a flag raised on a text claim was attached but never logged.
+    if flags:
+        flag_log.log_all(stage, element_id, flags, detail=scale_detail)
+
     bbox = span.line_bboxes or [span.bbox]
     return Claim(
         entity=entity,
@@ -450,6 +489,8 @@ def emit_pdf_claim(
         status="proposed",
         section=section,
         flags=flags,
+        claim_kind=claim_kind,
+        assertion_class=assertion_class,
     )
 
 

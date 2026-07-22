@@ -5,17 +5,35 @@
   "description": "The C3 seam contract: one claim row as emitted by the Python parse service across the JSON boundary to the backend. The consuming side validates against this SAME file. A change here must be made on both sides together, or the contract job fails.\n\nA claim is an assertion pending verification, not a verified truth (hence claims, not facts). Nothing is emitted without a citation attached at write time, and provenance is all-or-nothing: a claim resolves to an exact span, or it is emitted with status=missing. A partial or approximate citation is never written.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["entity", "attribute", "value", "status", "location"],
+  "required": [
+    "entity",
+    "attribute",
+    "value",
+    "status",
+    "location"
+  ],
   "properties": {
-    "id": { "type": "string" },
-    "deal_id": { "type": "string" },
-    "session_id": { "type": "string", "description": "Which pipeline run produced it." },
-    "org_id": { "type": "string", "description": "Tenant; RLS scopes on this." },
+    "id": {
+      "type": "string"
+    },
+    "deal_id": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Which pipeline run produced it."
+    },
+    "org_id": {
+      "type": "string",
+      "description": "Tenant; RLS scopes on this."
+    },
     "data_source_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "FK to data_sources (document identity + versioning). Assigned by the ingesting backend; the parse service cites the file by name in location.file."
     },
-
     "entity": {
       "type": "string",
       "description": "What the claim is about (company, segment, etc.)."
@@ -24,21 +42,35 @@
       "type": "string",
       "description": "The field, e.g. revenueLatestUsd."
     },
-
     "period_year": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "description": "Fiscal year the claim applies to, when the source states one."
     },
     "period_kind": {
-      "type": ["string", "null"],
-      "enum": ["A", "E", "P", null],
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "A",
+        "E",
+        "P",
+        null
+      ],
       "description": "A=Actual, E=Estimate, P=Projected. Null when the source does not qualify the period."
     },
-
     "value": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["raw", "normalized", "unit", "value_type"],
+      "required": [
+        "raw",
+        "normalized",
+        "unit",
+        "value_type"
+      ],
       "description": "Unit-normalized at write time; raw is never overwritten. The canonical number everything compares against is `normalized`.",
       "properties": {
         "raw": {
@@ -46,15 +78,24 @@
           "description": "Verbatim as printed, e.g. \"$15,295\"."
         },
         "normalized": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "After scale + unit applied, e.g. 15295000. null only when value_type is text."
         },
         "unit": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "e.g. USD, CAD, bp, ratio."
         },
         "scale_multiplier": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "What took raw -> normalized, e.g. 1000. Required alongside scale_source for every value_type that has a magnitude -- see the scale allOf block. NOTE: JSON Schema cannot express arithmetic across fields, so it cannot check that normalized == parse(raw) * scale_multiplier. That invariant is enforced by scale.scale_invariant_holds, asserted in the contract test and on the emit path. Validating this document against the schema alone does NOT establish that the magnitude is right."
         },
         "scale_source": {
@@ -70,33 +111,69 @@
         },
         "value_type": {
           "type": "string",
-          "enum": ["currency", "percent", "count", "ratio", "date", "text"],
+          "enum": [
+            "currency",
+            "percent",
+            "count",
+            "ratio",
+            "date",
+            "text"
+          ],
           "description": "Drives tolerance selection at comparison time (Verify / golden-set diff). Only currency is scaled by a column/page header."
         }
       }
     },
-
     "location": {
       "description": "Typed union by kind. PDF => page/char span; XLSX => sheet/cell_ref; DOCX => paragraph/char span. One claims spine stores all three: the format-specific columns are null per row.\n\nThe location says WHERE WE LOOKED; the char span says WHERE IT IS. The locator (page / sheet+cell_ref / paragraph) is always required, because a claim always knows where it was searched for. The span is required the moment the claim asserts it found something -- see the all-or-nothing rule in allOf. Where a span exists it is exact, zero tolerance.",
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "page"],
+          "required": [
+            "kind",
+            "page"
+          ],
           "properties": {
-            "kind": { "const": "pdf" },
+            "kind": {
+              "const": "pdf"
+            },
             "file": {
               "type": "string",
               "description": "Source filename — debug/human-readable only. The canonical document identity is the top-level data_source_id; the claims table has no file column."
             },
-            "document_id": { "type": "string" },
-            "document_name": { "type": "string" },
-            "document_version": { "type": ["integer", "string"] },
-            "ingested_at": { "type": "string", "format": "date-time" },
-            "document_date": { "type": ["string", "null"], "format": "date" },
-            "page": { "type": "integer", "description": "PDF page index, not printed footer." },
-            "char_start": { "type": "integer" },
-            "char_end": { "type": "integer" },
+            "document_id": {
+              "type": "string"
+            },
+            "document_name": {
+              "type": "string"
+            },
+            "document_version": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "ingested_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "document_date": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            },
+            "page": {
+              "type": "integer",
+              "description": "PDF page index, not printed footer."
+            },
+            "char_start": {
+              "type": "integer"
+            },
+            "char_end": {
+              "type": "integer"
+            },
             "bbox": {
               "type": "array",
               "description": "Docling's native coordinate system, coord_origin preserved verbatim — no highlight-UI decision is smuggled in here.",
@@ -104,7 +181,9 @@
                 "type": "array",
                 "minItems": 4,
                 "maxItems": 4,
-                "items": { "type": "number" }
+                "items": {
+                  "type": "number"
+                }
               }
             }
           }
@@ -112,41 +191,95 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "sheet", "cell_ref"],
+          "required": [
+            "kind",
+            "sheet",
+            "cell_ref"
+          ],
           "properties": {
-            "kind": { "const": "xlsx" },
+            "kind": {
+              "const": "xlsx"
+            },
             "file": {
               "type": "string",
               "description": "Source filename — debug only; canonical identity is data_source_id."
             },
-            "document_id": { "type": "string" },
-            "document_name": { "type": "string" },
-            "document_version": { "type": ["integer", "string"] },
-            "ingested_at": { "type": "string", "format": "date-time" },
-            "document_date": { "type": ["string", "null"], "format": "date" },
-            "sheet": { "type": "string" },
+            "document_id": {
+              "type": "string"
+            },
+            "document_name": {
+              "type": "string"
+            },
+            "document_version": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "ingested_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "document_date": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            },
+            "sheet": {
+              "type": "string"
+            },
             "cell_ref": {
               "type": "string",
               "description": "e.g. B14. A merged cell cites its anchor (top-left) cell; no merge range is persisted."
             },
-            "named_range": { "type": ["string", "null"] }
+            "named_range": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "paragraph"],
+          "required": [
+            "kind",
+            "paragraph"
+          ],
           "properties": {
-            "kind": { "const": "docx" },
+            "kind": {
+              "const": "docx"
+            },
             "file": {
               "type": "string",
               "description": "Source filename — debug only; canonical identity is data_source_id."
             },
-            "document_id": { "type": "string" },
-            "document_name": { "type": "string" },
-            "document_version": { "type": ["integer", "string"] },
-            "ingested_at": { "type": "string", "format": "date-time" },
-            "document_date": { "type": ["string", "null"], "format": "date" },
+            "document_id": {
+              "type": "string"
+            },
+            "document_name": {
+              "type": "string"
+            },
+            "document_version": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "ingested_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "document_date": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            },
             "paragraph": {
               "type": "integer",
               "description": "Paragraph index; maps to the claims table's DOCX-only `paragraph` column."
@@ -155,15 +288,31 @@
               "type": "integer",
               "description": "DOCX is a linear text stream, so a claim cites an exact span exactly like PDF — a paragraph index alone is not a citation. Required, per all-or-nothing provenance."
             },
-            "char_end": { "type": "integer" },
-            "table_id": { "type": ["string", "null"] },
-            "row": { "type": ["integer", "null"] },
-            "col": { "type": ["integer", "null"] }
+            "char_end": {
+              "type": "integer"
+            },
+            "table_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "row": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "col": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
           }
         }
       ]
     },
-
     "status": {
       "type": "string",
       "enum": [
@@ -178,29 +327,48 @@
       ],
       "description": "How much trust the claim has earned. The parse service emits only the reachable subset:\n- `proposed` — citation attached, not yet checked. Covers PDF/DOCX prose and tables, AND an XLSX formula cell: the cell reference is byte-exact, but the value is pending, because this service never executes formulas (re-execution happens outside it) and the file's own cached result is never trusted as a substitute.\n- `cited` — nothing left to check. At parse time this is reachable only for a literal XLSX cell (`direct_read`): reading the bytes IS the verification. A formula reaches `cited` later, once re-executed (`formula_reexecution`).\n- `missing` — no citation exists in the source.\nVerify moves proposed -> cited|rejected; the corroboration pass moves cited -> conflicted|inconclusive|partially_verified|verified. An extractor must never assert cited for a value it has not had checked — which is why an unexecuted formula is `proposed`, not `cited`."
     },
-
     "verification_method": {
-      "type": ["string", "null"],
-      "enum": ["exact_span", "formula_reexecution", "direct_read", "reranker", "human_review", null],
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "exact_span",
+        "formula_reexecution",
+        "direct_read",
+        "reranker",
+        "human_review",
+        null
+      ],
       "description": "HOW the claim earned citation-level trust. Null before anything has been checked (status=proposed|rejected|missing); required once status is cited or later. direct_read = a literal XLSX cell; formula_reexecution = a workbook formula independently recomputed."
     },
-
-    "section": { "type": ["string", "null"] },
-
+    "section": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "chunk_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "The chunk the quote was read from. Agent-self-reported and validated by substring match within that chunk only. Set together with char_start/char_end, or not at all."
     },
-
     "table_group_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Groups fragments of one logical table split across pages."
     },
     "fragment_order": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "description": "Order of this fragment within table_group_id."
     },
-
     "flags": {
       "type": "array",
       "items": {
@@ -217,33 +385,90 @@
           "zero_text_page",
           "empty_section",
           "formula_mismatch",
-          "external_reference_unresolved"
+          "external_reference_unresolved",
+          "magnitude_unparseable",
+          "cites_boilerplate"
         ]
       }
+    },
+    "claim_kind": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "quantitative",
+        "qualitative",
+        null
+      ],
+      "description": "Which extraction contract produced this claim. Absent or 'quantitative': the value carries a magnitude, or carries none because the magnitude guard could not read one (see the magnitude_unparseable flag). 'qualitative': the claim IS a text assertion by design -- value.normalized is null on purpose, not by failure. Optional and absent-means-quantitative, so every row written before this field existed stays valid."
+    },
+    "assertion_class": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "related_party",
+        "operating_model",
+        "market_definition",
+        "competitive_position",
+        "commercial_terms",
+        "risk_or_dependency",
+        "plan_or_commitment",
+        null
+      ],
+      "description": "For a qualitative claim, which kind of assertion it is. Null otherwise."
     }
   },
-
   "allOf": [
     {
       "$comment": "All-or-nothing provenance, enforced. A claim that is not `missing` asserts it FOUND something, so it must carry the exact span proving where. Only `missing` -- which asserts the opposite -- may omit it. Previously the span was unconditionally required, which forced a missing claim to fabricate char_start=0/char_end=0: a zero span reads as a citation to the top of the page, so the schema was mandating exactly the approximate citation this rule exists to forbid. XLSX is exempt because a cell reference IS the whole citation; there is no sub-cell span to give.",
       "if": {
         "properties": {
-          "status": { "not": { "const": "missing" } },
-          "location": { "properties": { "kind": { "enum": ["pdf", "docx"] } } }
+          "status": {
+            "not": {
+              "const": "missing"
+            }
+          },
+          "location": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "pdf",
+                  "docx"
+                ]
+              }
+            }
+          }
         },
-        "required": ["status", "location"]
+        "required": [
+          "status",
+          "location"
+        ]
       },
       "then": {
         "properties": {
-          "location": { "required": ["char_start", "char_end"] }
+          "location": {
+            "required": [
+              "char_start",
+              "char_end"
+            ]
+          }
         }
       }
     },
     {
       "$comment": "The other half of all-or-nothing: a `missing` claim asserts that nothing was found, so it must not carry a span AT ALL -- not even char_start=0/char_end=0. A zero span is not an absence, it is a citation to the first character of the page, and a consumer highlighting it would point the user at unrelated text while the claim says nothing was found. Requiring the span unconditionally is what produced that fabrication in the first place, so both halves are enforced here: found => span, missing => no span.",
       "if": {
-        "properties": { "status": { "const": "missing" } },
-        "required": ["status"]
+        "properties": {
+          "status": {
+            "const": "missing"
+          }
+        },
+        "required": [
+          "status"
+        ]
       },
       "then": {
         "properties": {
@@ -261,14 +486,28 @@
       "if": {
         "properties": {
           "status": {
-            "enum": ["cited", "conflicted", "inconclusive", "partially_verified", "verified"]
+            "enum": [
+              "cited",
+              "conflicted",
+              "inconclusive",
+              "partially_verified",
+              "verified"
+            ]
           }
         },
-        "required": ["status"]
+        "required": [
+          "status"
+        ]
       },
       "then": {
-        "required": ["verification_method"],
-        "properties": { "verification_method": { "type": "string" } }
+        "required": [
+          "verification_method"
+        ],
+        "properties": {
+          "verification_method": {
+            "type": "string"
+          }
+        }
       }
     },
     {
@@ -278,20 +517,36 @@
           {
             "properties": {
               "value": {
-                "properties": { "value_type": { "const": "text" } },
-                "required": ["value_type"]
+                "properties": {
+                  "value_type": {
+                    "const": "text"
+                  }
+                },
+                "required": [
+                  "value_type"
+                ]
               }
             },
-            "required": ["value"]
+            "required": [
+              "value"
+            ]
           },
           {
             "properties": {
               "value": {
-                "properties": { "normalized": { "type": "null" } },
-                "required": ["normalized"]
+                "properties": {
+                  "normalized": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "normalized"
+                ]
               }
             },
-            "required": ["value"]
+            "required": [
+              "value"
+            ]
           }
         ]
       },
@@ -299,8 +554,48 @@
       "else": {
         "properties": {
           "value": {
-            "required": ["scale_multiplier", "scale_source"],
-            "properties": { "scale_multiplier": { "type": "number" } }
+            "required": [
+              "scale_multiplier",
+              "scale_source"
+            ],
+            "properties": {
+              "scale_multiplier": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "A qualitative claim is a text assertion by construction: typed text, no normalized magnitude, and it must name its assertion_class. Without this, claim_kind='qualitative' on a currency row would assert both extraction contracts at once.",
+      "if": {
+        "properties": {
+          "claim_kind": {
+            "const": "qualitative"
+          }
+        },
+        "required": [
+          "claim_kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "assertion_class"
+        ],
+        "properties": {
+          "assertion_class": {
+            "type": "string"
+          },
+          "value": {
+            "properties": {
+              "value_type": {
+                "const": "text"
+              },
+              "normalized": {
+                "type": "null"
+              }
+            }
           }
         }
       }

@@ -127,6 +127,25 @@ def find_exact_span(quote: str, text: str, *, where: str) -> tuple[int, int] | N
     return matches[0]
 
 
+def contains_flexible(haystack: str, needle: str) -> bool:
+    """Whether `needle` appears in `haystack` under this module's matching rule.
+
+    The same relaxation find_exact_span uses -- a run of whitespace matches any
+    run of whitespace, every other character literally -- so a caller asking
+    "is this clause inside that quote" gets the answer the resolver would give,
+    rather than a second, subtly different grammar. Hand-rolled containment
+    tests are how `has_parseable_magnitude`'s precondition came to be answered
+    three different ways.
+
+    A blank needle is False, never vacuously True. "" is a substring of
+    everything, and that exact vacuity already shipped one defect here: an
+    unset value_text passed the containment test and became a claim's raw.
+    """
+    if not needle.strip():
+        return False
+    return re.search(_flexible_pattern(needle), haystack) is not None
+
+
 def resolve(quote: str, page: PageIndex) -> Span | None:
     """Resolve a verbatim quote to its exact span on a PDF page, or None.
 
