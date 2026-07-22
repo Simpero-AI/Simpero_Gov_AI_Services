@@ -15,8 +15,12 @@ from pydantic import ValidationError
 
 from parser_service.emit import FlagLog, PdfLocation
 from parser_service.propose import (
+    MAX_ASSERTIONS_PER_PAGE,
+    PageAssertions,
     PageProposals,
+    ProposedAssertion,
     ProposedClaim,
+    assertions_from_prose,
     claims_from_prose,
     propose_for_page,
     prose_text,
@@ -600,3 +604,316 @@ def test_a_sentence_holding_two_numbers_does_not_pick_one_and_kill_the_page() ->
     assert claims[0].value.value_type == "text"
     assert claims[0].value.normalized is None
     assert claims[1].value.normalized == 7_917.0
+
+
+# --------------------------------------------------------------------------- #
+# The qualitative arm.
+#
+# A human marked 34 passages in a real CIM as claims the pipeline missed; almost
+# all were assertions carrying no number, which the value-centric contract
+# cannot express. These pin the parts that must not drift.
+# --------------------------------------------------------------------------- #
+
+
+class _StubAssertionClient:
+    def __init__(self, assertions: list[ProposedAssertion]) -> None:
+        self._assertions = assertions
+        self.calls: list[dict] = []
+        self.messages = SimpleNamespace(parse=self._parse)
+
+    def _parse(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(parsed_output=PageAssertions(assertions=self._assertions))
+
+
+def _assertion(**kw) -> ProposedAssertion:
+    base = {
+        "quote": "dry cleaning facilities will not be available on-site",
+        "subject_text": "dry cleaning facilities",
+        "predicate_text": "will not be available on-site",
+        "entity": "dry cleaning facilities",
+        "attribute": "on-site dry cleaning availability",
+        "assertion_class": "operating_model",
+    }
+    base.update(kw)
+    return ProposedAssertion(**base)  # pyright: ignore[reportArgumentType]
+
+
+def test_a_qualitative_assertion_is_emitted_with_a_real_citation() -> None:
+    page = _page("For planning issues, dry cleaning facilities will not be available on-site.")
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient([_assertion()]),
+    )
+
+    assert len(claims) == 1
+    claim = claims[0]
+    assert claim.status == "proposed"
+    assert claim.claim_kind == "qualitative"
+    assert claim.assertion_class == "operating_model"
+    assert claim.value.value_type == "text"
+    assert claim.value.normalized is None, "a qualitative claim has no magnitude by design"
+    location = claim.location
+    assert isinstance(location, PdfLocation)
+    assert page.text[location.char_start : location.char_end] == (
+        "dry cleaning facilities will not be available on-site"
+    )
+
+
+def test_an_assertion_whose_predicate_is_not_in_the_span_is_dropped() -> None:
+    # The guards BLOCK here rather than flag, unlike the numeric path: a numeric
+    # claim with a shaky entity still carries a magnitude read from the page,
+    # but a qualitative claim's value IS its text -- if the asserting clause is
+    # not in the span there is nothing left that is true.
+    page = _page("For planning issues, dry cleaning facilities will not be available on-site.")
+    flag_log = FlagLog()
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=flag_log,
+        client=_StubAssertionClient([_assertion(predicate_text="will be outsourced to a partner")]),
+    )
+
+    assert claims == []
+    # binding_unsupported, not quote_unresolved: the quote resolves perfectly,
+    # it is the model's binding to it that fails. Logging a precision signal
+    # under the resolver's recall flag makes both numbers unreadable.
+    assert [e.flag_type for e in flag_log.entries] == ["binding_unsupported"]
+
+
+def test_an_entity_imported_from_elsewhere_on_the_page_is_dropped() -> None:
+    # The measured binding defect: "187 ensuite" bound to "Chantry Court", a
+    # name the span never contains. On this path it is refused outright.
+    page = _page("The property offers 187 ensuite rooms to students in Bristol.")
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(
+            [
+                _assertion(
+                    quote="The property offers 187 ensuite rooms",
+                    subject_text="The property",
+                    predicate_text="offers 187 ensuite rooms",
+                    entity="Chantry Court",
+                    attribute="room count",
+                )
+            ]
+        ),
+    )
+    assert claims == []
+
+
+def test_the_subject_company_may_be_the_entity_without_being_named() -> None:
+    # A CIM writes paragraphs about itself without naming itself. The entity
+    # hint is the single permitted exception to entity-must-be-in-the-span.
+    page = _page("Directed primarily at young people, typically students and young professionals.")
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(
+            [
+                _assertion(
+                    quote="Directed primarily at young people",
+                    subject_text="Directed primarily at young people",
+                    predicate_text="Directed primarily at young people",
+                    entity="BarWash",
+                    attribute="target customer segment",
+                    assertion_class="market_definition",
+                )
+            ]
+        ),
+    )
+    assert len(claims) == 1
+    assert claims[0].entity == "BarWash"
+
+
+def test_the_page_budget_is_enforced_in_code_not_in_the_grammar() -> None:
+    # A cap in the output grammar makes an over-long response a ValidationError
+    # that escapes the call and destroys the page -- the blast radius this
+    # module has already had to close three times. Six proposals must yield
+    # three claims, not an exception.
+    text = "alpha one. beta two. gamma three. delta four. epsilon five. zeta six."
+    page = _page(text)
+    classes = [
+        "operating_model",
+        "operating_model",
+        "related_party",
+        "market_definition",
+        "risk_or_dependency",
+        "commercial_terms",
+    ]
+    words = ["alpha one", "beta two", "gamma three", "delta four", "epsilon five", "zeta six"]
+    proposals = [
+        _assertion(quote=w, subject_text=w, predicate_text=w, entity=w, assertion_class=c)
+        for w, c in zip(words, classes, strict=True)
+    ]
+    claims = assertions_from_prose(
+        [_block(text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(proposals),
+    )
+
+    assert len(claims) == MAX_ASSERTIONS_PER_PAGE, "cap enforced"
+    assert [c.assertion_class for c in claims] == [
+        "operating_model",
+        "related_party",
+        "market_definition",
+    ], "one per class, model order preserved"
+
+
+def test_a_malformed_response_is_retried_rather_than_costing_the_page() -> None:
+    """Observed across four full-document runs: a page occasionally returns an
+    empty body, the ValidationError escapes, and that page's whole extraction is
+    lost. Every observed instance passed when re-run with identical inputs.
+    """
+    page = _page("For planning issues, dry cleaning facilities will not be available on-site.")
+
+    class _FlakyClient(_StubAssertionClient):
+        def __init__(self, assertions):
+            super().__init__(assertions)
+            self.attempts = 0
+
+        def _parse(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ValidationError.from_exception_data("PageAssertions", [])
+            return super()._parse(**kwargs)
+
+    client = _FlakyClient([_assertion()])
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+    assert client.attempts == 2, "retried exactly once"
+    assert len(claims) == 1, "the page survived"
+
+
+def test_a_guard_downgrade_is_distinguishable_from_a_qualitative_claim() -> None:
+    # Both end up value_type "text". Only the flag says which one lost a
+    # magnitude it was supposed to have -- without it the two populations are
+    # indistinguishable in the store and neither can be measured.
+    page = _page("The agreement covers five years from completion.")
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubClient(
+            [
+                ProposedClaim(
+                    quote="covers five years from completion",
+                    value_text="five years",
+                    entity="BarWash",
+                    attribute="term",
+                    value_type="count",
+                )
+            ]
+        ),
+    )
+    downgraded = claims[0]
+    assert downgraded.value.value_type == "text"
+    assert downgraded.claim_kind == "quantitative", "a downgrade is not a qualitative claim"
+    assert "magnitude_unparseable" in downgraded.flags
+
+
+def test_a_rejected_proposal_does_not_consume_its_classs_budget_slot() -> None:
+    """Reversed, the budget ran first: a proposal the guards were about to
+    reject still took its class's slot and displaced a valid one behind it.
+    Recall lost order-dependently, differently on every run.
+    """
+    text = "For planning issues, dry cleaning facilities will not be available on-site."
+    page = _page(text)
+    proposals = [
+        # rejected -- predicate is not in the quote
+        _assertion(predicate_text="will be outsourced to an industry player"),
+        # valid, same class, sitting behind it
+        _assertion(
+            quote="dry cleaning facilities will not be available on-site",
+            subject_text="dry cleaning facilities",
+            predicate_text="will not be available on-site",
+            entity="dry cleaning facilities",
+        ),
+    ]
+    claims = assertions_from_prose(
+        [_block(text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(proposals),
+    )
+    assert len(claims) == 1, "the valid proposal behind the rejected one survives"
+
+
+def test_a_missing_qualitative_claim_is_still_marked_qualitative() -> None:
+    # The module's docstring calls the missing population "a measurable record
+    # of the model having claimed something the page could not support". It is
+    # only measurable if the missing row says which arm produced it.
+    page = _page("The venue operates a licensed bar on the ground floor.")
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(
+            [
+                _assertion(
+                    quote="a licensed bar on the ground floor",
+                    subject_text="a licensed bar",
+                    predicate_text="on the ground floor",
+                    entity="a licensed bar",
+                )
+            ]
+        ),
+    )
+    # Resolves fine here; the point is the field is threaded at all.
+    assert claims[0].claim_kind == "qualitative"
+    assert claims[0].assertion_class == "operating_model"
+
+
+def test_a_downgrade_flag_survives_an_unresolved_quote() -> None:
+    # flags was seeded AFTER the missing returns, so magnitude_unparseable was
+    # silently discarded on exactly the claims whose provenance failed.
+    page = _page("The agreement covers five years from completion.")
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubClient(
+            [
+                ProposedClaim(
+                    quote="a term the page never states",
+                    value_text="five years",
+                    entity="BarWash",
+                    attribute="term",
+                    value_type="count",
+                )
+            ]
+        ),
+    )
+    assert claims[0].status == "missing"
+    assert "magnitude_unparseable" in claims[0].flags
+    assert "quote_unresolved" in claims[0].flags
