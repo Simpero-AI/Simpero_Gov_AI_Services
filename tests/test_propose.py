@@ -681,7 +681,10 @@ def test_an_assertion_whose_predicate_is_not_in_the_span_is_dropped() -> None:
     )
 
     assert claims == []
-    assert [e.flag_type for e in flag_log.entries] == ["quote_unresolved"]
+    # binding_unsupported, not quote_unresolved: the quote resolves perfectly,
+    # it is the model's binding to it that fails. Logging a precision signal
+    # under the resolver's recall flag makes both numbers unreadable.
+    assert [e.flag_type for e in flag_log.entries] == ["binding_unsupported"]
 
 
 def test_an_entity_imported_from_elsewhere_on_the_page_is_dropped() -> None:
@@ -831,3 +834,86 @@ def test_a_guard_downgrade_is_distinguishable_from_a_qualitative_claim() -> None
     assert downgraded.value.value_type == "text"
     assert downgraded.claim_kind == "quantitative", "a downgrade is not a qualitative claim"
     assert "magnitude_unparseable" in downgraded.flags
+
+
+def test_a_rejected_proposal_does_not_consume_its_classs_budget_slot() -> None:
+    """Reversed, the budget ran first: a proposal the guards were about to
+    reject still took its class's slot and displaced a valid one behind it.
+    Recall lost order-dependently, differently on every run.
+    """
+    text = "For planning issues, dry cleaning facilities will not be available on-site."
+    page = _page(text)
+    proposals = [
+        # rejected -- predicate is not in the quote
+        _assertion(predicate_text="will be outsourced to an industry player"),
+        # valid, same class, sitting behind it
+        _assertion(
+            quote="dry cleaning facilities will not be available on-site",
+            subject_text="dry cleaning facilities",
+            predicate_text="will not be available on-site",
+            entity="dry cleaning facilities",
+        ),
+    ]
+    claims = assertions_from_prose(
+        [_block(text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(proposals),
+    )
+    assert len(claims) == 1, "the valid proposal behind the rejected one survives"
+
+
+def test_a_missing_qualitative_claim_is_still_marked_qualitative() -> None:
+    # The module's docstring calls the missing population "a measurable record
+    # of the model having claimed something the page could not support". It is
+    # only measurable if the missing row says which arm produced it.
+    page = _page("The venue operates a licensed bar on the ground floor.")
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(
+            [
+                _assertion(
+                    quote="a licensed bar on the ground floor",
+                    subject_text="a licensed bar",
+                    predicate_text="on the ground floor",
+                    entity="a licensed bar",
+                )
+            ]
+        ),
+    )
+    # Resolves fine here; the point is the field is threaded at all.
+    assert claims[0].claim_kind == "qualitative"
+    assert claims[0].assertion_class == "operating_model"
+
+
+def test_a_downgrade_flag_survives_an_unresolved_quote() -> None:
+    # flags was seeded AFTER the missing returns, so magnitude_unparseable was
+    # silently discarded on exactly the claims whose provenance failed.
+    page = _page("The agreement covers five years from completion.")
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubClient(
+            [
+                ProposedClaim(
+                    quote="a term the page never states",
+                    value_text="five years",
+                    entity="BarWash",
+                    attribute="term",
+                    value_type="count",
+                )
+            ]
+        ),
+    )
+    assert claims[0].status == "missing"
+    assert "magnitude_unparseable" in claims[0].flags
+    assert "quote_unresolved" in claims[0].flags

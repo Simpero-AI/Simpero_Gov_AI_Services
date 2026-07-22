@@ -85,6 +85,11 @@ FLAG_TYPES = frozenset(
         "magnitude_unparseable",
         # The resolved span lies wholly inside repetition-tagged page furniture.
         "cites_boilerplate",
+        # The quote resolved, but the entity or asserting clause the model bound
+        # to it is not readable inside it. A precision signal, deliberately not
+        # quote_unresolved -- that one means the resolver could not find the text
+        # at all, and merging the two makes each unreadable.
+        "binding_unsupported",
     }
 )
 
@@ -284,6 +289,8 @@ def _missing_pdf_claim(
     document_id: str | None,
     document_name: str | None,
     section: str | None,
+    claim_kind: Literal["quantitative", "qualitative"] | None = None,
+    assertion_class: str | None = None,
 ) -> Claim:
     """A claim we looked for and did not find.
 
@@ -305,6 +312,8 @@ def _missing_pdf_claim(
         status="missing",
         section=section,
         flags=flags,
+        claim_kind=claim_kind,
+        assertion_class=assertion_class,
     )
 
 
@@ -362,10 +371,12 @@ def emit_pdf_claim(
             value_type,
             page,
             file,
-            ["zero_text_page"],
+            [*(extra_flags or []), "zero_text_page"],
             document_id=document_id,
             document_name=document_name,
             section=section,
+            claim_kind=claim_kind,
+            assertion_class=assertion_class,
         )
 
     # Cell-scoped first when we know the cell, page-wide otherwise. Both go
@@ -383,10 +394,12 @@ def emit_pdf_claim(
             value_type,
             page,
             file,
-            ["quote_unresolved"],
+            [*(extra_flags or []), "quote_unresolved"],
             document_id=document_id,
             document_name=document_name,
             section=section,
+            claim_kind=claim_kind,
+            assertion_class=assertion_class,
         )
 
     # Seeded, not empty: a caller-supplied flag (e.g. magnitude_unparseable from

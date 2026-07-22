@@ -596,9 +596,13 @@ def assertions_from_prose(
     proposals = propose_assertions_for_page(
         blocks, page, entity_hint=entity_hint, file=file, model=model, client=client
     )
-    element_id = f"pdf:{file}:p{page.page}:assertion"
     claims: list[Claim] = []
-    for proposal in _within_budget(proposals):
+    # Guards first, budget second. Reversed, a proposal that the containment
+    # guards are about to reject still consumes its class's slot and displaces a
+    # valid one behind it -- recall lost order-dependently, differently on every
+    # run. The budget must choose among claims that can actually be emitted.
+    supported: list[ProposedAssertion] = []
+    for proposal in proposals:
         # Containment via the resolver's own grammar, not a hand-rolled `in`.
         # Two different answers to "is this inside that" is how the digit-test
         # precondition came to be implemented three incompatible ways.
@@ -617,9 +621,20 @@ def assertions_from_prose(
                 page.page,
                 unsupported,
             )
-            flag_log.log(_STAGE_ASSERTION, element_id, "quote_unresolved", detail=proposal.quote)
+            # binding_unsupported, NOT quote_unresolved. The quote resolves fine;
+            # what fails is the model's binding to it. Logging a precision signal
+            # under the resolver's recall flag makes both numbers unreadable, and
+            # this log is the only precision instrument the project has.
+            flag_log.log(
+                _STAGE_ASSERTION,
+                f"pdf:{file}:p{page.page}:{proposal.attribute}",
+                "binding_unsupported",
+                detail=proposal.quote,
+            )
             continue
+        supported.append(proposal)
 
+    for proposal in _within_budget(supported):
         claims.append(
             emit_pdf_claim(
                 proposal.entity,

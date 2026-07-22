@@ -387,7 +387,8 @@
           "formula_mismatch",
           "external_reference_unresolved",
           "magnitude_unparseable",
-          "cites_boilerplate"
+          "cites_boilerplate",
+          "binding_unsupported"
         ]
       }
     },
