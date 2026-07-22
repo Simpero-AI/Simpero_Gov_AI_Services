@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from parser_service.emit import FlagLog, PdfLocation
 from parser_service.propose import (
+    MAX_ASSERTIONS_PER_PAGE,
     PageAssertions,
     PageProposals,
     ProposedAssertion,
@@ -738,8 +739,8 @@ def test_the_subject_company_may_be_the_entity_without_being_named() -> None:
 def test_the_page_budget_is_enforced_in_code_not_in_the_grammar() -> None:
     # A cap in the output grammar makes an over-long response a ValidationError
     # that escapes the call and destroys the page -- the blast radius this
-    # module has already had to close twice. Six proposals must yield three
-    # claims, not an exception.
+    # module has already had to close three times. Six proposals must yield
+    # three claims, not an exception.
     text = "alpha one. beta two. gamma three. delta four. epsilon five. zeta six."
     page = _page(text)
     classes = [
@@ -764,12 +765,43 @@ def test_the_page_budget_is_enforced_in_code_not_in_the_grammar() -> None:
         client=_StubAssertionClient(proposals),
     )
 
-    assert len(claims) == 3, "cap of three"
+    assert len(claims) == MAX_ASSERTIONS_PER_PAGE, "cap enforced"
     assert [c.assertion_class for c in claims] == [
         "operating_model",
         "related_party",
         "market_definition",
     ], "one per class, model order preserved"
+
+
+def test_a_malformed_response_is_retried_rather_than_costing_the_page() -> None:
+    """Observed across four full-document runs: a page occasionally returns an
+    empty body, the ValidationError escapes, and that page's whole extraction is
+    lost. Every observed instance passed when re-run with identical inputs.
+    """
+    page = _page("For planning issues, dry cleaning facilities will not be available on-site.")
+
+    class _FlakyClient(_StubAssertionClient):
+        def __init__(self, assertions):
+            super().__init__(assertions)
+            self.attempts = 0
+
+        def _parse(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ValidationError.from_exception_data("PageAssertions", [])
+            return super()._parse(**kwargs)
+
+    client = _FlakyClient([_assertion()])
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+    assert client.attempts == 2, "retried exactly once"
+    assert len(claims) == 1, "the page survived"
 
 
 def test_a_guard_downgrade_is_distinguishable_from_a_qualitative_claim() -> None:

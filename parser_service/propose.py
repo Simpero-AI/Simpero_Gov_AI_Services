@@ -43,7 +43,7 @@ import logging
 import os
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .emit import Claim, FlagLog, emit_pdf_claim
 from .resolver import contains_flexible
@@ -282,6 +282,32 @@ class PageAssertions(BaseModel):
     assertions: list[ProposedAssertion] = Field(default_factory=list)
 
 
+def _parse_with_retry(call, *, page_no: int, what: str):
+    """Run a structured-output call, retrying once on a malformed response.
+
+    Measured across four full-document runs: a page occasionally comes back with
+    an empty or truncated body, and the ValidationError raised while parsing it
+    escapes and destroys that page's entire extraction. It is transient -- every
+    observed instance succeeded when the same page was re-run (ACEP p20 failed
+    once and passed on the next run with identical inputs).
+
+    One retry, not a loop: a response malformed twice is a real failure and the
+    caller should see it rather than have it retried into a timeout. The raise
+    is deliberately still reachable -- this narrows a transient, it does not
+    pretend the page succeeded.
+    """
+    try:
+        return call()
+    except ValidationError as exc:
+        logger.warning(
+            "page %s: %s returned an unparseable body (%s); retrying once",
+            page_no,
+            what,
+            type(exc).__name__,
+        )
+        return call()
+
+
 def prose_text(blocks: list[TextBlockRecord], page: PageIndex) -> str:
     """The page's prose, as the model should see it.
 
@@ -333,24 +359,28 @@ def propose_for_page(
 
         client = anthropic.Anthropic()
 
-    response = client.messages.parse(
-        model=model,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        # The system prompt is byte-identical across every page of every document, so it
-        # is the whole cacheable prefix. The page text follows it and varies per call.
-        system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Document: {file}\nPage: {page.page}\n"
-                    f"Subject company (context, not a default): {entity_hint}\n\n"
-                    f"Page text:\n{text}"
-                ),
-            }
-        ],
-        output_format=PageProposals,
+    response = _parse_with_retry(
+        lambda: client.messages.parse(
+            model=model,
+            max_tokens=16000,
+            thinking={"type": "adaptive"},
+            # The system prompt is byte-identical across every page of every document, so it
+            # is the whole cacheable prefix. The page text follows it and varies per call.
+            system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Document: {file}\nPage: {page.page}\n"
+                        f"Subject company (context, not a default): {entity_hint}\n\n"
+                        f"Page text:\n{text}"
+                    ),
+                }
+            ],
+            output_format=PageProposals,
+        ),
+        page_no=page.page,
+        what="numeric proposal",
     )
     parsed = response.parsed_output
     return list(parsed.claims) if parsed else []
@@ -494,24 +524,28 @@ def propose_assertions_for_page(
 
         client = anthropic.Anthropic()
 
-    response = client.messages.parse(
-        model=model,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        system=[
-            {"type": "text", "text": _ASSERTION_SYSTEM, "cache_control": {"type": "ephemeral"}}
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Document: {file}\nPage: {page.page}\n"
-                    f"Subject company (context, not a default): {entity_hint}\n\n"
-                    f"Page text:\n{text}"
-                ),
-            }
-        ],
-        output_format=PageAssertions,
+    response = _parse_with_retry(
+        lambda: client.messages.parse(
+            model=model,
+            max_tokens=16000,
+            thinking={"type": "adaptive"},
+            system=[
+                {"type": "text", "text": _ASSERTION_SYSTEM, "cache_control": {"type": "ephemeral"}}
+            ],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Document: {file}\nPage: {page.page}\n"
+                        f"Subject company (context, not a default): {entity_hint}\n\n"
+                        f"Page text:\n{text}"
+                    ),
+                }
+            ],
+            output_format=PageAssertions,
+        ),
+        page_no=page.page,
+        what="qualitative proposal",
     )
     parsed = response.parsed_output
     return list(parsed.assertions) if parsed else []
