@@ -55,6 +55,8 @@ uv run --with jsonschema pytest -q contracts/test_claims_contract.py
 
 ## Running it
 
+### The parse service — deterministic, no key
+
 ```bash
 uv run uvicorn parser_service.main:app --reload --port 8001
 
@@ -63,4 +65,23 @@ docker build -t simpero-parser .
 docker run --rm -p 8001:8001 simpero-parser
 ```
 
-`POST /parse` takes raw bytes as the request body and returns a tagged result: `kind` names the lane, and exactly one of `pages` / `sheets` / `paragraphs` is populated. `GET /health` is the liveness probe.
+`POST /parse` takes raw bytes as the request body and returns a tagged result: `kind` names the lane, and exactly one of `pages` / `sheets` / `paragraphs` is populated. `GET /health` is the liveness probe. This layer reads structure only — it calls no model and needs no credential.
+
+### Parse to claims — the seam's left half
+
+`scripts/emit_claims.py` turns a PDF into the claims JSON that crosses the C3 seam, in three tiers, each a strict superset of the last:
+
+```bash
+# tables only — deterministic, no network, no key
+uv run python scripts/emit_claims.py <cim.pdf> --entity "PTL Group" > claims.json
+
+# + numeric facts stated in prose (one model call per prose page)
+ANTHROPIC_API_KEY=... uv run python scripts/emit_claims.py <cim.pdf> \
+    --entity "PTL Group" --prose > claims.json
+
+# + claims that carry no number (implies --prose)
+ANTHROPIC_API_KEY=... uv run python scripts/emit_claims.py <cim.pdf> \
+    --entity "PTL Group" --qualitative > claims.json
+```
+
+`--prose` and `--qualitative` call the Anthropic API once per prose page and require `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) in the environment; without it the script fails closed at the door rather than part way through a document. The table tier needs neither. Do not pass a key on the command line for a real CIM — export it, or use a secret manager; the prose tiers send page text to the API, so treat a confidential document accordingly.
