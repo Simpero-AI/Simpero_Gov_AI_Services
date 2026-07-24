@@ -67,7 +67,7 @@ def test_section_heading_carried_onto_chunks() -> None:
         _block(0, "section_header", "MARKET"),
         _block(1, "text", "The market is large and fragmented."),
     ]
-    chunks = chunk_document([page], blocks, [], [], source_file="d.pdf")
+    chunks = chunk_document([page], blocks, [], [], document_id="doc-sha", source_file="d.pdf")
     assert chunks and chunks[0].section == "MARKET"
 
 
@@ -79,7 +79,7 @@ def test_boilerplate_excluded_by_label_and_by_flag() -> None:
         _block(1, "page_footer", "CONFIDENTIAL DRAFT"),   # excluded by label
         _block(2, "text", "Real sentence two."),
     ]
-    chunks = chunk_document([page], blocks, [], [], source_file="d.pdf")
+    chunks = chunk_document([page], blocks, [], [], document_id="doc-sha", source_file="d.pdf")
     assert not any("CONFIDENTIAL" in c.content for c in chunks)
 
 
@@ -92,7 +92,7 @@ def test_boilerplate_excluded_when_label_is_prose_but_chars_flagged() -> None:
         _block(0, "text", "Genuine content here."),
         _block(1, "text", "Page 5 of 40 confidential footer."),
     ]
-    chunks = chunk_document([page], blocks, [], [], source_file="d.pdf")
+    chunks = chunk_document([page], blocks, [], [], document_id="doc-sha", source_file="d.pdf")
     assert not any("confidential footer" in c.content for c in chunks)
 
 
@@ -100,7 +100,7 @@ def test_prose_span_round_trips_to_page_text() -> None:
     text = "The first fact.\n\nThe second fact."
     page = _page(text)
     blocks = [_block(0, "text", "The first fact."), _block(1, "text", "The second fact.")]
-    chunks = chunk_document([page], blocks, [], [], source_file="d.pdf")
+    chunks = chunk_document([page], blocks, [], [], document_id="doc-sha", source_file="d.pdf")
     assert chunks
     for c in chunks:
         assert c.spans
@@ -114,7 +114,7 @@ def test_table_kept_whole_as_structured_content_not_prose() -> None:
         _cell(1, 0, "Revenue"), _cell(1, 1, "15,295"),
     ]
     page = _page("Metric | 2005\nRevenue | 15,295")
-    chunks = chunk_table(_table(cells), page, 0, source_file="d.pdf")
+    chunks = chunk_table(_table(cells), page, 0, document_id="doc-sha", source_file="d.pdf")
     assert len(chunks) == 1
     assert "Revenue | 15,295" in chunks[0].content
     # cited by bbox (cell-precise), not a char span
@@ -130,7 +130,7 @@ def test_large_table_splits_by_row_group_repeating_header_never_mid_row() -> Non
         body.append(_cell(r, 1, str(1000 + r)))
     cells = header + body
     page = _page("dummy")
-    frags = chunk_table(_table(cells), page, 0, source_file="d.pdf")
+    frags = chunk_table(_table(cells), page, 0, document_id="doc-sha", source_file="d.pdf")
     assert len(frags) > 1, "table should have split"
     for frag in frags:
         assert "Property | Rooms" in frag.content, "every fragment repeats the header"
@@ -143,7 +143,7 @@ def test_prose_overlap_repeats_boundary_content() -> None:
     text = "\n\n".join(sentences)
     page = _page(text)
     blocks = [_block(i, "text", s) for i, s in enumerate(sentences)]
-    chunks = chunk_document([page], blocks, [], [], source_file="d.pdf")
+    chunks = chunk_document([page], blocks, [], [], document_id="doc-sha", source_file="d.pdf")
     assert len(chunks) >= 2, "prose should have split into multiple chunks"
     first_sentences = set(chunks[0].content.split("\n\n"))
     second_sentences = set(chunks[1].content.split("\n\n"))
@@ -157,7 +157,7 @@ def test_chart_becomes_its_own_chunk_cited_by_bbox() -> None:
         flags=["chart_data_not_extracted"],
     )
     page = _page("dummy", page=3)
-    chunks = chunk_document([page], [], [], [chart], source_file="d.pdf")
+    chunks = chunk_document([page], [], [], [chart], document_id="doc-sha", source_file="d.pdf")
     assert len(chunks) == 1
     assert chunks[0].spans == [] and chunks[0].bbox is not None
     assert "Revenue by segment" in chunks[0].content

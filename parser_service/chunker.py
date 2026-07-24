@@ -1,4 +1,4 @@
-"""AE-A-RETR-1 chunking -- cut a parsed document into immutable, citable,
+"""AE-A-RETR-1/2 chunking -- cut a parsed document into immutable, citable,
 searchable pieces, one document element at a time.
 
 WHY ELEMENT-BASED, NOT TOKEN-WINDOWED
@@ -37,16 +37,25 @@ number is settled empirically against the golden set (SIM-65 / GS-4), not here;
 changing it later costs a re-chunk + re-embed, so it is isolated as one swappable
 constant rather than threaded through the boundary logic that IS locked.
 
-Chunk-level metadata (document_id, scale_context, element_type) is a separate
-step, AE-A-RETR-2, layered onto these records at creation.
+METADATA CARRIED AT CREATION (AE-A-RETR-2)
+==========================================
+Every chunk is stamped, at creation, with three fields it can never be given
+later (chunks are immutable): document_id (so a retrieved chunk can never be
+confused for one from another document in the same deal), scale_context (the
+"(in thousands)" that governs a table's numbers, carried onto the chunk even
+when the header row falls into a different fragment -- the silent-1000x guard),
+and element_type (table / prose / chart, which retrieve differently).
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from .elements import ChartElement, TableElement
 from .resolver import find_exact_span
+from .scale import scale_phrase_in_text
 from .schemas import BBox, PageIndex, TableCellRecord, TextBlockRecord
 
 # Provisional starting point (~512 tokens, 25% overlap), NOT a locked decision --
@@ -72,6 +81,8 @@ SECTION_LABEL = "section_header"
 # real CIM), so a block is furniture if EITHER signal says so.
 BOILERPLATE_LABELS = frozenset({"page_header", "page_footer"})
 
+ElementType = Literal["prose", "table", "chart"]
+
 
 class ChunkRecord(BaseModel):
     """One immutable, citable, searchable piece of a parsed document.
@@ -86,9 +97,17 @@ class ChunkRecord(BaseModel):
     """
 
     content: str
+    element_type: ElementType
     page: int = Field(ge=1)
     order: int = Field(ge=0, description="Document-order sort key, stable across a run.")
+
+    # AE-A-RETR-2 metadata, stamped at creation.
+    document_id: str = Field(
+        description="Source document sha256; the backend maps it to a data_source id."
+    )
     source_file: str
+    scale_context: str | None = None
+    scale_multiplier: float | None = None
 
     spans: list[tuple[int, int]] = Field(default_factory=list)
     bbox: BBox | None = None
@@ -130,6 +149,18 @@ def _is_boilerplate(block: TextBlockRecord, span: tuple[int, int] | None, page: 
     return any(c.is_boilerplate for c in page.char_map[start:end])
 
 
+def _page_banner_scale(page: PageIndex) -> str | None:
+    """A page-level scale banner ("($ in millions)"), if the page states one.
+
+    Fallback for a table whose scale sits in a page banner rather than its own
+    header row -- so a chunk still carries the scale even when the header text is
+    nowhere inside it. Reuses scale.py's public phrase grammar so a banner is
+    recognized identically to the claim path.
+    """
+    found = scale_phrase_in_text(page.text)
+    return found[2] if found else None
+
+
 # --------------------------------------------------------------------------- #
 # Prose
 # --------------------------------------------------------------------------- #
@@ -149,6 +180,7 @@ def _flush_prose(
     group: list[tuple[TextBlockRecord, tuple[int, int] | None]],
     page: PageIndex,
     *,
+    document_id: str,
     source_file: str,
     section: str | None,
 ) -> ChunkRecord | None:
@@ -167,8 +199,10 @@ def _flush_prose(
         flags.append("span_unresolved")
     return ChunkRecord(
         content=content,
+        element_type="prose",
         page=page.page,
         order=group[0][0].order,
+        document_id=document_id,
         source_file=source_file,
         spans=spans,
         bbox=bbox,
@@ -181,6 +215,7 @@ def chunk_prose_page(
     blocks: list[TextBlockRecord],
     page: PageIndex,
     *,
+    document_id: str,
     source_file: str,
     section: str | None,
 ) -> tuple[list[ChunkRecord], str | None]:
@@ -197,7 +232,9 @@ def chunk_prose_page(
 
     def flush() -> None:
         nonlocal group, group_tokens
-        chunk = _flush_prose(group, page, source_file=source_file, section=section)
+        chunk = _flush_prose(
+            group, page, document_id=document_id, source_file=source_file, section=section
+        )
         if chunk is not None:
             chunks.append(chunk)
         # Overlap: carry the trailing blocks that sum to ~OVERLAP_TOKENS into the
@@ -225,7 +262,9 @@ def chunk_prose_page(
             # carried across a section change), then start the new section's
             # first chunk with the heading itself.
             if group:
-                chunk = _flush_prose(group, page, source_file=source_file, section=section)
+                chunk = _flush_prose(
+                    group, page, document_id=document_id, source_file=source_file, section=section
+                )
                 if chunk is not None:
                     chunks.append(chunk)
                 group, group_tokens = [], 0
@@ -244,7 +283,9 @@ def chunk_prose_page(
         group.append((block, span))
         group_tokens += tokens
 
-    chunk = _flush_prose(group, page, source_file=source_file, section=section)
+    chunk = _flush_prose(
+        group, page, document_id=document_id, source_file=source_file, section=section
+    )
     if chunk is not None:
         chunks.append(chunk)
     return chunks, section
@@ -297,22 +338,29 @@ def chunk_table(
     page: PageIndex,
     order: int,
     *,
+    document_id: str,
     source_file: str,
 ) -> list[ChunkRecord]:
     """One table -> one chunk, or several ROW-GROUP fragments when it exceeds the
     size cap. Each fragment repeats the header rows, so no fragment's numbers are
-    orphaned from their column labels."""
+    orphaned from their column labels, and every fragment carries scale_context so
+    a split never separates a number from the scale that governs it."""
     all_rows = _row_indices(table.cells)
     header_rows = _header_rows(table)
     body_rows = [r for r in all_rows if r not in header_rows]
+    scale_context = table.scale_context or _page_banner_scale(page)
 
     def make(rows: list[int], suffix_flags: list[str]) -> ChunkRecord:
         cells = [c for c in table.cells if c.row in rows]
         return ChunkRecord(
             content=_serialize_rows(table.cells, rows),
+            element_type="table",
             page=page.page,
             order=order,
+            document_id=document_id,
             source_file=source_file,
+            scale_context=scale_context,
+            scale_multiplier=table.scale_multiplier,
             # A serialized grid is not a contiguous page.text substring, so a
             # table cites by its cell-precise bbox, not a char span -- the same
             # citation the claim path already trusts for table cells.
@@ -347,7 +395,9 @@ def chunk_table(
 # --------------------------------------------------------------------------- #
 
 
-def chunk_chart(chart: ChartElement, order: int, *, source_file: str) -> ChunkRecord | None:
+def chunk_chart(
+    chart: ChartElement, order: int, *, document_id: str, source_file: str
+) -> ChunkRecord | None:
     """A chart region as one chunk: caption + the text gathered around it. Cited
     by page+bbox -- a chart has no contiguous character span. Skipped when it
     carries no text at all (an image with nothing to index)."""
@@ -356,8 +406,10 @@ def chunk_chart(chart: ChartElement, order: int, *, source_file: str) -> ChunkRe
         return None
     return ChunkRecord(
         content="\n\n".join(parts),
+        element_type="chart",
         page=chart.page,
         order=order,
+        document_id=document_id,
         source_file=source_file,
         spans=[],
         bbox=chart.bbox,
@@ -376,6 +428,7 @@ def chunk_document(
     table_elements: list[TableElement],
     chart_elements: list[ChartElement],
     *,
+    document_id: str,
     source_file: str,
 ) -> list[ChunkRecord]:
     """Cut a whole parsed PDF into chunks, in document order.
@@ -399,19 +452,25 @@ def chunk_document(
     order = 0
     for page in sorted(pages, key=lambda p: p.page):
         prose, section = chunk_prose_page(
-            blocks_by_page.get(page.page, []), page, source_file=source_file, section=section
+            blocks_by_page.get(page.page, []),
+            page,
+            document_id=document_id,
+            source_file=source_file,
+            section=section,
         )
         for chunk in prose:
             chunk.order = order
             order += 1
             chunks.append(chunk)
         for table in tables_by_page.get(page.page, []):
-            for chunk in chunk_table(table, page, order, source_file=source_file):
+            for chunk in chunk_table(
+                table, page, order, document_id=document_id, source_file=source_file
+            ):
                 chunk.order = order
                 order += 1
                 chunks.append(chunk)
         for chart in charts_by_page.get(page.page, []):
-            chunk = chunk_chart(chart, order, source_file=source_file)
+            chunk = chunk_chart(chart, order, document_id=document_id, source_file=source_file)
             if chunk is not None:
                 chunk.order = order
                 order += 1
