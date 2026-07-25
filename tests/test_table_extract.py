@@ -528,3 +528,66 @@ def test_a_table_of_bare_figures_still_has_no_header() -> None:
         _rec(1, 2, "77.90"),
     ]
     assert _infer_header_row(cells) is None
+
+
+def _span(row: int, col: int, text: str, col_span: int) -> TableCellRecord:
+    """A merged TableCellRecord spanning `col_span` columns from `col`."""
+    return TableCellRecord(
+        row=row,
+        col=col,
+        row_span=1,
+        col_span=col_span,
+        text=text,
+        text_normalized=text,
+        column_header=False,
+        row_header=(col == 0),
+        page=1,
+        x0=0.0,
+        top=0.0,
+        x1=1.0,
+        bottom=1.0,
+        bbox_source="docling_native",
+    )
+
+
+def test_header_row_found_when_last_label_is_a_merged_cell() -> None:
+    # ACEP p5's shape: the header's last label ("2006E PF") is one cell merged
+    # over its two sub-columns, so it covers the final value column by col_span,
+    # not by starting in it. Reading only the start column left the row looking
+    # like it missed that column, leaving the whole table header-less (SIM-323).
+    cells = [
+        _rec(0, 0, "Property"),
+        _rec(0, 1, "Date"),
+        _rec(0, 2, "Slots"),
+        _span(0, 3, "2006E PF", col_span=2),
+        _rec(1, 0, "Stratosphere"),
+        _rec(1, 1, "1998"),
+        _rec(1, 2, "1,309"),
+        _rec(1, 3, "$197.6"),
+        _rec(1, 4, "$42.3"),
+        _rec(2, 0, "Aquarius"),
+        _rec(2, 1, "2006"),
+        _rec(2, 2, "1,021"),
+        _rec(2, 3, "$101.6"),
+        _rec(2, 4, "$9.0"),
+    ]
+    assert _infer_header_row(cells) == 0
+
+
+def test_a_wide_title_span_is_not_mistaken_for_the_header() -> None:
+    # A title merged across the value columns spans them too, but blankets them
+    # with one label where a header gives each its own. The banner guard must pick
+    # the header (row 1), not the title (row 0).
+    cells = [
+        _span(0, 0, "Property Summary", col_span=3),
+        _rec(1, 0, "Property"),
+        _rec(1, 1, "Slots"),
+        _rec(1, 2, "Rooms"),
+        _rec(2, 0, "Stratosphere"),
+        _rec(2, 1, "1,309"),
+        _rec(2, 2, "2,444"),
+        _rec(3, 0, "Aquarius"),
+        _rec(3, 1, "1,021"),
+        _rec(3, 2, "1,907"),
+    ]
+    assert _infer_header_row(cells) == 1
