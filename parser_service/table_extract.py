@@ -111,10 +111,24 @@ def _infer_header_row(cells: list[TableCellRecord]) -> int | None:
         return 0
 
     for row in sorted({c.row for c in cells}):
-        occupied = {c.col for c in cells if c.row == row and c.text.strip()}
-        if not value_cols.issubset(occupied):
+        # Honour col_span: a merged header cell ("2006E PF" over its Net Revenue /
+        # EBITDA sub-columns) covers every column it spans, not only its start
+        # column. Reading only the start column left ACEP p5 header-less -- the
+        # last value column was covered by a 2-wide merged label, so the real
+        # header row looked like it missed that column and the whole table fell
+        # through to no-header (SIM-323, second layer).
+        cover = _covering_cells(cells, row)
+        if not value_cols.issubset(cover.keys()):
             continue
-        labels = [c for c in cells if c.row == row and c.col in value_cols and c.text.strip()]
+        # A title or scale banner spans wide too, but with ONE label blanketing
+        # the row, whereas a header gives each value column its own cell. Reject a
+        # row where a single cell covers more than half the value columns: that is
+        # the banner the topmost-spanning rule must skip ("Property Summary" over
+        # eight columns), not the header (a 2-wide sub-column merge is fine).
+        widest = Counter(id(cover[col]) for col in value_cols).most_common(1)[0][1]
+        if widest > len(value_cols) // 2:
+            continue
+        labels = list({id(cover[col]): cover[col] for col in value_cols}.values())
         if all(not _looks_numeric(c.text) for c in labels):
             return row
         if all(_looks_like_year(c.text) for c in labels):
@@ -122,6 +136,18 @@ def _infer_header_row(cells: list[TableCellRecord]) -> int | None:
         # The first row spanning the value columns is already data: no header.
         return None
     return None
+
+
+def _covering_cells(cells: list[TableCellRecord], row: int) -> dict[int, TableCellRecord]:
+    """Each column mapped to the non-empty cell that covers it in `row`, honouring
+    col_span so a merged header cell counts for every column it spans, not only
+    the column it starts in."""
+    cover: dict[int, TableCellRecord] = {}
+    for cell in cells:
+        if cell.row == row and cell.text.strip():
+            for col in range(cell.col, cell.col + cell.col_span):
+                cover[col] = cell
+    return cover
 
 
 def reconstruct_bbox(
