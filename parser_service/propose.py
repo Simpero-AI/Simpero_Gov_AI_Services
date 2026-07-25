@@ -46,7 +46,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from .emit import Claim, FlagLog, emit_pdf_claim
-from .resolver import contains_flexible
+from .resolver import contains_flexible, find_exact_span
 from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
 
@@ -308,6 +308,31 @@ def _parse_with_retry(call, *, page_no: int, what: str):
         return call()
 
 
+def _is_boilerplate_block(block: TextBlockRecord, page: PageIndex) -> bool:
+    """True when a block resolves to a span that is ENTIRELY running furniture.
+
+    A page header/footer that repeats across the document is tagged is_boilerplate
+    on its char_map range by docling_parser.tag_boilerplate. A block whose whole
+    resolved span carries that flag is that furniture, even when Docling mislabelled
+    it "text" or "footnote" instead of page_header/page_footer -- the case the label
+    allowlist alone misses.
+
+    `all`, not `any` (mirroring inspect.is_boilerplate_token): a block is furniture
+    only when every character of it is flagged, so a real sentence that merely abuts
+    a footer is kept. A block that does not resolve to a unique span is kept -- fail
+    open, because an unresolved block is not evidence of furniture. This does drop a
+    repeated table FOOTNOTE that repetition flagged as furniture, footnote facts and
+    all; that recall cost is accepted to keep headers and footers out of the model's
+    input entirely.
+    """
+    span = find_exact_span(block.text_normalized, page.text, where=f"prose block p{page.page}")
+    if span is None:
+        return False
+    start, end = span
+    chars = page.char_map[start:end]
+    return bool(chars) and all(char.is_boilerplate for char in chars)
+
+
 def prose_text(blocks: list[TextBlockRecord], page: PageIndex) -> str:
     """The page's prose, as the model should see it.
 
@@ -315,19 +340,22 @@ def prose_text(blocks: list[TextBlockRecord], page: PageIndex) -> str:
     with prose in reading order, and feeding a model a table flattened into a sentence
     invites it to propose claims the table path already emits, with worse attributes.
 
-    Running headers and footers are excluded by label rather than by is_boilerplate,
-    because that flag lives on char_map ranges and these are whole blocks. The label is
-    safe in this direction: PROSE_LABELS is an allowlist, so a page_footer mislabelled as
-    prose would have to be mislabelled INTO the set, and the observed failure went the
-    other way -- real content labelled page_header.
+    Running headers and footers are excluded two ways: by label (page_header/page_footer
+    are not in PROSE_LABELS) and, for the furniture Docling mislabels as prose, by
+    is_boilerplate -- a block whose whole span is flagged repeating furniture is dropped
+    even when its label says "text". See _is_boilerplate_block for the recall trade this
+    makes on repeated footnotes.
     """
     kept: list[str] = []
     for block in blocks:
         if block.label not in PROSE_LABELS:
             continue
         text = block.text_normalized.strip()
-        if text:
-            kept.append(text)
+        if not text:
+            continue
+        if _is_boilerplate_block(block, page):
+            continue
+        kept.append(text)
     return "\n\n".join(kept)
 
 

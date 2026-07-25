@@ -233,6 +233,32 @@ def test_only_prose_blocks_are_sent() -> None:
     assert "Section 3" not in text, "a heading asserts nothing"
 
 
+def test_prose_text_drops_a_block_flagged_entirely_boilerplate() -> None:
+    # A footer Docling mislabels "text" (so the allowlist passes it) but
+    # tag_boilerplate flagged as repeating furniture: its whole span is
+    # is_boilerplate, so it must not reach the model.
+    real = "The company operates four gaming properties in Nevada."
+    footer = "Version 2.0 January 2005"
+    page = _page(real + "\n\n" + footer)
+    start = page.text.index(footer)
+    for char_box in page.char_map[start : start + len(footer)]:
+        char_box.is_boilerplate = True
+
+    out = prose_text([_block(real, "text", 0), _block(footer, "text", 1)], page)
+    assert real in out
+    assert footer not in out, "a fully-boilerplate block must not reach the model"
+
+
+def test_prose_text_keeps_a_block_only_partly_boilerplate() -> None:
+    # Exclusion is all-chars, not any-char: a real sentence that merely abuts a
+    # footer (one flagged char) is kept, so furniture removal never costs real prose.
+    text = "Real revenue grew strongly across every segment."
+    page = _page(text)
+    page.char_map[0].is_boilerplate = True
+
+    assert prose_text([_block(text, "text", 0)], page) == text
+
+
 def test_a_page_with_no_prose_costs_nothing() -> None:
     client = _StubClient([])
     result = propose_for_page(
