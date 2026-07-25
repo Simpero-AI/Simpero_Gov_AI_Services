@@ -414,6 +414,71 @@ def propose_for_page(
     return list(parsed.claims) if parsed else []
 
 
+def _emit_numeric_proposal(
+    proposal: ProposedClaim, page: PageIndex, *, file: str, flag_log: FlagLog
+) -> Claim:
+    """Emit one numeric prose proposal through the citation boundary.
+
+    Shared by the first pass (claims_from_prose) and the completeness re-pass
+    (claims_from_completeness) so both apply the identical value_text-in-quote
+    check and magnitude-guard downgrade -- a recovered claim is held to exactly
+    the same contract as an original one, never a looser one.
+    """
+    # value_text is checked against the quote rather than trusted. A token the
+    # model wrote but did not copy is exactly the restatement the quote rule
+    # exists to catch. `.strip()` first: "" and " " are substrings of almost any
+    # quote, so an unset value_text would pass the containment test vacuously.
+    named_value = proposal.value_text.strip()
+    value_text = proposal.value_text if named_value and named_value in proposal.quote else None
+    if proposal.value_text and value_text is None:
+        logger.warning(
+            "page %s: value_text %r is not inside the quote; parsing the quote instead",
+            page.page,
+            proposal.value_text,
+        )
+
+    # Nothing the model says is trusted, including that the value is a number.
+    # A count/date carrying no magnitude would make determine_scale raise and take
+    # the whole page down; typing it "text" keeps the claim, its quote and its span
+    # while recording no magnitude.
+    value_type = proposal.value_type
+    scaled_text = value_text if value_text is not None else proposal.quote
+    downgrade_flags: list[str] = []
+    if value_type != "text":
+        if not has_parseable_magnitude(scaled_text):
+            reason = "has no numeric content"
+        elif not holds_one_number(scaled_text):
+            reason = "holds more than one number and none was named as the value"
+        else:
+            reason = ""
+        if reason:
+            logger.warning(
+                "page %s: %r/%r typed %s %s in %r; emitting as text",
+                page.page,
+                proposal.entity,
+                proposal.attribute,
+                value_type,
+                reason,
+                scaled_text,
+            )
+            value_type = "text"
+            downgrade_flags.append("magnitude_unparseable")
+
+    return emit_pdf_claim(
+        proposal.entity,
+        proposal.attribute,
+        proposal.quote,
+        page,
+        value_type=value_type,
+        origin="prose",
+        file=file,
+        flag_log=flag_log,
+        value_text=value_text,
+        claim_kind="quantitative",
+        extra_flags=downgrade_flags,
+    )
+
+
 def claims_from_prose(
     blocks: list[TextBlockRecord],
     page: PageIndex,
@@ -435,88 +500,101 @@ def claims_from_prose(
     proposals = propose_for_page(
         blocks, page, entity_hint=entity_hint, file=file, model=model, client=client
     )
-    claims: list[Claim] = []
-    for proposal in proposals:
-        # value_text is checked against the quote rather than trusted. A token the
-        # model wrote but did not copy is exactly the restatement the quote rule
-        # exists to catch, and letting it through would put a magnitude in the
-        # store that came from the model instead of the page. Falling back to the
-        # quote is safe: that is what every table caller does.
-        # `.strip()` before the containment test: "" and " " are substrings of
-        # almost any quote, so an unset value_text passed this vacuously and
-        # went on to be emitted as the claim's raw -- a claim whose value reads
-        # as the empty string.
-        named_value = proposal.value_text.strip()
-        value_text = proposal.value_text if named_value and named_value in proposal.quote else None
-        if proposal.value_text and value_text is None:
-            logger.warning(
-                "page %s: value_text %r is not inside the quote; parsing the quote instead",
-                page.page,
-                proposal.value_text,
-            )
-
-        # Nothing the model says is trusted, including its claim that the value
-        # is a number. "five years", "one manager", "three" arrive typed count
-        # or date and carry no magnitude at all. determine_scale raises on those
-        # by contract -- correctly, since there is no honest ScaleResult for a
-        # value that has none -- and an escaping raise took down not the claim
-        # but the whole PAGE: 12 of 78 prose pages and 154 reference claims on
-        # the first full-document run.
-        #
-        # Typing it "text" keeps the claim, its verbatim quote, its resolved
-        # span and its bbox, and records no magnitude. A magnitude-less claim is
-        # visibly magnitude-less in the store and still counts in recall, which
-        # is this module's stance that a proposal the page cannot support
-        # becomes a measurable record rather than a silent drop. Catching the
-        # raise instead would swallow the claim AND the scale-invariant
-        # AssertionError next to it, which must stay loud.
-        value_type = proposal.value_type
-        scaled_text = value_text if value_text is not None else proposal.quote
-        downgrade_flags: list[str] = []
-        if value_type != "text":
-            if not has_parseable_magnitude(scaled_text):
-                reason = "has no numeric content"
-            elif not holds_one_number(scaled_text):
-                # A sentence holding several numbers, with no value token naming
-                # which one is meant. Parsing it anyway takes the leftmost, and
-                # the leftmost is routinely a year.
-                reason = "holds more than one number and none was named as the value"
-            else:
-                reason = ""
-            if reason:
-                logger.warning(
-                    "page %s: %r/%r typed %s %s in %r; emitting as text",
-                    page.page,
-                    proposal.entity,
-                    proposal.attribute,
-                    value_type,
-                    reason,
-                    scaled_text,
-                )
-                value_type = "text"
-                # A positive mark, so a guard downgrade is never mistaken for a
-                # qualitative claim. Both end up value_type "text"; only this
-                # flag says which one lost a magnitude it was supposed to have.
-                downgrade_flags.append("magnitude_unparseable")
-
-        claims.append(
-            emit_pdf_claim(
-                proposal.entity,
-                proposal.attribute,
-                proposal.quote,
-                page,
-                value_type=value_type,
-                origin="prose",
-                file=file,
-                flag_log=flag_log,
-                value_text=value_text,
-                claim_kind="quantitative",
-                extra_flags=downgrade_flags,
-            )
-        )
+    claims = [
+        _emit_numeric_proposal(proposal, page, file=file, flag_log=flag_log)
+        for proposal in proposals
+    ]
     resolved = sum(1 for claim in claims if claim.status != "missing")
     logger.info(
         "page %s: %d proposal(s), %d resolved to an exact span",
+        page.page,
+        len(proposals),
+        resolved,
+    )
+    return claims
+
+
+def propose_completion_for_page(
+    page: PageIndex,
+    missed: list[tuple[str, str]],
+    *,
+    entity_hint: str,
+    file: str,
+    model: str = DEFAULT_MODEL,
+    client=None,
+) -> list[ProposedClaim]:
+    """The completeness re-pass over ONE page: given (number, context) pairs the
+    first pass printed but did not claim, recover the ones that state a real fact.
+
+    Reuses `_SYSTEM` -- the numeric prose contract, byte-identical so it shares the
+    cached prefix -- and steers it with the missed-numbers list in the user
+    message. The framing lets the model DECLINE a non-fact (a page number, a
+    document id, a footnote marker, an unlabelled chart value); recovering junk is
+    worse than leaving it, and the resolver + the binding verifier are the backstop
+    for the ones it does propose.
+    """
+    if not missed:
+        return []
+    if client is None:
+        import anthropic
+
+        client = anthropic.Anthropic()
+
+    listing = "\n".join(f'- {number}   printed in: "...{context}..."' for number, context in missed)
+    user = (
+        f"Document: {file}\nPage: {page.page}\n"
+        f"Subject company (context, not a default): {entity_hint}\n\n"
+        f"A first extraction pass already ran on this page. The numbers below were "
+        f"printed on it but were NOT captured as claims. Recover only the ones that "
+        f"state a real fact the page asserts. IGNORE a number that is page furniture "
+        f"-- a page number, a document tracking id, a table-of-contents entry, a "
+        f"footnote marker -- or a plotted chart value you cannot tie to a named entity "
+        f"and attribute from the surrounding text. Recovering a non-fact is worse than "
+        f"leaving it.\n\n"
+        f"Numbers to consider:\n{listing}\n\n"
+        f"Full page text (copy every quote VERBATIM from here; it must appear once):\n"
+        f"{page.text}"
+    )
+    response = _parse_with_retry(
+        lambda: client.messages.parse(
+            model=model,
+            max_tokens=16000,
+            thinking={"type": "adaptive"},
+            system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user}],
+            output_format=PageProposals,
+        ),
+        page_no=page.page,
+        what="completeness",
+    )
+    parsed = response.parsed_output
+    return list(parsed.claims) if parsed else []
+
+
+def claims_from_completeness(
+    page: PageIndex,
+    missed: list[tuple[str, str]],
+    *,
+    entity_hint: str,
+    file: str,
+    flag_log: FlagLog,
+    model: str = DEFAULT_MODEL,
+    client=None,
+) -> list[Claim]:
+    """Recover claims for a page's coverage misses, emitted through the same
+    numeric boundary as the first pass. A recovered quote that does not resolve
+    (or resolves twice) still comes back `missing`, so the re-pass can only ADD
+    genuinely-cited claims -- it cannot lower precision by construction."""
+    proposals = propose_completion_for_page(
+        page, missed, entity_hint=entity_hint, file=file, model=model, client=client
+    )
+    claims = [
+        _emit_numeric_proposal(proposal, page, file=file, flag_log=flag_log)
+        for proposal in proposals
+    ]
+    resolved = sum(1 for claim in claims if claim.status != "missing")
+    logger.info(
+        "page %s completeness: %d proposal(s), %d resolved to an exact span",
         page.page,
         len(proposals),
         resolved,
