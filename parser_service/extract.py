@@ -336,6 +336,26 @@ def infer_value_type_for(raw: str, attribute: str) -> ValueType:
     return "currency"
 
 
+def is_confident_currency(raw: str, attribute: str) -> bool:
+    """Whether a currency value earned that type by a POSITIVE signal rather than
+    by infer_value_type_for's fallthrough default (its last line).
+
+    That default is defended by the claim that a wrong currency fails VISIBLY --
+    it ends up assumed_1x carrying a scale_assumed flag. The defense holds only
+    while no banner applies: a page-level "(in millions)" banner turns the default
+    into a SILENT 1000x, which is how a whole property-summary table of slot / room
+    / square-foot COUNTS came to be stored a million-fold too large from a financial
+    banner bleeding across it (SIM-323). So the table caller passes this to
+    determine_scale(page_header_ok=...): a value confident by an inline currency
+    mark or a metric-noun label may bind a page banner; everything else declines it
+    and falls to a flagged assumed_1x. The two positive signals mirror the two
+    positive currency branches of infer_value_type_for exactly.
+    """
+    if _CURRENCY_MARK.search(raw.strip()):
+        return True
+    return _names_an_amount(_label_tokens(attribute))
+
+
 def section_banners(table: TableRecord) -> dict[int, str]:
     """Each row's governing in-table section banner, by row index.
 
@@ -490,6 +510,7 @@ def claims_from_table(
                 file=file,
                 flag_log=flag_log,
                 section=section,
+                page_header_ok=is_confident_currency(raw, attribute),
             )
         )
     return claims

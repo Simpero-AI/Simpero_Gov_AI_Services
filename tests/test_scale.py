@@ -292,6 +292,38 @@ def test_determine_scale_page_header_found_before_value() -> None:
     assert result.flags == []
 
 
+def test_page_header_declined_when_caller_is_not_confident_currency() -> None:
+    # SIM-323: a bare count typed currency only by default must NOT bind a page
+    # banner. It falls to a flagged assumed_1x -- so 1,309 slots stays 1,309, not
+    # 1.3 billion -- and records the banner it turned down.
+    text = "($ in millions)\nSlots 1,309 total"
+    page = _page(text)
+    result = determine_scale(
+        "1,309",
+        page,
+        char_start=text.index("1,309"),
+        origin="table",
+        value_type="currency",
+        page_header_ok=False,
+    )
+    assert result.scale_source == "assumed_1x"
+    assert result.normalized == 1_309.0
+    assert result.scale_multiplier == 1.0
+    assert result.scale_context == "($ in millions)"  # the declined banner, recorded
+    assert result.flags == ["scale_assumed"]
+
+
+def test_page_header_still_binds_for_confident_currency() -> None:
+    # A value the caller vouches for (page_header_ok defaults True) scales as before.
+    text = "($ in millions)\nRevenue 13.6 total"
+    page = _page(text)
+    result = determine_scale(
+        "13.6", page, char_start=text.index("13.6"), origin="table", value_type="currency"
+    )
+    assert result.scale_source == "page_header"
+    assert result.normalized == 13_600_000.0
+
+
 def test_determine_scale_page_header_strips_trailing_whitespace_in_context() -> None:
     # The verified corpus form: the scale phrase's own line renders with a
     # trailing space before the newline. scale_context must not carry it.

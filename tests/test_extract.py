@@ -22,6 +22,7 @@ from parser_service.extract import (
     attribute_for,
     claims_from_table,
     infer_value_type_for,
+    is_confident_currency,
     section_banners,
 )
 from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
@@ -551,3 +552,15 @@ def test_ptl_income_statement_yields_valid_claims() -> None:
     revenue = next(c for c in claims if c.attribute.startswith("Revenue |"))
     assert revenue.value.normalized == 15_295_000.0
     assert revenue.value.scale_source == "page_header"
+
+
+def test_is_confident_currency_positive_signals_and_default() -> None:
+    # An inline currency mark makes it confident regardless of the label.
+    assert is_confident_currency("$13.6", "Property Summary | Stratosphere")
+    # A metric-noun label makes it confident even with no mark on the value.
+    assert is_confident_currency("15,295", "TURNOVER | Coffee Shop | YEAR 1")
+    # A bare count with neither a mark nor a metric noun is NOT confident: this is
+    # the SIM-323 case, where the value typed currency only by the fallthrough
+    # default and must not be allowed to bind a page banner.
+    assert not is_confident_currency("1,309", "Property Summary | Stratosphere")
+    assert not is_confident_currency("80,000", "Property Summary | Aquarius")
