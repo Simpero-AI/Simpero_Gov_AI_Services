@@ -21,6 +21,7 @@ from parser_service.propose import (
     ProposedAssertion,
     ProposedClaim,
     assertions_from_prose,
+    claims_from_completeness,
     claims_from_prose,
     propose_for_page,
     prose_text,
@@ -943,3 +944,49 @@ def test_a_downgrade_flag_survives_an_unresolved_quote() -> None:
     assert claims[0].status == "missing"
     assert "magnitude_unparseable" in claims[0].flags
     assert "quote_unresolved" in claims[0].flags
+
+
+def test_completeness_recovers_a_missed_number_through_the_same_boundary() -> None:
+    # A number the first pass left uncovered is put in front of the model, and a
+    # recovered proposal is emitted through the exact same citation boundary.
+    page = _page("Historical EBITDA was $242.5 for the year.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote="$242.5",
+                value_text="$242.5",
+                entity="CUS",
+                attribute="historical EBITDA",
+                value_type="currency",
+            )
+        ]
+    )
+    claims = claims_from_completeness(
+        page,
+        [("$242.5", "Historical EBITDA was $242.5 for the year.")],
+        entity_hint="CUS",
+        file="d.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+    assert len(claims) == 1 and claims[0].status == "proposed"
+    loc = claims[0].location
+    assert isinstance(loc, PdfLocation)
+    assert page.text[loc.char_start : loc.char_end] == "$242.5"
+    # the missed number was actually put in front of the model
+    assert "$242.5" in client.calls[0]["messages"][0]["content"]
+
+
+def test_completeness_makes_no_model_call_when_there_are_no_misses() -> None:
+    # A page whose numbers were all covered costs nothing: no misses, no call.
+    client = _StubClient([])
+    claims = claims_from_completeness(
+        _page("All covered here."),
+        [],
+        entity_hint="X",
+        file="d.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+    assert claims == []
+    assert client.calls == []
