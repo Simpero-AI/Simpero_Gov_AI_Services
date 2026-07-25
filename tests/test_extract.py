@@ -564,3 +564,32 @@ def test_is_confident_currency_positive_signals_and_default() -> None:
     # default and must not be allowed to bind a page banner.
     assert not is_confident_currency("1,309", "Property Summary | Stratosphere")
     assert not is_confident_currency("80,000", "Property Summary | Aquarius")
+
+
+def test_a_two_row_header_stacks_into_the_column_label_and_types_the_count() -> None:
+    # "Hotel" and "Rooms" wrap across two header rows; folded, the column label is
+    # "Hotel Rooms", whose count noun types the column count rather than currency.
+    cells = [
+        _cell(0, 0, "Property"),
+        _cell(0, 1, "Slots"),
+        _cell(0, 2, "Hotel"),
+        _cell(1, 1, "(1)"),
+        _cell(1, 2, "Rooms"),
+        _cell(2, 0, "Stratosphere"),
+        _cell(2, 1, "1,309"),
+        _cell(2, 2, "2,444"),
+    ]
+    table = TableRecord(
+        page=1,
+        num_rows=3,
+        num_cols=3,
+        cells=cells,
+        cell_provenance_ok=True,
+        header_row=0,
+        header_continuation=[1],
+        column_headers_reliable=False,
+    )
+    room = next(c for c in cells if c.row == 2 and c.col == 2)
+    attr = attribute_for(table, room)
+    assert attr is not None and attr.endswith("Hotel Rooms")
+    assert infer_value_type_for("2,444", attr) == "count"

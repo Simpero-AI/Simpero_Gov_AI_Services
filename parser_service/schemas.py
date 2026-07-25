@@ -144,6 +144,12 @@ class TableRecord(BaseModel):
     # header row exists to key off) — consumers must then fall back to
     # positional/section context rather than inventing column names.
     header_row: int | None
+    # Rows BELOW header_row that continue it rather than start the data — a
+    # second header line ("Date"/"Acquired", "Hotel"/"Rooms"). Empty for the
+    # common single-row header. Together with header_row these are the header
+    # BLOCK: skipped as data, and their cells stack into each column's label so a
+    # count noun on the continuation line ("Rooms") is not lost.
+    header_continuation: list[int] = Field(default_factory=list)
     # True only when Docling's column_header flags agree with the structurally
     # inferred header row. False means the flags are untrustworthy for this
     # table and must be ignored.
