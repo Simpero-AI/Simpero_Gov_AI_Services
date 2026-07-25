@@ -23,7 +23,9 @@ from parser_service.schemas import (
 )
 from parser_service.table_extract import (
     _build_table_record,
+    _header_continuation,
     _infer_header_row,
+    _value_columns,
     extract_tables,
     reconstruct_bbox,
     tables_on_page,
@@ -591,3 +593,22 @@ def test_a_wide_title_span_is_not_mistaken_for_the_header() -> None:
         _rec(3, 2, "1,907"),
     ]
     assert _infer_header_row(cells) == 1
+
+
+def test_header_continuation_detects_a_wrapped_second_header_line() -> None:
+    # "Hotel"/"Rooms" and a footnote marker wrap onto a second header line; it
+    # must read as header continuation, not as the first data row.
+    cells = [
+        _rec(0, 0, "Property"),
+        _rec(0, 1, "Slots"),
+        _rec(0, 2, "Hotel"),
+        _rec(1, 1, "(1)"),
+        _rec(1, 2, "Rooms"),
+        _rec(2, 0, "Stratosphere"),
+        _rec(2, 1, "1,309"),
+        _rec(2, 2, "2,444"),
+        _rec(3, 0, "Aquarius"),
+        _rec(3, 1, "1,021"),
+        _rec(3, 2, "1,907"),
+    ]
+    assert _header_continuation(cells, 0, _value_columns(cells)) == [1]

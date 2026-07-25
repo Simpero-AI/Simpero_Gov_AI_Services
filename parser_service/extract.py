@@ -81,6 +81,38 @@ def _cell_at(table: TableRecord, row: int, col: int) -> TableCellRecord | None:
     return next((c for c in table.cells if c.row == row and c.col == col), None)
 
 
+def _covering_cell_at(table: TableRecord, row: int, col: int) -> TableCellRecord | None:
+    """The cell in `row` whose column span covers `col`, honouring col_span so a
+    merged header label is found from every column it spans, not only its start."""
+    return next(
+        (c for c in table.cells if c.row == row and c.col <= col < c.col + c.col_span), None
+    )
+
+
+def _header_rows(table: TableRecord) -> list[int]:
+    """The header BLOCK: the inferred header row and any continuation rows below it."""
+    if table.header_row is None:
+        return []
+    return [table.header_row, *table.header_continuation]
+
+
+def _column_header(table: TableRecord, col: int) -> str:
+    """This column's label: the header block's cells stacked top to bottom
+    ("Hotel" + "Rooms" -> "Hotel Rooms"), col_span honoured so a merged label
+    reaches every column it spans. Empty when the table has no header."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    for row in _header_rows(table):
+        cell = _covering_cell_at(table, row, col)
+        if cell is None:
+            continue
+        text = cell.text_normalized.strip()
+        if text and id(cell) not in seen:
+            seen.add(id(cell))
+            parts.append(text)
+    return " ".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # value_type vocabularies.
 #
@@ -387,8 +419,9 @@ def section_banners(table: TableRecord) -> dict[int, str]:
 
     governing: dict[int, str] = {}
     current: str | None = None
+    header_block = set(_header_rows(table))
     for row in sorted(rows):
-        if row == table.header_row:
+        if row in header_block:
             continue
         cells = rows[row]
         label = cells.get(_LABEL_COL, "")
@@ -451,13 +484,14 @@ def attribute_for(
     # is the signal worth trusting.
     parts = [banner, label] if banner else [label]
 
-    if table.header_row is None:
+    # The column label is the whole header BLOCK stacked, not one cell: a header
+    # that wrapped onto a second line ("Hotel"/"Rooms") keeps both, so the count
+    # noun on the continuation line survives into the attribute and its column of
+    # figures types as a count rather than defaulting to currency.
+    column_header = _column_header(table, cell.col)
+    if not column_header:
         return " | ".join(parts)
-
-    header_cell = _cell_at(table, table.header_row, cell.col)
-    if header_cell is None or not header_cell.text_normalized.strip():
-        return " | ".join(parts)
-    return " | ".join([*parts, header_cell.text_normalized.strip()])
+    return " | ".join([*parts, column_header])
 
 
 def claims_from_table(
@@ -487,9 +521,10 @@ def claims_from_table(
     rows that were previously dropped for having nothing to call them.
     """
     banners = section_banners(table)
+    header_block = set(_header_rows(table))
     claims: list[Claim] = []
     for cell in sorted(table.cells, key=lambda c: (c.row, c.col)):
-        if cell.col == _LABEL_COL or cell.row == table.header_row:
+        if cell.col == _LABEL_COL or cell.row in header_block:
             continue
         raw = cell.text_normalized.strip()
         if not raw or not _is_a_figure(raw):

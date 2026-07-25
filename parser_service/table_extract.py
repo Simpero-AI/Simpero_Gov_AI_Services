@@ -150,6 +150,39 @@ def _covering_cells(cells: list[TableCellRecord], row: int) -> dict[int, TableCe
     return cover
 
 
+def _header_continuation(
+    cells: list[TableCellRecord], header_row: int | None, value_cols: set[int]
+) -> list[int]:
+    """Rows below `header_row` that continue the header rather than start the data.
+
+    A header wraps onto a second line -- "Date"/"Acquired", "Hotel"/"Rooms",
+    "2006E PF"/"Net Revenue" -- and that line must read as header, not data: its
+    footnote markers would otherwise become claims, and its count noun ("Rooms")
+    would be lost from the column label. A row is a continuation when it carries
+    LABEL text (non-numeric) in the value columns and does NOT fill a majority of
+    them with figures. The first row that fills a majority is the data, and the
+    header block ends there -- so a sparse subtotal, whose figures sit in a couple
+    of columns but whose label is in the label column, does not extend the header.
+    """
+    if header_row is None or not value_cols:
+        return []
+    continuation: list[int] = []
+    for row in sorted({c.row for c in cells if c.row > header_row}):
+        numeric = {
+            c.col for c in cells if c.row == row and c.col in value_cols and _looks_numeric(c.text)
+        }
+        if len(numeric) > len(value_cols) // 2:
+            break
+        labelled = any(
+            c.row == row and c.col in value_cols and c.text.strip() and not _looks_numeric(c.text)
+            for c in cells
+        )
+        if not labelled:
+            break
+        continuation.append(row)
+    return continuation
+
+
 def reconstruct_bbox(
     text_normalized: str, page_index: PageIndex
 ) -> tuple[float, float, float, float] | None:
@@ -213,6 +246,7 @@ def _build_table_record(table: TableItem, page_index: PageIndex | None) -> Table
         )
 
     header_row = _infer_header_row(cells)
+    header_continuation = _header_continuation(cells, header_row, _value_columns(cells))
     # Docling's flags are only trustworthy when they mark exactly the row that
     # structure says is the header. Anything else (no header, or flags on a data
     # row) means consumers must ignore column_header for this table.
@@ -245,6 +279,7 @@ def _build_table_record(table: TableItem, page_index: PageIndex | None) -> Table
         cell_provenance_ok=provenance_ok,
         reconstructed_cells=reconstructed,
         header_row=header_row,
+        header_continuation=header_continuation,
         column_headers_reliable=column_headers_reliable,
     )
 
