@@ -336,6 +336,7 @@ def emit_pdf_claim(
     extra_flags: list[str] | None = None,
     document_id: str | None = None,
     document_name: str | None = None,
+    page_header_ok: bool = True,
     stage: str = _STAGE_CLAIM_EMISSION,
 ) -> Claim:
     """Emit one PDF-sourced claim for `quote` on `page`. Fails closed to
@@ -441,6 +442,7 @@ def emit_pdf_claim(
             origin=origin,
             table=table,
             cell=cell,
+            page_header_ok=page_header_ok,
         )
         flags.extend(scale_result.flags)
         if (
@@ -520,6 +522,7 @@ def emit_pdf_table_cell_claim(
     section: str | None = None,
     document_id: str | None = None,
     document_name: str | None = None,
+    page_header_ok: bool = True,
     stage: str = _STAGE_CLAIM_EMISSION,
 ) -> Claim:
     """Emit a fact for one table cell. A cell with no resolvable bbox (neither
@@ -563,6 +566,7 @@ def emit_pdf_table_cell_claim(
         section=section,
         document_id=document_id,
         document_name=document_name,
+        page_header_ok=page_header_ok,
         stage=stage,
     )
 

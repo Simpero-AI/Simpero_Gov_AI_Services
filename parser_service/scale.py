@@ -535,6 +535,7 @@ def determine_scale(
     origin: ValueOrigin,
     table: TableRecord | None = None,
     cell: TableCellRecord | None = None,
+    page_header_ok: bool = True,
 ) -> ScaleResult:
     """Resolve one numeric claim's scale, per the module's resolution order.
 
@@ -556,6 +557,11 @@ def determine_scale(
     before it, matching the ticket's "page-level scale phrase before the
     value". `table`/`cell` are the DS-W3-2 table record and the value's own
     cell, for the column-header walk; a prose caller supplies neither.
+
+    `page_header_ok` gates the page-banner binding on the caller's confidence
+    that the value is really money. It defaults True (prose and every existing
+    caller unaffected); the table caller passes False for a value that typed
+    currency only by default, so a page banner cannot silently scale it (SIM-323).
     """
     if origin == "prose" and (table is not None or cell is not None):
         raise ValueError("origin='prose' contradicts a supplied table/cell")
@@ -593,9 +599,15 @@ def determine_scale(
             )
 
     # Looked up unconditionally so that a DECLINED banner still reaches the
-    # audit trail; only the BINDING is gated.
+    # audit trail; only the BINDING is gated. `page_header_ok` is the second gate
+    # beside origin: a value that is currency only by infer_value_type_for's
+    # fallthrough default -- no currency mark, no metric-noun label -- must not
+    # bind a page banner, or a financial "(in millions)" caption silently scales
+    # an adjacent table of operating counts a million-fold (SIM-323). A column
+    # header, being the value's own column, is trusted regardless and is applied
+    # above this gate.
     page_match = _page_header_scale(page.text, char_start)
-    if page_match is not None and origin == "table":
+    if page_match is not None and origin == "table" and page_header_ok:
         multiplier, currency, context = page_match
         return ScaleResult(
             raw=raw,
@@ -609,7 +621,9 @@ def determine_scale(
     # assumed_1x now records what it turned down, so "there was no banner on
     # this page" and "there was one and I was not entitled to it" never collapse
     # into the same claim. emit.py already logs scale_context as the flag's
-    # detail, so the declined-banner population becomes queryable for free.
+    # detail, so a declined banner is queryable for free -- an assumed_1x with a
+    # non-null scale_context is a value that saw a banner and refused it, whether
+    # refused for prose-origin or (SIM-323) for low currency-confidence.
     return ScaleResult(
         raw=raw,
         normalized=number * 1.0,
