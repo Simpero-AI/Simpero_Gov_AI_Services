@@ -16,7 +16,9 @@ from parser_service.schemas import BBox, CharBox, PageIndex, TableCellRecord, Te
 
 
 def _char(ch: str, page: int = 1, boiler: bool = False) -> CharBox:
-    return CharBox(char=ch, x0=0, top=0, x1=1, bottom=1, page=page, is_boilerplate=boiler, precision="word")
+    return CharBox(
+        char=ch, x0=0, top=0, x1=1, bottom=1, page=page, is_boilerplate=boiler, precision="word"
+    )
 
 
 def _page(text: str, *, boilerplate_substr: str | None = None, page: int = 1) -> PageIndex:
@@ -35,24 +37,49 @@ def _page(text: str, *, boilerplate_substr: str | None = None, page: int = 1) ->
 
 def _block(order: int, label: str, text: str, page: int = 1) -> TextBlockRecord:
     return TextBlockRecord(
-        page=page, order=order, label=label, text=text, text_normalized=text,
-        x0=0, top=float(order), x1=10, bottom=float(order) + 1, bbox_source="docling_native",
+        page=page,
+        order=order,
+        label=label,
+        text=text,
+        text_normalized=text,
+        x0=0,
+        top=float(order),
+        x1=10,
+        bottom=float(order) + 1,
+        bbox_source="docling_native",
     )
 
 
 def _cell(row: int, col: int, text: str, *, header: bool = False, page: int = 1) -> TableCellRecord:
     return TableCellRecord(
-        row=row, col=col, row_span=1, col_span=1, text=text, text_normalized=text,
-        column_header=header, row_header=False, page=page,
-        x0=float(col), top=float(row), x1=float(col) + 1, bottom=float(row) + 1,
+        row=row,
+        col=col,
+        row_span=1,
+        col_span=1,
+        text=text,
+        text_normalized=text,
+        column_header=header,
+        row_header=False,
+        page=page,
+        x0=float(col),
+        top=float(row),
+        x1=float(col) + 1,
+        bottom=float(row) + 1,
         bbox_source="docling_native",
     )
 
 
 def _table(cells: list[TableCellRecord]) -> TableElement:
     return TableElement(
-        page=1, bbox=None, cells=cells, cell_provenance_ok=True, ragged_table_rows=False,
-        scale_multiplier=None, scale_unit=None, scale_context=None, flags=[],
+        page=1,
+        bbox=None,
+        cells=cells,
+        cell_provenance_ok=True,
+        ragged_table_rows=False,
+        scale_multiplier=None,
+        scale_unit=None,
+        scale_context=None,
+        flags=[],
     )
 
 
@@ -76,7 +103,7 @@ def test_boilerplate_excluded_by_label_and_by_flag() -> None:
     page = _page(text, boilerplate_substr="CONFIDENTIAL DRAFT")
     blocks = [
         _block(0, "text", "Real sentence one."),
-        _block(1, "page_footer", "CONFIDENTIAL DRAFT"),   # excluded by label
+        _block(1, "page_footer", "CONFIDENTIAL DRAFT"),  # excluded by label
         _block(2, "text", "Real sentence two."),
     ]
     chunks = chunk_document([page], blocks, [], [], source_file="d.pdf")
@@ -110,8 +137,10 @@ def test_prose_span_round_trips_to_page_text() -> None:
 
 def test_table_kept_whole_as_structured_content_not_prose() -> None:
     cells = [
-        _cell(0, 0, "Metric", header=True), _cell(0, 1, "2005", header=True),
-        _cell(1, 0, "Revenue"), _cell(1, 1, "15,295"),
+        _cell(0, 0, "Metric", header=True),
+        _cell(0, 1, "2005", header=True),
+        _cell(1, 0, "Revenue"),
+        _cell(1, 1, "15,295"),
     ]
     page = _page("Metric | 2005\nRevenue | 15,295")
     chunks = chunk_table(_table(cells), page, 0, source_file="d.pdf")
@@ -152,8 +181,10 @@ def test_prose_overlap_repeats_boundary_content() -> None:
 
 def test_chart_becomes_its_own_chunk_cited_by_bbox() -> None:
     chart = ChartElement(
-        page=3, bbox=BBox(x0=0, top=0, x1=100, bottom=100, page=3),
-        caption_text="Revenue by segment", surrounding_text="FY2005 FY2006",
+        page=3,
+        bbox=BBox(x0=0, top=0, x1=100, bottom=100, page=3),
+        caption_text="Revenue by segment",
+        surrounding_text="FY2005 FY2006",
         flags=["chart_data_not_extracted"],
     )
     page = _page("dummy", page=3)
