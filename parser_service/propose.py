@@ -147,11 +147,14 @@ AssertionClass = Literal[
     "plan_or_commitment",
 ]
 
-# Enforced in code after parsing, never as a grammar `max_length`. A cap in the
-# output grammar turns an over-long response into a ValidationError that escapes
-# the call and destroys the whole page -- the exact blast radius already fixed
-# twice on this path.
-MAX_ASSERTIONS_PER_PAGE = 3
+# A generous runaway backstop, not a precision limit: a page states as many
+# distinct qualitative assertions as it states, and a dense risk or financials
+# page legitimately clears the old cap of three. The bound survives only so a
+# degenerate response cannot stand dozens of restatements up as claims. It stays
+# in code, never as a grammar `max_length`, because a cap in the output grammar
+# turns an over-long response into a ValidationError that escapes the call and
+# destroys the whole page -- the exact blast radius already fixed twice here.
+MAX_ASSERTIONS_PER_PAGE = 15
 
 
 _ASSERTION_SYSTEM = """\
@@ -241,9 +244,12 @@ requirement, key person, single supplier, or condition the plan rests on.
 mechanism: entering a segment, expansion, rollout, funding or exit intention. Not an \
 outcome it merely hopes for.
 
-AT MOST THREE claims from this page, and AT MOST ONE per assertion_class. Order them most \
-substantive first -- the ones past the third are discarded, so a page returning six has \
-chosen which three it loses by the order it wrote them in.
+Extract every DISTINCT checkable assertion the page makes. Do not hold yourself to a \
+handful, and do not drop a claim because the page already stated another of the same \
+assertion_class -- a risk page can carry several distinct risk_or_dependency and each \
+is its own claim. What you must not do is restate one assertion as several: one claim \
+per distinct point, not one per sentence that repeats it. Order them most substantive \
+first.
 
 You are not summarising the page. Most CIM pages yield none or one, and a page whose prose \
 asserts nothing checkable yields NONE -- that is a correct answer, not a failure. Prefer \
@@ -658,27 +664,21 @@ def propose_assertions_for_page(
 
 
 def _within_budget(proposals: list[ProposedAssertion]) -> list[ProposedAssertion]:
-    """At most one per assertion_class, then at most MAX_ASSERTIONS_PER_PAGE.
+    """Truncate to MAX_ASSERTIONS_PER_PAGE, keeping model order.
 
     Enforced here rather than in the output grammar on purpose: a grammar cap
     turns an over-long response into a ValidationError that escapes the call and
     takes the whole page with it, which is the blast radius this module has
     already had to close twice. Model order is kept -- the prompt asks for most
-    substantive first, so a page that overruns chooses what it loses.
+    substantive first, so a page that overruns the backstop chooses what it loses.
 
-    One-per-class is the sharper of the two bounds: it stops a competition page
-    returning three restatements of the same competitive_position.
+    There is deliberately no per-assertion_class bound. Distinct assertions of
+    one class are distinct claims, and collapsing them to one was silently
+    dropping real recall on dense risk and competition pages. Suppressing a
+    restatement of a single assertion is the model's job (the prompt says so),
+    not the budget's; the only bound that remains is the runaway backstop.
     """
-    seen: set[str] = set()
-    kept: list[ProposedAssertion] = []
-    for p in proposals:
-        if p.assertion_class in seen:
-            continue
-        seen.add(p.assertion_class)
-        kept.append(p)
-        if len(kept) == MAX_ASSERTIONS_PER_PAGE:
-            break
-    return kept
+    return proposals[:MAX_ASSERTIONS_PER_PAGE]
 
 
 def assertions_from_prose(

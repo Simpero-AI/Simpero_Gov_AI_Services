@@ -766,25 +766,58 @@ def test_the_subject_company_may_be_the_entity_without_being_named() -> None:
     assert claims[0].entity == "BarWash"
 
 
-def test_the_page_budget_is_enforced_in_code_not_in_the_grammar() -> None:
+# Distinct, prefix-free quote tokens for the budget tests: none is a substring
+# of another, so each resolves to exactly one span and the count under test is
+# never confounded by a fail-closed missing.
+_NATO = [
+    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+    "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+    "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey",
+    "xray", "yankee", "zulu",
+]  # fmt: skip
+
+
+def test_an_overlong_page_truncates_in_code_not_in_the_grammar() -> None:
     # A cap in the output grammar makes an over-long response a ValidationError
-    # that escapes the call and destroys the page -- the blast radius this
-    # module has already had to close three times. Six proposals must yield
-    # three claims, not an exception.
-    text = "alpha one. beta two. gamma three. delta four. epsilon five. zeta six."
+    # that escapes the call and destroys the page -- the blast radius this module
+    # has already had to close three times. A response past the backstop must
+    # truncate to the backstop, in model order, and never raise.
+    words = _NATO[: MAX_ASSERTIONS_PER_PAGE + 3]
+    text = ". ".join(words) + "."
     page = _page(text)
-    classes = [
-        "operating_model",
-        "operating_model",
-        "related_party",
-        "market_definition",
-        "risk_or_dependency",
-        "commercial_terms",
+    proposals = [_assertion(quote=w, subject_text=w, predicate_text=w, entity=w) for w in words]
+    claims = assertions_from_prose(
+        [_block(text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(proposals),
+    )
+    assert len(claims) == MAX_ASSERTIONS_PER_PAGE, "truncated to the backstop, not raised"
+    assert [c.entity for c in claims] == words[:MAX_ASSERTIONS_PER_PAGE], "model order kept"
+
+
+def test_distinct_assertions_of_one_class_are_all_kept() -> None:
+    # The per-assertion_class bound used to collapse these to one, silently
+    # costing recall on dense risk and competition pages. Distinct assertions are
+    # distinct claims even when they share a class.
+    quotes = [
+        "alpha holds a licence",
+        "bravo depends on a single supplier",
+        "charlie renews annually",
     ]
-    words = ["alpha one", "beta two", "gamma three", "delta four", "epsilon five", "zeta six"]
+    text = ". ".join(quotes) + "."
+    page = _page(text)
     proposals = [
-        _assertion(quote=w, subject_text=w, predicate_text=w, entity=w, assertion_class=c)
-        for w, c in zip(words, classes, strict=True)
+        _assertion(
+            quote=q,
+            subject_text=q,
+            predicate_text=q,
+            entity=q,
+            assertion_class="risk_or_dependency",
+        )
+        for q in quotes
     ]
     claims = assertions_from_prose(
         [_block(text)],
@@ -794,13 +827,8 @@ def test_the_page_budget_is_enforced_in_code_not_in_the_grammar() -> None:
         flag_log=FlagLog(),
         client=_StubAssertionClient(proposals),
     )
-
-    assert len(claims) == MAX_ASSERTIONS_PER_PAGE, "cap enforced"
-    assert [c.assertion_class for c in claims] == [
-        "operating_model",
-        "related_party",
-        "market_definition",
-    ], "one per class, model order preserved"
+    assert len(claims) == 3, "same-class assertions are no longer collapsed to one"
+    assert {c.assertion_class for c in claims} == {"risk_or_dependency"}
 
 
 def test_a_malformed_response_is_retried_rather_than_costing_the_page() -> None:
@@ -863,23 +891,25 @@ def test_a_guard_downgrade_is_distinguishable_from_a_qualitative_claim() -> None
     assert "magnitude_unparseable" in downgraded.flags
 
 
-def test_a_rejected_proposal_does_not_consume_its_classs_budget_slot() -> None:
-    """Reversed, the budget ran first: a proposal the guards were about to
-    reject still took its class's slot and displaced a valid one behind it.
-    Recall lost order-dependently, differently on every run.
+def test_a_rejected_proposal_does_not_consume_a_backstop_slot() -> None:
+    """Guards run before the backstop, not after. Reversed, a proposal the
+    containment guards are about to reject would still occupy one of the
+    MAX_ASSERTIONS_PER_PAGE slots and drop a valid claim past the bound -- recall
+    lost order-dependently, differently on every run. The budget must choose
+    among claims that can actually be emitted.
     """
-    text = "For planning issues, dry cleaning facilities will not be available on-site."
+    valid = _NATO[:MAX_ASSERTIONS_PER_PAGE]
+    text = ". ".join(valid) + "."
     page = _page(text)
     proposals = [
-        # rejected -- predicate is not in the quote
-        _assertion(predicate_text="will be outsourced to an industry player"),
-        # valid, same class, sitting behind it
+        # rejected, and first in line -- predicate is not readable in the quote
         _assertion(
-            quote="dry cleaning facilities will not be available on-site",
-            subject_text="dry cleaning facilities",
-            predicate_text="will not be available on-site",
-            entity="dry cleaning facilities",
+            quote=valid[0],
+            subject_text=valid[0],
+            predicate_text="outsourced to an industry player",
+            entity=valid[0],
         ),
+        *(_assertion(quote=w, subject_text=w, predicate_text=w, entity=w) for w in valid),
     ]
     claims = assertions_from_prose(
         [_block(text)],
@@ -889,7 +919,9 @@ def test_a_rejected_proposal_does_not_consume_its_classs_budget_slot() -> None:
         flag_log=FlagLog(),
         client=_StubAssertionClient(proposals),
     )
-    assert len(claims) == 1, "the valid proposal behind the rejected one survives"
+    assert len(claims) == MAX_ASSERTIONS_PER_PAGE, (
+        "every valid claim survives; the rejected proposal took no slot"
+    )
 
 
 def test_a_missing_qualitative_claim_is_still_marked_qualitative() -> None:
