@@ -281,9 +281,18 @@ jobs:
       # already succeeded - so the first attempt after a fresh droplet fails
       # with a TLS/cert error, which is the *correct* failure, not a
       # misconfiguration. Bare paths, no /api prefix - this service has none.
+      #
+      # Generous retry budget (up to ~2 minutes): docling loads its ML
+      # layout/OCR models at import time, which blocks uvicorn from binding
+      # until it finishes. Every deploy recreates the parser container from a
+      # fresh image tag, so this slow cold start - and the risk of the health
+      # check outrunning it - happens on every deploy, not just the first one
+      # against a brand-new droplet. --retry-connrefused is explicit here
+      # since that's the exact failure mode this is guarding against (Caddy
+      # up and reachable, parser not listening yet).
       - name: Health check
         run: |
-          curl --fail -L --retry 5 --retry-delay 5 \
+          curl --fail -L --retry 12 --retry-delay 10 --retry-connrefused \
             --resolve "${{ secrets.PARSER_HOSTNAME }}:443:${{ secrets.DROPLET_HOST }}" \
             --resolve "${{ secrets.PARSER_HOSTNAME }}:80:${{ secrets.DROPLET_HOST }}" \
             "https://${{ secrets.PARSER_HOSTNAME }}/health"
@@ -295,7 +304,9 @@ jobs:
           # fail the job loudly. Don't rely on curl --fail for this call:
           # under --fail, a 401 response body is discarded and the exit code
           # alone can't distinguish 401 from 503, so capture and compare the
-          # status code explicitly instead.
+          # status code explicitly instead. No extra retry budget needed here
+          # - the /health call above already waited out the slow cold start,
+          # so parser is confirmed up by the time this runs.
           status=$(curl -s -o /dev/null -w "%{http_code}" -L --retry 5 --retry-delay 5 \
             --resolve "${{ secrets.PARSER_HOSTNAME }}:443:${{ secrets.DROPLET_HOST }}" \
             --resolve "${{ secrets.PARSER_HOSTNAME }}:80:${{ secrets.DROPLET_HOST }}" \
