@@ -1,0 +1,292 @@
+name: Deploy
+
+# Manual pipeline: CI reuse -> image build/push -> optional gated Terraform
+# plan/apply -> SSH deploy. Which commit deploys is chosen via the native
+# "Use workflow from" branch/tag selector (no custom `ref` input) — every job
+# below references github.sha directly, which is safe because a
+# workflow_call'd job (the `ci` job) shares the caller's github context, so
+# `ci`'s github.sha already equals whatever ref was picked in that selector.
+# See docs/plans/parser-droplet-deployment.md §4 for the full reasoning.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+      run_terraform:
+        description: "Run terraform-plan/terraform-apply (provision/update infra)"
+        type: boolean
+        default: false
+
+# Per-environment group — prevents two overlapping dispatches (or one
+# double-click) against the *same* environment from racing either Terraform
+# or `docker compose up -d` against the same droplet. Not cancel-in-progress:
+# a half-applied Terraform run or a half-restarted compose stack should
+# finish, not be killed mid-way.
+#
+# Shared group name with destroy.yml (not github.workflow-based, which would
+# differ per file) — a deploy and a destroy against the same environment can
+# never run concurrently.
+concurrency:
+  group: infra-${{ inputs.environment }}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  docker-publish:
+    name: Build + push image
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR rejects uppercase image names. github.repository_owner may have
+      # mixed case ("Simpero-AI") - must be lowercased explicitly, not just
+      # interpolated. Must match the hardcoded lowercase owner in
+      # docker-compose.prod.yml (kept static there rather than dynamic, since
+      # a real repo-owner change - e.g. an org transfer - needs a deliberate
+      # look at both places anyway, not a silent auto-follow).
+      - name: Compute lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/simpero-gov-ai-services" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  terraform-plan:
+    name: Terraform plan
+    needs: docker-publish
+    if: ${{ inputs.run_terraform }}
+    runs-on: ubuntu-latest
+    # Ungated "-plan" Environment, not the gated one — terraform-plan needs
+    # environment-specific credentials (the Spaces key, to read/lock the
+    # right state file) while needing to stay reviewable *before* approval,
+    # which is the whole point of a plan step. Must use the object `name:`
+    # form — the string shorthand doesn't reliably resolve a dynamic value
+    # here. See docs/plans/parser-droplet-deployment.md §4.
+    environment:
+      name: ${{ inputs.environment }}-plan
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+      TF_VAR_do_token: ${{ secrets.TF_VAR_do_token }}
+      TF_VAR_ssh_public_key: ${{ secrets.TF_VAR_ssh_public_key }}
+      TF_VAR_environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+
+      - name: terraform init
+        run: terraform init -backend-config=backend-${{ inputs.environment }}.hcl
+
+      - name: terraform plan
+        run: terraform plan -var-file=${{ inputs.environment }}.tfvars -out=tfplan
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: terraform/tfplan
+
+  terraform-apply:
+    name: Terraform apply
+    needs: terraform-plan
+    if: ${{ inputs.run_terraform }}
+    runs-on: ubuntu-latest
+    # The gated Environment (Vansh as required reviewer) — object `name:`
+    # form, same reasoning as terraform-plan above.
+    environment:
+      name: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+      TF_VAR_do_token: ${{ secrets.TF_VAR_do_token }}
+      TF_VAR_ssh_public_key: ${{ secrets.TF_VAR_ssh_public_key }}
+      TF_VAR_environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: terraform
+
+      # Re-init needed again in this job — fresh runner, no state from the
+      # terraform-plan job carries over except the downloaded plan file.
+      - name: terraform init
+        run: terraform init -backend-config=backend-${{ inputs.environment }}.hcl
+
+      # Applies the exact downloaded plan — never a fresh one — so what got
+      # approved via this environment's gate is exactly what runs.
+      - name: terraform apply
+        run: terraform apply tfplan
+
+      # Informational only — this does not set DROPLET_HOST for you, still a
+      # manual copy into the GitHub secret.
+      - name: Show droplet IP
+        run: |
+          IP=$(terraform output -raw droplet_ip)
+          echo "Droplet IP: $IP"
+          echo "Droplet IP: $IP" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to droplet
+    needs: [docker-publish, terraform-apply]
+    # always() is load-bearing: without it, GH implicitly ANDs in success(),
+    # which would block this job whenever terraform-apply is skipped (the
+    # routine run_terraform=false case).
+    #
+    # Checks inputs.run_terraform directly rather than inferring intent from
+    # terraform-apply's result — terraform-apply shows 'skipped' for two
+    # different reasons that look identical from here: run_terraform was
+    # false (fine), or terraform-plan actually FAILED, which cascades
+    # terraform-apply to 'skipped' too (its own `if` has no always(), so it
+    # inherits the implicit success()-of-needs gate). Tolerating any
+    # 'skipped' result unconditionally would let deploy proceed after a
+    # failed terraform-plan — exactly the "one job breaks, workflow should
+    # stop" case this must not allow. See docs/plans/parser-droplet-deployment.md §4.
+    if: ${{ always() && needs.docker-publish.result == 'success' && (inputs.run_terraform == false || needs.terraform-apply.result == 'success') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    # packages: read — GITHUB_TOKEN needs this to authenticate the droplet's
+    # pull below. No PAT, no bot account, no GitHub App: GHCR does NOT accept
+    # GitHub App installation tokens, but it does accept the workflow's own
+    # GITHUB_TOKEN, same as docker-publish already uses to push. Minted
+    # fresh for this job, used immediately in the same SSH script below —
+    # well within its validity window.
+    permissions:
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Copy compose file + Caddyfile to droplet
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: deploy
+          key: ${{ secrets.DROPLET_SSH_PRIVATE_KEY }}
+          source: "docker-compose.prod.yml,Caddyfile"
+          target: "/opt/simpero"
+
+      # .env is generated here from this environment's GitHub Environment
+      # secrets, not hand-maintained on the droplet — see
+      # docs/plans/parser-droplet-deployment.md §1.9. Overwritten on every
+      # deploy, so these secrets are now the single source of truth, not the
+      # file on disk. Quoted heredoc ('EOF') so secret values are written
+      # literally — no shell expansion of $, backticks, etc. inside them.
+      - name: Write .env from GitHub secrets
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: deploy
+          key: ${{ secrets.DROPLET_SSH_PRIVATE_KEY }}
+          script: |
+            cat > /opt/simpero/.env <<'SIMPERO_ENV_EOF'
+            PARSER_API_KEY=${{ secrets.PARSER_API_KEY }}
+            PARSER_HOSTNAME=${{ secrets.PARSER_HOSTNAME }}
+            PARSER_SPACES_BUCKET=${{ secrets.PARSER_SPACES_BUCKET }}
+            PARSER_SPACES_REGION=${{ secrets.PARSER_SPACES_REGION }}
+            PARSER_SPACES_ENDPOINT_URL=${{ secrets.PARSER_SPACES_ENDPOINT_URL }}
+            PARSER_SPACES_ACCESS_KEY_ID=${{ secrets.PARSER_SPACES_ACCESS_KEY_ID }}
+            PARSER_SPACES_SECRET_ACCESS_KEY=${{ secrets.PARSER_SPACES_SECRET_ACCESS_KEY }}
+            PARSER_SPACES_KEY_PREFIX=${{ secrets.PARSER_SPACES_KEY_PREFIX }}
+            PARSER_VALKEY_URL=${{ secrets.VALKEY_URL }}
+            PARSER_RESULTS_KEY_PREFIX=${{ secrets.PARSER_RESULTS_KEY_PREFIX }}
+            SIMPERO_ENV_EOF
+            chmod 600 /opt/simpero/.env
+
+      # No migration step, no alembic — this service has no database.
+      - name: Pull + restart
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: deploy
+          key: ${{ secrets.DROPLET_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd /opt/simpero
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            IMAGE_TAG=${{ github.sha }} docker compose -f docker-compose.prod.yml pull
+            IMAGE_TAG=${{ github.sha }} docker compose -f docker-compose.prod.yml up -d
+
+      # From the runner, not over SSH. Caddy matches purely on Host header /
+      # TLS SNI, so a plain request to the bare DROPLET_HOST IP gets a 404
+      # regardless of DNS. --resolve pins PARSER_HOSTNAME to DROPLET_HOST for
+      # these calls, forcing the correct Host header AND TLS SNI without
+      # needing real DNS to resolve at this point. It still needs DNS to
+      # have been live at some point before this, though: Caddy can only
+      # have a valid cert to present if Let's Encrypt's own validation
+      # request (made over the real internet, unaffected by --resolve here)
+      # already succeeded - so the first attempt after a fresh droplet fails
+      # with a TLS/cert error, which is the *correct* failure, not a
+      # misconfiguration. Bare paths, no /api prefix - this service has none.
+      - name: Health check
+        run: |
+          curl --fail -L --retry 5 --retry-delay 5 \
+            --resolve "${{ secrets.PARSER_HOSTNAME }}:443:${{ secrets.DROPLET_HOST }}" \
+            --resolve "${{ secrets.PARSER_HOSTNAME }}:80:${{ secrets.DROPLET_HOST }}" \
+            "https://${{ secrets.PARSER_HOSTNAME }}/health"
+
+          # This is the deploy-time gate that PARSER_API_KEY actually reached
+          # the droplet (§1.3): an unauthenticated POST /parse must come back
+          # exactly 401. A 503 here means the app considers itself
+          # unconfigured - i.e. the key never made it into .env - and must
+          # fail the job loudly. Don't rely on curl --fail for this call:
+          # under --fail, a 401 response body is discarded and the exit code
+          # alone can't distinguish 401 from 503, so capture and compare the
+          # status code explicitly instead.
+          status=$(curl -s -o /dev/null -w "%{http_code}" -L --retry 5 --retry-delay 5 \
+            --resolve "${{ secrets.PARSER_HOSTNAME }}:443:${{ secrets.DROPLET_HOST }}" \
+            --resolve "${{ secrets.PARSER_HOSTNAME }}:80:${{ secrets.DROPLET_HOST }}" \
+            -X POST "https://${{ secrets.PARSER_HOSTNAME }}/parse")
+
+          if [ "$status" != "401" ]; then
+            echo "::error::Expected 401 from unauthenticated POST /parse, got $status (PARSER_API_KEY likely never reached the droplet)."
+            exit 1
+          fi

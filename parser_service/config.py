@@ -48,6 +48,27 @@ class ParserSettings(BaseSettings):
     # shared across tenants until it does.
     spaces_key_prefix: str = "parser/document-cache"
 
+    # Shared-secret checked against the X-Parser-Key header on POST /parse.
+    # Unset means "refuse to serve" (fail-closed), not "auth disabled" -- see
+    # main.py's parse_auth dependency.
+    api_key: str | None = None
+
+    # DigitalOcean Managed Valkey URL for the SAQ parse-job queue (worker.py).
+    # Unset means the worker refuses to start (fail-closed) -- see worker.py's
+    # module-level check, same reasoning as api_key above.
+    valkey_url: str | None = None
+
+    # Cross-repo contract: Simpero_AI_Gov_Alpha's app/jobs/parse_client.py
+    # enqueues onto a queue named exactly "parse" (its own PARSE_QUEUE_NAME
+    # constant, guarded by a unit test on that side). Do not rename without
+    # coordinating both repos.
+    queue_name: str = "parse"
+
+    # Where worker.py writes parse results in Spaces, as bucket+key pointers.
+    # Per-environment override expected (e.g. "parser/parse-results/staging"),
+    # same pattern as spaces_key_prefix above.
+    results_key_prefix: str = "parser/parse-results"
+
     @property
     def spaces_configured(self) -> bool:
         return bool(

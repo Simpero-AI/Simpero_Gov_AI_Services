@@ -53,6 +53,12 @@ ENV OMP_NUM_THREADS=4
 ENV HF_HOME=/tmp/
 ENV TORCH_HOME=/tmp/
 
+# Non-root: this container is fed untrusted bytes by design (the whole point
+# of the service), so it should not run as root. /tmp is world-writable, so
+# HF_HOME/TORCH_HOME above stay writable with no further change.
+RUN useradd -m -u 1000 appuser
+USER appuser
+
 EXPOSE 8001
 
 CMD ["uvicorn", "parser_service.main:app", "--host", "0.0.0.0", "--port", "8001"]

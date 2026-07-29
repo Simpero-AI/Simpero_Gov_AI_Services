@@ -657,7 +657,7 @@ def test_formula_cached_value_captured_but_never_used_as_value() -> None:
 # /parse dispatch -- one endpoint, format detected from the bytes.
 # --------------------------------------------------------------------------- #
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-Parser-Key": "test-parser-key"})
 
 
 def test_parse_endpoint_dispatches_xlsx_by_content() -> None:
