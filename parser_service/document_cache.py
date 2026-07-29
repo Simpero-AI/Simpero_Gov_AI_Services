@@ -81,23 +81,33 @@ class SpacesDocumentCache:
             logger.warning("document cache write failed (%s): %s", key, exc)
 
 
-def build_document_cache(settings: ParserSettings) -> DocumentCache:
-    bucket = settings.spaces_bucket
-    endpoint = settings.spaces_endpoint_url
-    access_key = settings.spaces_access_key_id
-    secret_key = settings.spaces_secret_access_key
-    if not (bucket and endpoint and access_key and secret_key):
-        return NullDocumentCache()
+def build_spaces_client(settings: ParserSettings) -> Any | None:
+    """Construct the S3-compatible Spaces client, or None if unconfigured.
+
+    Shared by the document cache above and the SAQ worker (worker.py), which
+    reads/writes source documents and results in the same bucket. boto3 stays
+    a lazy import here (not module-level) so nothing pays for it unless Spaces
+    is actually configured.
+    """
+    if not settings.spaces_configured:
+        return None
     import boto3
 
-    client = boto3.client(
+    return boto3.client(
         "s3",
         region_name=settings.spaces_region,
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
+        endpoint_url=settings.spaces_endpoint_url,
+        aws_access_key_id=settings.spaces_access_key_id,
+        aws_secret_access_key=settings.spaces_secret_access_key,
     )
-    return SpacesDocumentCache(bucket, settings.spaces_key_prefix, client)
+
+
+def build_document_cache(settings: ParserSettings) -> DocumentCache:
+    client = build_spaces_client(settings)
+    if client is None:
+        return NullDocumentCache()
+    assert settings.spaces_bucket is not None  # implied by spaces_configured
+    return SpacesDocumentCache(settings.spaces_bucket, settings.spaces_key_prefix, client)
 
 
 @lru_cache

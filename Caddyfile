@@ -1,0 +1,9 @@
+# PARSER_HOSTNAME comes from GitHub Environment secrets (services.simpero.com
+# for production, services-staging.simpero.com for staging), written into
+# .env by the `deploy` job on every run — never hardcoded here, since this
+# one file is shared by both droplets.
+# Caddy resolves {$VAR} at Caddyfile-parse time and auto-provisions Let's
+# Encrypt TLS for whatever hostname is configured.
+{$PARSER_HOSTNAME} {
+	reverse_proxy parser:8001
+}

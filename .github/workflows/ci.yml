@@ -3,9 +3,8 @@ name: CI
 # Runs on every PR into main, and on pushes to main (post-merge safety net).
 on:
   pull_request:
-    branches: [main]
-  push:
-    branches: [main]
+    branches: [main, staging]
+  workflow_call:
 
 # Cancel superseded runs on the same PR/branch to save minutes.
 concurrency:

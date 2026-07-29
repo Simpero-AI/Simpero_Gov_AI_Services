@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Document parse service: takes untrusted bytes (PDF, XLSX, DOCX) and returns an exactly-citable index — the structure needed to prove a claim came from a specific place in a specific document. Split out of `Simpero_AI_Gov_Alpha` with history preserved. It holds no tenant data and talks to no database; CI runs on a bare runner and must stay that way — a job needing Postgres/secrets means the trust boundary was crossed by mistake.
+Document parse service: takes untrusted bytes (PDF, XLSX, DOCX) and returns an exactly-citable index — the structure needed to prove a claim came from a specific place in a specific document. Split out of `Simpero_AI_Gov_Alpha` with history preserved. It holds no tenant data and talks to no database (it does hold a Valkey connection for job queueing — see `worker.py` below — but that's a queue, not a database); CI runs on a bare runner and must stay that way — a job needing Postgres/secrets means the trust boundary was crossed by mistake.
 
 ## Commands
 
@@ -25,7 +25,7 @@ Tests marked `local_corpus` read real corpus documents (confidential, never comm
 
 ## Architecture
 
-Pipeline: `main.py` sniffs format **from bytes** (never filename or Content-Type) and dispatches to one of three lanes — `docling_parser.py` (PDF → pages with char-level geometry), `xlsx_parser.py` (XLSX → addressed cells), `docx_parser.py` (DOCX → paragraphs, no geometry). `ParseResponse` is tagged by `kind`; exactly one of `pages`/`sheets`/`paragraphs` is populated. The lanes share a trust bar, not a shape — do not flatten them into a common denominator.
+Pipeline: `dispatch.py` sniffs format **from bytes** (never filename or Content-Type) and dispatches to one of three lanes — `docling_parser.py` (PDF → pages with char-level geometry), `xlsx_parser.py` (XLSX → addressed cells), `docx_parser.py` (DOCX → paragraphs, no geometry). `ParseResponse` is tagged by `kind`; exactly one of `pages`/`sheets`/`paragraphs` is populated. The lanes share a trust bar, not a shape — do not flatten them into a common denominator. `main.py`'s `POST /parse` is the HTTP entry point onto this dispatch logic; `worker.py` (below) is the other one.
 
 Downstream of parsing:
 - `resolver.py` — the citation trust boundary. A quote resolves to an **exact, unambiguous** span (whitespace-flexible, otherwise literal) or returns None. Found more than once = None. No fuzzy matching, no "closest sentence" — a wrong span looks correct, which is worse than no claim.
@@ -36,6 +36,7 @@ Downstream of parsing:
 - `ooxml.py` — zip-bomb guard shared by XLSX and DOCX.
 - `document_cache.py` — best-effort DoclingDocument cache in object storage (Spaces/S3); errors never fail a parse; disabled until configured (no confidential content on unencrypted local disk).
 - `inspect.py` — developer-only visual harness (`python -m parser_service.inspect`, renders to `parser_service/out/`); its deps (pypdfium2, pillow) are dev-group only and must stay out of `[project].dependencies` so the Docker image doesn't carry them.
+- `worker.py` — a SAQ worker consuming the shared `"parse"` Valkey queue that `Simpero_AI_Gov_Alpha`'s `app/jobs/parse_client.py` enqueues onto. Reuses `dispatch.parse_bytes`, the same logic `POST /parse` uses, and writes results to Spaces as a bucket+key pointer rather than returning raw parsed data through the queue. Currently dead-end infrastructure — nothing in Alpha calls the enqueue function yet.
 
 ## The contract seam
 
