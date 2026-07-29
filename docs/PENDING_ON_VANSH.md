@@ -10,10 +10,13 @@ is just the walkthrough. It deliberately mirrors the sibling repo's own
 `Simpero_AI_Gov_Alpha/docs/PENDING_ON_VANSH.md` — same shape, same DO account,
 a second independent set of credentials.
 
-**Status as of this writing: nothing below is done.** This is a new pipeline
-for a new repo — none of Alpha's completed setup carries over automatically,
-even where the underlying DO account and some Spaces buckets are shared. Work
-roughly in the order below; later steps depend on earlier ones.
+**Status as of 2026-07-29: steps 1–8 and 10 are done for `staging`.**
+`staging` is fully populated and ready for a first `deploy.yml` dispatch —
+see the status table below for exact confirmation of what's set. `production`
+is deliberately still scaffolded-only (SSH keys set, everything else blank)
+per the production-deferral note further down — its Spaces bucket hasn't
+been decided yet, so nothing else was guessed. Step 9 (DNS access) is the
+only genuinely open item for staging's own bring-up.
 
 **A rule for this handoff, not just a suggestion:** never paste raw `.env`
 file contents (this repo's or Alpha's) into a message to Claude or any other
@@ -272,21 +275,31 @@ keypair (step 1) and production's state-bucket key (step 2 — this one is
 also shared with Alpha, just the production-bucket-scoped pair rather than
 staging's).
 
-**`production`:** same shape as `staging`, with production's values
-throughout — `PARSER_HOSTNAME` = `services.simpero.com`,
-`PARSER_SPACES_KEY_PREFIX` = `parser/document-cache/production`, production's
-`PARSER_API_KEY` from step 6, production's fresh SSH keypair from step 1,
-`DROPLET_HOST` left empty for now, `VALKEY_URL` = production's Valkey
-connection string (same value Alpha's production uses — step 10), and
-`PARSER_RESULTS_KEY_PREFIX` = `parser/parse-results/production`.
+**`production`:** same shape as `staging`, with production's values:
+
+| Secret | Value | Source |
+|---|---|---|
+| `DROPLET_HOST` | *(leave empty — fill in after first successful apply, step 9)* | — |
+| `DROPLET_SSH_PRIVATE_KEY` | Production keypair's private key content | Fresh — step 1 |
+| `PARSER_API_KEY` | Production `PARSER_API_KEY` value | Fresh — step 6 |
+| `PARSER_HOSTNAME` | `services.simpero.com` | Fresh — fixed value |
+| `PARSER_SPACES_BUCKET` | Doc-cache bucket name (`simpero-cim-xlsx-upload`) | **Shared with Alpha — same value** |
+| `PARSER_SPACES_REGION` | Doc-cache bucket's region | **Shared with Alpha — same value** |
+| `PARSER_SPACES_ENDPOINT_URL` | Doc-cache Spaces endpoint URL | **Shared with Alpha — same value** |
+| `PARSER_SPACES_ACCESS_KEY_ID` | Doc-cache Spaces key ID | **Shared with Alpha — same value** |
+| `PARSER_SPACES_SECRET_ACCESS_KEY` | Doc-cache Spaces secret | **Shared with Alpha — same value** |
+| `PARSER_SPACES_KEY_PREFIX` | `parser/document-cache/production` | Fresh — new, per-environment |
+| `VALKEY_URL` | Production Valkey connection string | **Shared with Alpha — same value, same instance** (step 10) |
+| `PARSER_RESULTS_KEY_PREFIX` | `parser/parse-results/production` | Fresh — new, per-environment (step 10) |
 
 **Quick reference — what's fresh for this repo vs. what's a straight copy
 from Alpha's existing secrets:**
-- **Fresh, generate/create specifically for this repo:** both SSH keypairs
-  (step 1), both `PARSER_API_KEY` values (step 6), both `PARSER_HOSTNAME`
-  values, both `DROPLET_HOST` values (filled in later), both
-  `PARSER_SPACES_KEY_PREFIX` values, both `PARSER_RESULTS_KEY_PREFIX` values
-  (step 10), the DO API token (step 4).
+- **Fresh, generate/create specifically for this repo:** both
+  `TF_VAR_ssh_public_key` values and both `DROPLET_SSH_PRIVATE_KEY` values —
+  one keypair per environment (step 1) — both `PARSER_API_KEY` values
+  (step 6), both `PARSER_HOSTNAME` values, both `DROPLET_HOST` values (filled
+  in later), both `PARSER_SPACES_KEY_PREFIX` values, both
+  `PARSER_RESULTS_KEY_PREFIX` values (step 10), the DO API token (step 4).
 - **Shared, just copy the same value across from Alpha's existing secrets:**
   `SPACES_ACCESS_KEY_ID` / `SPACES_SECRET_ACCESS_KEY` (state buckets, per
   environment), all five `PARSER_SPACES_BUCKET` / `_REGION` /
@@ -366,16 +379,33 @@ or `.env` files to do this, same rule as step 7.
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Generate 2 new SSH deploy keypairs (staging + production) | Pending |
-| 2 | Confirm/reuse Spaces access keys for both TF-state buckets (readwrite+delete) | Pending |
-| 3 | Confirm object versioning enabled on both TF-state buckets | Pending |
-| 4 | Mint a new DO API token for this repo | Pending |
-| 5 | Confirm DO Project names (`Simpero-Staging`/`Simpero-Prod` vs. actual console names) | Pending |
-| 6 | Generate 2 `PARSER_API_KEY` values | Pending |
-| 7 | Create 4 GitHub Environments + populate all secrets | Pending |
-| 8 | Set repo-level `TF_VAR_do_token` secret | Pending |
+| 1 | Generate 2 new SSH deploy keypairs (staging + production) | **Done** (2026-07-29) — both keypairs created in `~/.ssh`, matching the naming convention |
+| 2 | Confirm/reuse Spaces access keys for both TF-state buckets (readwrite+delete) | **Done** (2026-07-29) |
+| 3 | Confirm object versioning enabled on both TF-state buckets | **Done** (2026-07-29) |
+| 4 | Mint a new DO API token for this repo | **Done** — repo-level `TF_VAR_DO_TOKEN` secret set |
+| 5 | Confirm DO Project names (`Simpero-Staging`/`Simpero-Prod` vs. actual console names) | **Done** (2026-07-29) |
+| 6 | Generate 2 `PARSER_API_KEY` values | **Staging done** (2026-07-29). **Production intentionally left blank** — see the production-deferral note below. |
+| 7 | Create 4 GitHub Environments + populate all secrets | **Done for `staging`** (2026-07-29, confirmed via secret-update timestamps — every staging secret now holds a real value, including `PARSER_SPACES_ACCESS_KEY_ID/SECRET_ACCESS_KEY`, `SPACES_ACCESS_KEY_ID/SECRET_ACCESS_KEY`, `VALKEY_URL`, `PARSER_SPACES_BUCKET/REGION/ENDPOINT_URL` — only `DROPLET_HOST` is still blank, which is expected until the first `terraform apply`). Environments themselves all exist with correct protection rules (gated pair has required reviewers — staging: `vanshkhanna17`+`kpal002`, production: `vanshkhanna17`; `-plan` pair ungated). **`production` intentionally still scaffolded-only** — real values only for `TF_VAR_ssh_public_key`/`DROPLET_SSH_PRIVATE_KEY`, everything else blank on purpose (see production-deferral note below). |
+| 8 | Set repo-level `TF_VAR_do_token` secret | **Done** (see row 4) |
 | 9 | Confirm DNS access (record creation deferred to first deploy) | Pending |
-| 10 | Add `VALKEY_URL` (copied from Alpha) + `PARSER_RESULTS_KEY_PREFIX` (fresh) to `staging`/`production` | Pending |
+| 10 | Add `VALKEY_URL` (copied from Alpha) + `PARSER_RESULTS_KEY_PREFIX` (fresh) to `staging`/`production` | **Staging done** (2026-07-29, both secrets hold real values). **Production intentionally left blank** — see below. |
+
+**Production deferral (2026-07-29, Vansh's call):** production's Spaces
+bucket will be a **different bucket than staging's** — staging uses the
+shared `simpero-cim-xlsx-upload` bucket (same one Alpha's doc cache uses),
+but production's bucket has not been decided/created yet. Given that, Vansh
+asked to defer **every production secret except the SSH keypair** until
+production actually gets deployed, rather than guessing values now that
+might be wrong. Concretely: `PARSER_API_KEY`, `PARSER_HOSTNAME`,
+`PARSER_SPACES_KEY_PREFIX`, `PARSER_RESULTS_KEY_PREFIX` were set with real
+values in `production` earlier in this session and have been **reverted to
+blank** — only `TF_VAR_ssh_public_key` and `DROPLET_SSH_PRIVATE_KEY` should
+hold real values in `production`/`production-plan` right now. **Staging is
+unaffected by this — its values stand.** When production is actually ready
+to deploy, revisit every row in this doc for production specifically (not
+just re-copy staging's values), including confirming the production Spaces
+bucket name/region/endpoint/credentials, which may differ from staging's
+shared bucket entirely.
 
 **Note on production sequencing:** unlike Alpha, this repo's production
 droplet does **not** wait on any database cluster — this service opens no DB
@@ -385,6 +415,7 @@ different queue name (`"parse"`), so it is not independent of Alpha's
 Valkey status the way it's independent of Alpha's Postgres. Vansh has
 confirmed staging and production point at **separate** Valkey instances, so
 it's safe to enable the worker in both environments without cross-environment
-job collisions. There's no reason to defer this repo's production bring-up
-the way Alpha deferred its own — once steps 1–8 and 10 above are done for
-both environments, staging and production can be brought up back-to-back.
+job collisions. That said, per the production-deferral note above, staging
+and production are no longer intended to be brought up back-to-back — staging
+can proceed on its own, and production's remaining secrets (including its own
+Spaces bucket) get filled in only when production deployment actually starts.
