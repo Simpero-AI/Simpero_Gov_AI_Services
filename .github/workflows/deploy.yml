@@ -205,6 +205,21 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      # First deploy after a fresh terraform apply: sshd typically comes up
+      # before cloud-init's runcmd (mkdir/chown /opt/simpero, docker install,
+      # swapfile) has finished, so an SCP immediately after apply can race a
+      # not-yet-chowned /opt/simpero — SSH connects fine, then `mkdir` fails
+      # with permission denied. `cloud-init status --wait` blocks until
+      # boot-time provisioning is actually done; a no-op on every later
+      # deploy, since cloud-init only runs once per droplet lifetime.
+      - name: Wait for cloud-init to finish
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: deploy
+          key: ${{ secrets.DROPLET_SSH_PRIVATE_KEY }}
+          script: cloud-init status --wait
+
       - name: Copy compose file + Caddyfile to droplet
         uses: appleboy/scp-action@v0.1.7
         with:
