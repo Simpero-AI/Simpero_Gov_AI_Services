@@ -1,0 +1,49 @@
+version: "3.9"
+
+# Standalone prod compose file (not an overlay on any root docker-compose.yml).
+# This service holds no tenant data and opens no database connection, so there
+# is no pgbouncer, no migration step — see
+# docs/plans/parser-droplet-deployment.md §1.9. worker runs the SAQ consumer
+# for the shared "parse" Valkey queue (parser_service/worker.py) — same image
+# as parser, different command. Only Caddy publishes host ports (80/443);
+# parser and worker are reachable only on the internal simpero-parser-network.
+
+services:
+  parser:
+    # Owner is hardcoded (lowercase — GHCR rejects uppercase) rather than an
+    # env var: it's the repo owner, a static non-secret value, same as the
+    # image name the deploy.yml workflow builds/pushes.
+    image: ghcr.io/simpero-ai/simpero-gov-ai-services:${IMAGE_TAG:-latest}
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  worker:
+    image: ghcr.io/simpero-ai/simpero-gov-ai-services:${IMAGE_TAG:-latest}
+    command: ["saq", "parser_service.worker.settings"]
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    env_file:
+      - .env
+    depends_on:
+      - parser
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  default:
+    name: simpero-parser-network

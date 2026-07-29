@@ -19,7 +19,7 @@ from parser_service.docling_parser import (
 from parser_service.main import app
 from parser_service.schemas import CharBox, PageIndex
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-Parser-Key": "test-parser-key"})
 
 
 def make_page_index(page_no: int, lines: list[str]) -> PageIndex:

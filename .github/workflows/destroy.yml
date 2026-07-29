@@ -1,0 +1,129 @@
+name: Destroy Infrastructure
+
+# Deliberately its own workflow, not a toggle inside deploy.yml — tearing
+# down infrastructure is rare and dangerous enough to stay out of the
+# routine deploy button (see docs/plans/parser-droplet-deployment.md §4).
+# Mirrors deploy.yml's terraform-plan/terraform-apply plan-then-gated-apply
+# pattern exactly, plus a typed confirmation input as extra insurance
+# against a fat-fingered dropdown on something this destructive.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to DESTROY"
+        type: choice
+        options:
+          - staging
+          - production
+      confirm_environment:
+        description: 'Type the environment name exactly (e.g. "staging") to confirm'
+        type: string
+        required: true
+
+# Shared group name with deploy.yml's concurrency group (not
+# github.workflow-based, which would differ per file) — a destroy and a
+# deploy against the same environment can never run concurrently.
+concurrency:
+  group: infra-${{ inputs.environment }}
+
+jobs:
+  terraform-destroy-plan:
+    name: Terraform destroy plan
+    runs-on: ubuntu-latest
+    # Ungated "-plan" Environment — same reasoning as deploy.yml's
+    # terraform-plan: needs environment-specific credentials while staying
+    # reviewable *before* approval, which is the whole point of a plan step.
+    environment:
+      name: ${{ inputs.environment }}-plan
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+      TF_VAR_do_token: ${{ secrets.TF_VAR_do_token }}
+      TF_VAR_ssh_public_key: ${{ secrets.TF_VAR_ssh_public_key }}
+      TF_VAR_environment: ${{ inputs.environment }}
+    steps:
+      # Fails loudly (red job, clear error) rather than silently skipping —
+      # a skipped-and-easy-to-miss job is the wrong failure mode for a typo
+      # on something this destructive. working-directory override: this
+      # runs before checkout, so the job-level `defaults.run.working-
+      # directory: terraform` doesn't exist on disk yet.
+      - name: Confirm typed environment matches selection
+        working-directory: .
+        run: |
+          if [ "${{ inputs.confirm_environment }}" != "${{ inputs.environment }}" ]; then
+            echo "::error::confirm_environment must exactly match environment"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+
+      - name: terraform init
+        run: terraform init -backend-config=backend-${{ inputs.environment }}.hcl
+
+      - name: terraform plan -destroy
+        run: terraform plan -destroy -var-file=${{ inputs.environment }}.tfvars -out=tfplan
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: destroy-tfplan-${{ inputs.environment }}
+          path: terraform/tfplan
+
+  terraform-destroy-apply:
+    name: Terraform destroy apply
+    needs: terraform-destroy-plan
+    runs-on: ubuntu-latest
+    # The gated Environment (Vansh as required reviewer) — same Environment
+    # deploy.yml's terraform-apply/deploy use, so this inherits the same
+    # approval gate and deployment-branch restrictions automatically.
+    environment:
+      name: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+      TF_VAR_do_token: ${{ secrets.TF_VAR_do_token }}
+      TF_VAR_ssh_public_key: ${{ secrets.TF_VAR_ssh_public_key }}
+      TF_VAR_environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: destroy-tfplan-${{ inputs.environment }}
+          path: terraform
+
+      # Re-init needed again — fresh runner, no state carries over except
+      # the downloaded plan file.
+      - name: terraform init
+        run: terraform init -backend-config=backend-${{ inputs.environment }}.hcl
+
+      # Applies the exact downloaded destroy plan — never a fresh one — so
+      # what got approved via this environment's gate is exactly what runs.
+      - name: terraform apply (destroy plan)
+        run: terraform apply tfplan
+
+      # DROPLET_HOST (and the DNS record) for this environment now point at
+      # a droplet that no longer exists. Nothing in this pipeline has the
+      # broad repo-admin credentials needed to auto-clear a GitHub secret —
+      # deliberately, same narrow-credential posture as everywhere else.
+      # Manual follow-up required.
+      - name: Reminder
+        run: |
+          echo "::warning::DROPLET_HOST and the DNS A record for ${{ inputs.environment }} are now stale — update both manually before the next deploy"

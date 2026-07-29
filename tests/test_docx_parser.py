@@ -184,7 +184,7 @@ def test_resolution_is_exact_not_fuzzy() -> None:
 # /parse dispatch -- one endpoint, format detected from the bytes.
 # --------------------------------------------------------------------------- #
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-Parser-Key": "test-parser-key"})
 
 
 def test_parse_endpoint_dispatches_docx_by_content() -> None:
