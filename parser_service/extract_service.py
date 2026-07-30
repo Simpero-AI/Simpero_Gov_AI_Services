@@ -16,12 +16,20 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .coverage import NumberMiss, document_coverage
 from .docling_parser import parse_pdf_bytes
-from .emit import Claim, FlagLog, SkippedPage
+from .emit import Claim, FlagLog, PdfLocation, SkippedPage
 from .extract import claims_from_table
-from .propose import api_key_present, assertions_from_prose, claims_from_prose, prose_text
+from .propose import (
+    api_key_present,
+    assertions_from_prose,
+    claims_from_completeness,
+    claims_from_prose,
+    prose_text,
+)
 from .schemas import PageIndex
 from .table_extract import extract_tables, tables_on_page
 from .text_extract import blocks_on_page, extract_text_blocks
@@ -93,6 +101,85 @@ def _prose_claims(
     ]
 
 
+def _pdf_span(claim: Claim) -> tuple[int, int, int] | None:
+    """This claim's (page, char_start, char_end), or None for a `missing` claim
+    or a non-PDF location. Isolated in its own function so the char_start/
+    char_end None-checks narrow cleanly for the type checker, which a single
+    list-comprehension condition does not do across two different attributes.
+    """
+    location = claim.location
+    if (
+        isinstance(location, PdfLocation)
+        and location.char_start is not None
+        and location.char_end is not None
+    ):
+        return (location.page, location.char_start, location.char_end)
+    return None
+
+
+def _completeness_claims(
+    pages: list[PageIndex],
+    prior_claims: list[Claim],
+    *,
+    entity: str,
+    file: str,
+    flag_log: FlagLog,
+    workers: int,
+) -> tuple[list[Claim], list[SkippedPage]]:
+    """Recover Gate-1 coverage misses: numbers a page printed that no claim
+    gathered so far covers, but that resolve to a unique span (parser_service/
+    coverage.py). Coverage is measured over every claim gathered so far, not
+    just the prose tier, since a number any tier already cited is not a miss.
+
+    Only a page with at least one addressable miss costs a model call -- a
+    fully-covered page is skipped outright (see claims_from_completeness).
+    Numeric only, by design; see coverage.py's module docstring.
+
+    A page whose recovery call fails is reported on stderr AND returned as a
+    SkippedPage(page, "complete", reason), the same failure model the prose
+    tiers use, so the payload's `skipped_pages` names it for an HTTP caller.
+    """
+    claim_spans = [span for c in prior_claims if (span := _pdf_span(c)) is not None]
+    coverage = document_coverage(pages, claim_spans)
+    misses_by_page: dict[int, list[NumberMiss]] = defaultdict(list)
+    for miss in coverage.gate1_misses:
+        misses_by_page[miss.page].append(miss)
+    pages_by_no = {p.page: p for p in pages}
+
+    def run(page_no: int) -> tuple[int, list[Claim]]:
+        page = pages_by_no[page_no]
+        missed = [(m.text, m.context) for m in misses_by_page[page_no]]
+        return page_no, claims_from_completeness(
+            page, missed, entity_hint=entity, file=file, flag_log=flag_log
+        )
+
+    claims: list[Claim] = []
+    failed: list[tuple[int, str]] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(run, page_no): page_no for page_no in misses_by_page}
+        for future in as_completed(futures):
+            try:
+                _, page_claims = future.result()
+                claims += page_claims
+            except Exception as exc:  # noqa: BLE001 -- one bad page must not lose the run
+                failed.append((futures[future], f"{type(exc).__name__}: {exc}"))
+    recovered = sum(1 for c in claims if c.status != "missing")
+    print(
+        f"tier complete: coverage {coverage.coverage:.1%} "
+        f"({coverage.covered}/{coverage.total}), {coverage.gate1} gate-1 miss(es) "
+        f"over {len(misses_by_page)} page(s), {recovered} recovered",
+        file=sys.stderr,
+    )
+    if failed:
+        print(
+            f"  {len(failed)} page(s) failed and were skipped: {[p for p, _ in failed]}",
+            file=sys.stderr,
+        )
+    return claims, [
+        SkippedPage(page=page_no, tier="complete", reason=reason) for page_no, reason in failed
+    ]
+
+
 def extract_claims(
     data: bytes,
     *,
@@ -101,6 +188,7 @@ def extract_claims(
     correlation_id: str,
     source_file: str | None = None,
     prose: bool = False,
+    complete: bool = False,
     qualitative: bool = False,
     workers: int = 8,
 ) -> dict:
@@ -108,9 +196,9 @@ def extract_claims(
 
     The one code path both entry points call: scripts/emit_claims.py (CLI) and
     POST /extract (main.py). Raises ProseCredentialMissing at the door, before
-    any parsing, if `prose`/`qualitative` are set without a credential in the
-    environment -- fail closed, not partway through a document.
-    `qualitative` implies the prose tier as well as its own.
+    any parsing, if `prose`/`complete`/`qualitative` are set without a
+    credential in the environment -- fail closed, not partway through a
+    document. `complete` and `qualitative` each imply the prose tier.
 
     `source_file` is the real filename when the caller has one (the CLI
     always does); an HTTP caller that genuinely has none should leave it
@@ -122,20 +210,22 @@ def extract_claims(
     payload stays `None` so a caller can tell "no filename given" apart from
     "the filename was an empty string".
     """
-    want_prose = prose or qualitative
+    want_prose = prose or complete or qualitative
     if want_prose and not api_key_present():
         raise ProseCredentialMissing(
             "the prose tiers call the Anthropic API and need ANTHROPIC_API_KEY "
             "(or ANTHROPIC_AUTH_TOKEN) in the environment; set it, or drop prose/"
-            "qualitative to emit table claims only."
+            "complete/qualitative to emit table claims only."
         )
 
     logger.info(
-        "extract_claims start: run_id=%s correlation_id=%s entity=%s prose=%s qualitative=%s",
+        "extract_claims start: run_id=%s correlation_id=%s entity=%s prose=%s "
+        "complete=%s qualitative=%s",
         run_id,
         correlation_id,
         entity,
         prose,
+        complete,
         qualitative,
     )
 
@@ -189,6 +279,17 @@ def extract_claims(
         )
         claims += prose_claims
         skipped_pages.extend(prose_failed)
+        if complete:
+            complete_claims, complete_failed = _completeness_claims(
+                result.pages,
+                claims,
+                entity=entity,
+                file=file,
+                flag_log=flag_log,
+                workers=workers,
+            )
+            claims += complete_claims
+            skipped_pages.extend(complete_failed)
         if qualitative:
             qualitative_claims, qualitative_failed = _prose_claims(
                 "qualitative",

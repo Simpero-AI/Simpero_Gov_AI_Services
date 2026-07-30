@@ -20,6 +20,40 @@ The point of splitting the two is that they take different fixes, and only the
 gate-1 population is addressable by asking the model for more. Deterministic, and
 needs NO ground truth: the page and the claims it produced are enough to say what
 was left on the floor -- which is what makes it usable before any golden set.
+
+WHY THIS STAYS NUMERIC-ONLY (SIM-343 decision)
+===============================================
+This instrument is deliberately not mirrored for the qualitative tier.
+
+A number is an atomic, deterministically-detectable unit: detect_numeric_tokens
+finds it by pattern, independent of what anyone thinks it means, so "the page
+printed 41 financially-meaningful numbers and 33 became claims" is a fact about
+the page, not a judgment call. A qualitative assertion has no equivalent unit --
+it is a clause a model reads out of a sentence, and how many distinct assertions
+one paragraph "contains" depends on how finely a reader chooses to slice it. There
+is no regex for "a checkable claim," so there is no honest denominator to build a
+coverage percentage from, and a heuristic denominator (a keyword sweep for
+risk/competition/outlook language, say) would not measure recall against the page
+-- it would measure recall against the keyword list, and report false confidence
+exactly where this module's numeric form is careful not to.
+
+The gate-1 recovery pass has the same problem one level down: it works because a
+missed number can be handed back to the model as a short, unambiguous list --
+"these figures were printed and not claimed, recover the real ones." A qualitative
+re-pass would have no such list; it could only mean "read the page again and hope
+for a different answer," which has no stopping rule and no guarantee it adds
+recall rather than near-duplicate assertions for whatever pass follows this one to
+dedupe.
+
+The qualitative tier's one identified recall gap so far -- the per-page and
+per-assertion-class caps -- was root-caused and fixed directly (the caps are
+gone; see assertions_from_prose / _within_budget in propose.py). That was a
+capacity bug with a capacity fix. No second, distinct recall gap has been
+identified that a completeness re-pass would close, and the qualitative tier's
+next lever for precision/recall is the binding verifier the caps fix already
+named as the intended next step, not a coverage instrument. If a genuine
+qualitative recall gap turns up later, it should first define its own honest unit
+of measurement -- not borrow this module's, which does not transfer.
 """
 
 from __future__ import annotations

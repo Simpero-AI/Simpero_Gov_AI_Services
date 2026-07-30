@@ -12,13 +12,19 @@ production split intends.
     ANTHROPIC_API_KEY=... uv run python scripts/emit_claims.py <cim.pdf> \\
         --entity "PTL Group" --prose > claims.json
 
-Three tiers, each a strict superset of the last:
-  tables       (default)  claims_from_table       -- deterministic, no LLM
-  --prose                 + claims_from_prose      -- numeric facts in prose (1 call/page)
-  --qualitative           + assertions_from_prose  -- claims that carry no number (1 call/page)
+Four tiers, each additive:
+  tables       (default)  claims_from_table        -- deterministic, no LLM
+  --prose                 + claims_from_prose       -- numeric facts in prose (1 call/page)
+  --complete               + claims_from_completeness -- recovers a page's Gate-1
+                              coverage misses (numbers printed but not claimed by
+                              the tiers above); see parser_service/coverage.py.
+                              Numeric only -- see coverage.py's module docstring
+                              for why the qualitative tier does not get this pass.
+  --qualitative            + assertions_from_prose  -- claims that carry no number (1 call/page)
 
---qualitative implies --prose. Both prose tiers call the Anthropic API once per
-prose page and require ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN); the script
+--qualitative and --complete both imply --prose. All three call the Anthropic API
+once per prose page (--complete once per page with an addressable miss, which may
+be zero pages) and require ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN); the script
 fails closed with that message rather than part way through a document. The
 per-page calls are independent -- a quote only ever resolves against its own
 page -- so they run concurrently, and a page whose call fails is recorded and
@@ -54,6 +60,15 @@ def main(argv: list[str] | None = None) -> None:
         help="Also read numeric facts stated in prose (one model call per prose page).",
     )
     parser.add_argument(
+        "--complete",
+        action="store_true",
+        help=(
+            "Also recover numeric Gate-1 coverage misses -- figures the page printed "
+            "that no tier above claimed (implies --prose). Numeric only; see "
+            "parser_service/coverage.py."
+        ),
+    )
+    parser.add_argument(
         "--qualitative",
         action="store_true",
         help="Also read claims that carry no number (implies --prose).",
@@ -71,6 +86,7 @@ def main(argv: list[str] | None = None) -> None:
             correlation_id=args.pdf_path.stem,
             source_file=args.pdf_path.name,
             prose=args.prose,
+            complete=args.complete,
             qualitative=args.qualitative,
             workers=args.workers,
         )
