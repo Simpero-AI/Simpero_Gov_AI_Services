@@ -7,6 +7,7 @@ from .config import ParserSettings, get_settings
 from .dispatch import ParseResponse, parse_bytes
 from .docling_parser import parse_known_hashes
 from .errors import ParseError
+from .extract_service import ProseCredentialMissing, extract_claims
 
 logger = logging.getLogger(__name__)
 
@@ -75,3 +76,81 @@ async def parse(
     logger.info("parse ok: kind=%s sha256=%s %s", result.kind, result.sha256[:16], count)
     response.headers["X-Content-SHA256"] = result.sha256
     return result
+
+
+def _undo_header_mojibake(value: str) -> str:
+    """Recover a non-ASCII header value Starlette decoded as latin-1.
+
+    ASGI headers are latin-1 by spec, so a client that sent a UTF-8 encoded
+    company name (a real requirement -- entity names are not ASCII-only) comes
+    through as mojibake: each original UTF-8 byte becomes one latin-1
+    character. Re-encoding as latin-1 recovers those original bytes, and
+    decoding them as UTF-8 recovers the intended string. A no-op for plain
+    ASCII. A value that is not valid UTF-8 either is left exactly as Starlette
+    gave it -- an imperfect but readable string beats a 500 on every request
+    with an accented company name.
+    """
+    try:
+        return value.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return value
+
+
+@app.post("/extract", dependencies=[Depends(verify_parser_key)])
+async def extract(
+    request: Request,
+    x_run_id: str = Header(...),
+    x_correlation_id: str = Header(...),
+    x_entity: str = Header(...),
+    x_source_file: str | None = Header(default=None),
+    x_prose: bool = Header(default=False),
+    x_qualitative: bool = Header(default=False),
+) -> dict:
+    """Parse a PDF and emit its claims -- the callable form of scripts/emit_claims.py.
+
+    Calls the same extract_claims entry point the CLI does, so the two can
+    never drift (SIM-340/E5). Stateless: the claims payload is returned in the
+    response body, never persisted here -- persistence is the backend's job.
+    """
+    data = await request.body()
+    logger.info(
+        "extract request: run_id=%s correlation_id=%s %d bytes",
+        x_run_id,
+        x_correlation_id,
+        len(data),
+    )
+
+    try:
+        payload = extract_claims(
+            data,
+            entity=_undo_header_mojibake(x_entity),
+            run_id=x_run_id,
+            correlation_id=x_correlation_id,
+            source_file=x_source_file,
+            prose=x_prose,
+            qualitative=x_qualitative,
+        )
+    except ProseCredentialMissing as exc:
+        logger.warning("extract rejected: run_id=%s missing prose credential", x_run_id)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ParseError as exc:
+        logger.warning(
+            "extract rejected: run_id=%s code=%s status=%d bytes=%d: %s",
+            x_run_id,
+            exc.code,
+            exc.status_code,
+            len(data),
+            exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+
+    logger.info(
+        "extract ok: run_id=%s correlation_id=%s claims=%d",
+        x_run_id,
+        x_correlation_id,
+        len(payload["claims"]),
+    )
+    return payload

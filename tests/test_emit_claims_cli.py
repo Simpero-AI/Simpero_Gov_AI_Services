@@ -1,8 +1,11 @@
 """The emit_claims CLI: the committed entry point for the parse-to-claims seam.
 
-The behaviour under test is the tier gating, not the model -- above all that the
-prose tiers refuse to start without a credential rather than failing part way
-through a document, and that the table tier needs neither key nor network.
+scripts/emit_claims.py is now a thin argparse wrapper over
+parser_service.extract_service.extract_claims (SIM-340/E5) -- that shared
+function is where parsing actually happens, so these tests patch it there,
+not on the CLI module. The behaviour under test is still the CLI's own: the
+prose tiers must refuse to start without a credential rather than failing
+part way through a document, and the table tier needs neither key nor network.
 """
 
 from __future__ import annotations
@@ -11,13 +14,15 @@ import json
 
 import pytest
 
+from parser_service import extract_service
 from scripts import emit_claims
 
 
 def test_prose_without_a_key_fails_closed_before_any_work(monkeypatch, tmp_path) -> None:
     # A missing credential must stop the run at the door, not after a parse and
-    # not part way through a document. It is a SystemExit (argparse error), and
-    # it must fire before parse_pdf_bytes is ever called.
+    # not part way through a document. It surfaces as a SystemExit (the CLI's
+    # argparse.error translation of ProseCredentialMissing), and it must fire
+    # before parse_pdf_bytes is ever called.
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
 
@@ -28,7 +33,7 @@ def test_prose_without_a_key_fails_closed_before_any_work(monkeypatch, tmp_path)
         called = True
         raise AssertionError("parse must not start when the key is absent")
 
-    monkeypatch.setattr(emit_claims, "parse_pdf_bytes", _must_not_run)
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", _must_not_run)
     pdf = tmp_path / "cim.pdf"
     pdf.write_bytes(b"%PDF-1.4 stub")
 
@@ -41,7 +46,7 @@ def test_qualitative_implies_prose_and_also_needs_a_key(monkeypatch, tmp_path) -
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.setattr(
-        emit_claims, "parse_pdf_bytes", lambda *_a, **_k: AssertionError("unreachable")
+        extract_service, "parse_pdf_bytes", lambda *_a, **_k: AssertionError("unreachable")
     )
     pdf = tmp_path / "cim.pdf"
     pdf.write_bytes(b"%PDF-1.4 stub")
@@ -62,7 +67,7 @@ def test_tables_only_needs_no_key(monkeypatch, tmp_path) -> None:
     def _fake_key_check() -> bool:  # pragma: no cover - must not be called
         raise AssertionError("the table tier must not consult the credential")
 
-    monkeypatch.setattr(emit_claims, "api_key_present", _fake_key_check)
+    monkeypatch.setattr(extract_service, "api_key_present", _fake_key_check)
 
     class _Doc:
         pass
@@ -77,8 +82,8 @@ def test_tables_only_needs_no_key(monkeypatch, tmp_path) -> None:
         ran = True
         return _Result()
 
-    monkeypatch.setattr(emit_claims, "parse_pdf_bytes", _fake_parse)
-    monkeypatch.setattr(emit_claims, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", _fake_parse)
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
     pdf = tmp_path / "cim.pdf"
     pdf.write_bytes(b"%PDF-1.4 stub")
 
@@ -86,13 +91,44 @@ def test_tables_only_needs_no_key(monkeypatch, tmp_path) -> None:
     assert ran is True
 
 
+def test_cli_stdout_is_pure_json_with_no_stderr_chatter_mixed_in(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    # json.dump goes to stdout; every diagnostic line is on stderr (see
+    # extract_service.extract_claims) -- a downstream consumer piping stdout
+    # into a JSON parser must never see a stray print land in the payload.
+    class _Doc:
+        pass
+
+    class _Result:
+        document = _Doc()
+        pages: list = []
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _Result())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    pdf = tmp_path / "cim.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    emit_claims.main([str(pdf), "--entity", "ACME", "--run-id", "run-xyz"])
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+    assert payload["run_id"] == "run-xyz"
+    assert payload["source_file"] == "cim.pdf"
+    assert payload["claims"] == []
+    assert "tier tables" in captured.err
+
+
 def test_a_failed_prose_page_is_recorded_and_the_run_still_succeeds(
     monkeypatch, tmp_path, capsys
 ) -> None:
     # A page whose model call raises must not lose the run: the good page's
     # claim still comes out, and the bad page is named in the payload's
-    # `skipped_pages` -- not just printed to stderr and forgotten.
-    monkeypatch.setattr(emit_claims, "api_key_present", lambda: True)
+    # `skipped_pages` (the E6 record) as a SkippedPage(page, tier, reason), not
+    # just printed to stderr and forgotten. The CLI runs it through
+    # extract_service.extract_claims, so the tiers are patched there.
+    monkeypatch.setattr(extract_service, "api_key_present", lambda: True)
 
     class _Doc:
         pass
@@ -117,19 +153,19 @@ def test_a_failed_prose_page_is_recorded_and_the_run_still_succeeds(
             raise ValueError("model call failed")
         return [_FakeClaim()]
 
-    monkeypatch.setattr(emit_claims, "parse_pdf_bytes", lambda _bytes: _Result())
-    monkeypatch.setattr(emit_claims, "extract_tables", lambda *_a, **_k: [])
-    monkeypatch.setattr(emit_claims, "extract_text_blocks", lambda *_a, **_k: [])
-    monkeypatch.setattr(emit_claims, "blocks_on_page", lambda *_a, **_k: [])
-    monkeypatch.setattr(emit_claims, "prose_text", lambda *_a, **_k: "some prose")
-    monkeypatch.setattr(emit_claims, "claims_from_prose", _fake_claims_from_prose)
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _bytes: _Result())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "extract_text_blocks", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "prose_text", lambda *_a, **_k: "some prose")
+    monkeypatch.setattr(extract_service, "claims_from_prose", _fake_claims_from_prose)
 
     pdf = tmp_path / "cim.pdf"
     pdf.write_bytes(b"%PDF-1.4 stub")
 
     emit_claims.main([str(pdf), "--entity", "ACME", "--prose", "--workers", "1"])
 
-    payload = json.loads(capsys.readouterr().out.split("\n\nemitted", 1)[0])
+    payload = json.loads(capsys.readouterr().out)
     assert len(payload["claims"]) == 1
     assert payload["skipped_pages"] == [
         {"page": 2, "tier": "prose", "reason": "ValueError: model call failed"}
