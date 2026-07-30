@@ -15,7 +15,7 @@ from conftest import TEST_PARSER_API_KEY
 from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
 
-from parser_service import extract_service
+from parser_service import extract_service, main
 from parser_service.main import app
 
 
@@ -32,7 +32,7 @@ def _headers(**overrides: str) -> dict[str, str]:
     headers = {
         "X-Parser-Key": TEST_PARSER_API_KEY,
         "X-Run-Id": "run-1",
-        "X-Document-Id": "doc-1",
+        "X-Correlation-Id": "doc-1",
         "X-Entity": "ACME Corp",
     }
     headers.update(overrides)
@@ -66,10 +66,14 @@ def test_extract_table_tier_succeeds_and_returns_the_c3_payload_shape() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["run_id"] == "run-1"
-    assert body["source_file"] == "doc-1"
+    # No X-Source-File was sent, and the correlation id must not be guessed in
+    # as a stand-in filename -- it is a correlation token, not a filename.
+    assert body["source_file"] is None
     assert isinstance(body["claims"], list)
     assert isinstance(body["flag_log"], list)
-    # document_id is caller-side correlation only -- not part of the C3 contract.
+    assert isinstance(body["skipped_pages"], list)
+    # correlation_id is caller-side correlation only -- not part of the C3 contract.
+    assert "correlation_id" not in body
     assert "document_id" not in body
 
 
@@ -125,3 +129,36 @@ def test_extract_zero_byte_body_maps_parse_error_to_its_own_status_code() -> Non
     response = client.post("/extract", content=b"", headers=_headers())
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "zero_byte_pdf"
+
+
+def test_undo_header_mojibake_recovers_a_utf8_entity_sent_as_latin1() -> None:
+    # ASGI headers are latin-1 by spec; a client sending a UTF-8 encoded
+    # company name round-trips through Starlette as mojibake. Re-encoding as
+    # latin-1 and decoding as UTF-8 recovers the original string.
+    original = "Café Corp"
+    mojibake = original.encode("utf-8").decode("latin-1")
+    assert main._undo_header_mojibake(mojibake) == original
+
+
+def test_undo_header_mojibake_is_a_noop_for_ascii() -> None:
+    assert main._undo_header_mojibake("ACME Corp") == "ACME Corp"
+
+
+def test_undo_header_mojibake_leaves_a_non_utf8_value_unchanged() -> None:
+    # A lone latin-1 character (0xE9) is not a valid standalone UTF-8 byte --
+    # left exactly as given rather than raising.
+    value = "é"
+    assert main._undo_header_mojibake(value) == value
+
+
+def test_extract_accepts_a_non_ascii_entity_header() -> None:
+    # X-Entity carries a real company name, which is not guaranteed ASCII. httpx
+    # itself refuses a non-ASCII str header value, so the raw UTF-8 bytes a real
+    # client would put on the wire are passed directly -- exactly what Starlette
+    # decodes as latin-1 mojibake on the way in, and _undo_header_mojibake exists
+    # to reverse.
+    client = TestClient(app)
+    headers: dict[str, str | bytes] = dict(_headers())
+    headers["X-Entity"] = "Café Corp".encode()
+    response = client.post("/extract", content=_minimal_pdf_bytes(), headers=headers)
+    assert response.status_code == 200

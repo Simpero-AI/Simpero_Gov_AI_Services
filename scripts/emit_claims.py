@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> None:
             args.pdf_path.read_bytes(),
             entity=args.entity,
             run_id=args.run_id,
-            document_id=args.pdf_path.stem,
+            correlation_id=args.pdf_path.stem,
             source_file=args.pdf_path.name,
             prose=args.prose,
             qualitative=args.qualitative,

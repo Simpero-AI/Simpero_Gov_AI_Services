@@ -78,11 +78,29 @@ async def parse(
     return result
 
 
+def _undo_header_mojibake(value: str) -> str:
+    """Recover a non-ASCII header value Starlette decoded as latin-1.
+
+    ASGI headers are latin-1 by spec, so a client that sent a UTF-8 encoded
+    company name (a real requirement -- entity names are not ASCII-only) comes
+    through as mojibake: each original UTF-8 byte becomes one latin-1
+    character. Re-encoding as latin-1 recovers those original bytes, and
+    decoding them as UTF-8 recovers the intended string. A no-op for plain
+    ASCII. A value that is not valid UTF-8 either is left exactly as Starlette
+    gave it -- an imperfect but readable string beats a 500 on every request
+    with an accented company name.
+    """
+    try:
+        return value.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return value
+
+
 @app.post("/extract", dependencies=[Depends(verify_parser_key)])
 async def extract(
     request: Request,
     x_run_id: str = Header(...),
-    x_document_id: str = Header(...),
+    x_correlation_id: str = Header(...),
     x_entity: str = Header(...),
     x_source_file: str | None = Header(default=None),
     x_prose: bool = Header(default=False),
@@ -96,17 +114,20 @@ async def extract(
     """
     data = await request.body()
     logger.info(
-        "extract request: run_id=%s document_id=%s %d bytes", x_run_id, x_document_id, len(data)
+        "extract request: run_id=%s correlation_id=%s %d bytes",
+        x_run_id,
+        x_correlation_id,
+        len(data),
     )
 
     try:
         payload = extract_claims(
             data,
-            entity=x_entity,
+            entity=_undo_header_mojibake(x_entity),
             run_id=x_run_id,
-            document_id=x_document_id,
-            source_file=x_source_file or x_document_id,
-            prose=x_prose or x_qualitative,
+            correlation_id=x_correlation_id,
+            source_file=x_source_file,
+            prose=x_prose,
             qualitative=x_qualitative,
         )
     except ProseCredentialMissing as exc:
@@ -127,9 +148,9 @@ async def extract(
         ) from exc
 
     logger.info(
-        "extract ok: run_id=%s document_id=%s claims=%d",
+        "extract ok: run_id=%s correlation_id=%s claims=%d",
         x_run_id,
-        x_document_id,
+        x_correlation_id,
         len(payload["claims"]),
     )
     return payload
