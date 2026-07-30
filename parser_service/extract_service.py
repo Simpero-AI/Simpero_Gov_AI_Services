@@ -19,7 +19,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .docling_parser import parse_pdf_bytes
-from .emit import Claim, FlagLog
+from .emit import Claim, FlagLog, SkippedPage
 from .extract import claims_from_table
 from .propose import api_key_present, assertions_from_prose, claims_from_prose, prose_text
 from .schemas import PageIndex
@@ -45,15 +45,15 @@ def _prose_claims(
     file: str,
     flag_log: FlagLog,
     workers: int,
-) -> tuple[list[Claim], list[int]]:
+) -> tuple[list[Claim], list[SkippedPage]]:
     """Run one prose tier over every page that has prose, concurrently.
 
     `kind` selects the extractor: "prose" for the numeric pass, "qualitative"
     for the assertion pass. A page whose model call fails is reported on
-    stderr AND returned as a skipped page number -- a partial result that
-    names its gaps is more useful than none, and both entry points need that
-    name: the CLI caller can re-run it, and an HTTP caller has no stderr to
-    read at all (see extract_claims' `skipped_pages`).
+    stderr AND returned as a SkippedPage(page, tier, reason) -- a partial
+    result that names its gaps is more useful than none, and both entry points
+    need that name: the CLI caller can re-run it, and an HTTP caller has no
+    stderr to read at all (see extract_claims' `skipped_pages`).
     """
     extractor = claims_from_prose if kind == "prose" else assertions_from_prose
 
@@ -88,7 +88,9 @@ def _prose_claims(
             f"  {len(failed)} page(s) failed and were skipped: {[p for p, _ in failed]}",
             file=sys.stderr,
         )
-    return claims, [page_no for page_no, _ in failed]
+    return claims, [
+        SkippedPage(page=page_no, tier=kind, reason=reason) for page_no, reason in failed
+    ]
 
 
 def extract_claims(
@@ -144,7 +146,7 @@ def extract_claims(
     file = source_file or ""
 
     claims: list[Claim] = []
-    skipped_pages: set[int] = set()
+    skipped_pages: list[SkippedPage] = []
     for page in result.pages:
         for table in tables_on_page(tables, page.page):
             try:
@@ -160,7 +162,13 @@ def extract_claims(
                 # keeps every sibling table's claims when only one is
                 # malformed. The page is still named in skipped_pages -- it
                 # lost something real, even if not everything.
-                skipped_pages.add(page.page)
+                skipped_pages.append(
+                    SkippedPage(
+                        page=page.page,
+                        tier="tables",
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                )
                 print(
                     f"tier tables: page {page.page} table failed and was skipped: "
                     f"{type(exc).__name__}: {exc}",
@@ -180,7 +188,7 @@ def extract_claims(
             workers=workers,
         )
         claims += prose_claims
-        skipped_pages.update(prose_failed)
+        skipped_pages.extend(prose_failed)
         if qualitative:
             qualitative_claims, qualitative_failed = _prose_claims(
                 "qualitative",
@@ -192,7 +200,7 @@ def extract_claims(
                 workers=workers,
             )
             claims += qualitative_claims
-            skipped_pages.update(qualitative_failed)
+            skipped_pages.extend(qualitative_failed)
 
     payload = {
         "run_id": flag_log.run_id,
@@ -200,13 +208,15 @@ def extract_claims(
         "source_file": source_file,
         "claims": [c.to_json() for c in claims],
         "flag_log": flag_log.to_json(),
-        "skipped_pages": sorted(skipped_pages),
+        "skipped_pages": [
+            s.to_json() for s in sorted(skipped_pages, key=lambda s: (s.page, s.tier))
+        ],
     }
     print(
         f"\n\nemitted {len(claims)} claims "
         f"({sum(1 for c in claims if c.status != 'missing')} cited, "
         f"{sum(1 for c in claims if c.status == 'missing')} missing), "
-        f"{len(flag_log.entries)} flags, {len(skipped_pages)} page(s) skipped",
+        f"{len(flag_log.entries)} flags, {len(skipped_pages)} skip(s)",
         file=sys.stderr,
     )
     return payload

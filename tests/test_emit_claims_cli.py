@@ -118,3 +118,55 @@ def test_cli_stdout_is_pure_json_with_no_stderr_chatter_mixed_in(
     assert payload["source_file"] == "cim.pdf"
     assert payload["claims"] == []
     assert "tier tables" in captured.err
+
+
+def test_a_failed_prose_page_is_recorded_and_the_run_still_succeeds(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    # A page whose model call raises must not lose the run: the good page's
+    # claim still comes out, and the bad page is named in the payload's
+    # `skipped_pages` (the E6 record) as a SkippedPage(page, tier, reason), not
+    # just printed to stderr and forgotten. The CLI runs it through
+    # extract_service.extract_claims, so the tiers are patched there.
+    monkeypatch.setattr(extract_service, "api_key_present", lambda: True)
+
+    class _Doc:
+        pass
+
+    class _Page:
+        def __init__(self, page: int) -> None:
+            self.page = page
+
+    class _Result:
+        document = _Doc()
+        pages = [_Page(1), _Page(2)]
+        sha256 = "0" * 64
+
+    class _FakeClaim:
+        status = "proposed"
+
+        def to_json(self) -> dict:
+            return {"entity": "ACME", "status": "proposed"}
+
+    def _fake_claims_from_prose(_blocks, page, **_kwargs):
+        if page.page == 2:
+            raise ValueError("model call failed")
+        return [_FakeClaim()]
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _bytes: _Result())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "extract_text_blocks", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "prose_text", lambda *_a, **_k: "some prose")
+    monkeypatch.setattr(extract_service, "claims_from_prose", _fake_claims_from_prose)
+
+    pdf = tmp_path / "cim.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    emit_claims.main([str(pdf), "--entity", "ACME", "--prose", "--workers", "1"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["claims"]) == 1
+    assert payload["skipped_pages"] == [
+        {"page": 2, "tier": "prose", "reason": "ValueError: model call failed"}
+    ]

@@ -165,7 +165,9 @@ def test_a_bad_table_does_not_abort_the_document_and_is_reported_skipped(monkeyp
         correlation_id="doc-1",
         source_file="cim.pdf",
     )
-    assert payload["skipped_pages"] == [1]
+    assert payload["skipped_pages"] == [
+        {"page": 1, "tier": "tables", "reason": "ValueError: a malformed table"}
+    ]
     attributes = {c["attribute"] for c in payload["claims"]}
     # t1-good survives its sibling t1-bad's failure; t2-good is untouched.
     assert attributes == {"t1-good", "t2-good"}

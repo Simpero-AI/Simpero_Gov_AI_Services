@@ -229,9 +229,10 @@ class Claim(BaseModel):
 
 
 class SkippedPage(BaseModel):
-    """One page a prose tier could not read -- the run-level record that makes
-    a caught-and-skipped page auditable instead of a stderr line lost when the
-    run ends."""
+    """One page a tier could not extract (a table that would not parse, a prose
+    or qualitative model call that raised) -- the run-level record that makes a
+    caught-and-skipped page auditable instead of a stderr line lost when the run
+    ends. `tier` names which pass skipped it; `reason` is its exception."""
 
     model_config = ConfigDict(extra="forbid")
 
