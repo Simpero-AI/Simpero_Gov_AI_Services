@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .coverage import NumberMiss, document_coverage
 from .docling_parser import parse_pdf_bytes
-from .emit import Claim, FlagLog, PdfLocation, SkippedPage
+from .emit import Claim, Edge, FlagLog, PdfLocation, SkippedPage, element_id_for
 from .extract import claims_from_table
 from .propose import (
     api_key_present,
@@ -135,6 +135,14 @@ def _completeness_claims(
     fully-covered page is skipped outright (see claims_from_completeness).
     Numeric only, by design; see coverage.py's module docstring.
 
+    A prior `missing` claim (e.g. a table cell with no resolvable bbox) has no
+    span, so it does not suppress its own number here -- that number gets a
+    second recovery attempt from this pass. Benign by construction: recovery
+    can only add a resolved claim, never remove one, so the worst case is a
+    second `missing` claim for the same figure, not a false cover. Not
+    deduped against the earlier miss -- `_reduce_same_fact` below matches on
+    a magnitude a `missing` claim never carries (see `_has_magnitude`).
+
     A page whose recovery call fails is reported on stderr AND returned as a
     SkippedPage(page, "complete", reason), the same failure model the prose
     tiers use, so the payload's `skipped_pages` names it for an HTTP caller.
@@ -178,6 +186,119 @@ def _completeness_claims(
     return claims, [
         SkippedPage(page=page_no, tier="complete", reason=reason) for page_no, reason in failed
     ]
+
+
+def _has_magnitude(claim: Claim) -> bool:
+    """Whether `claim` carries a number the fan-in reducer can match on --
+    excludes `missing` (no value was found) and qualitative/text claims
+    (normalized is null by construction, never a magnitude to compare)."""
+    return claim.status != "missing" and claim.value.normalized is not None
+
+
+def _page_of(claim: Claim) -> int:
+    """The page a numeric claim was found on. This service is PDF-only, so
+    every claim reaching the reducer carries a PdfLocation -- asserted here,
+    once, so every other reducer line can read `.page` without re-narrowing
+    the union each time a Claim comes back out of a dict/list.
+    """
+    assert isinstance(claim.location, PdfLocation)
+    return claim.location.page
+
+
+def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
+    """SIM-341: the per-page extraction fan-in. Reconciles a fact two tiers
+    both saw on the same page, without dropping either claim -- the parser
+    only emits the edge, per the ticket's landed decision; a store-level
+    merge is the backend's job, not this one.
+
+    Two independent passes, both scoped to claims that carry a magnitude
+    (see _has_magnitude) and to pairs from DIFFERENT tiers -- a tier citing
+    the same figure twice on one page is not the cross-tier duplication this
+    reducer exists to catch.
+
+    same_fact: group by (page, entity, value_type, normalized value),
+    attribute-blind -- two tiers may name the identical number differently
+    (attribute-vocabulary mapping is E2, not this ticket), so the magnitude is
+    the fingerprint. value_type is part of that fingerprint: a bare 40.0 is not
+    one fact but potentially three -- a 40% margin, 40 employees, a $40 price --
+    so the type keeps them from fusing into a false corroboration. unit is
+    deliberately NOT in the key: a currency unit is header-derived and usually
+    absent on a bare "$" (scale.py), so keying on it would split the very
+    table-header-vs-bare-prose duplicate this exists to catch. Period lives
+    inside the attribute string today; separating two periods that coincide in
+    value waits on E2/E3's canonical attribute + period.
+    A cross-tier collision keeps every claim, but names a winner (table wins
+    on numbers; otherwise the first tier in pipeline order) and links every
+    other claim in the group to it with a `same_fact` edge.
+
+    contradicts: group by (page, entity, attribute) instead -- the same
+    labeled fact-slot, stated with different numbers by different tiers ("$15M"
+    table vs "$12M excluding settlement" prose). That disagreement is signal,
+    not noise, so it is flagged and neither claim is preferred.
+    """
+    tier_of: dict[int, str] = {}
+    numeric_claims: list[Claim] = []
+    for tier, tier_claims in tiers:
+        for claim in tier_claims:
+            if not _has_magnitude(claim):
+                continue
+            tier_of[id(claim)] = tier
+            numeric_claims.append(claim)
+
+    edges: list[Edge] = []
+
+    same_fact_groups: dict[tuple[int, str, str, float], list[Claim]] = defaultdict(list)
+    for claim in numeric_claims:
+        assert claim.value.normalized is not None  # narrowed by _has_magnitude above
+        same_fact_groups[
+            (_page_of(claim), claim.entity, claim.value.value_type, claim.value.normalized)
+        ].append(claim)
+    for group in same_fact_groups.values():
+        if len({tier_of[id(c)] for c in group}) < 2:
+            continue  # same tier, not a cross-tier duplicate
+        winner = next((c for c in group if tier_of[id(c)] == "table"), group[0])
+        for claim in group:
+            if claim is winner:
+                continue
+            edges.append(
+                Edge(
+                    type="same_fact",
+                    from_=element_id_for(claim),
+                    to=element_id_for(winner),
+                    basis=(
+                        f"page {_page_of(winner)}: {tier_of[id(claim)]} and "
+                        f"{tier_of[id(winner)]} tiers agree on entity, value type "
+                        "+ normalized value"
+                    ),
+                )
+            )
+
+    attribute_groups: dict[tuple[int, str, str], list[Claim]] = defaultdict(list)
+    for claim in numeric_claims:
+        attribute_groups[(_page_of(claim), claim.entity, claim.attribute)].append(claim)
+    seen_pairs: set[frozenset[int]] = set()
+    for group in attribute_groups.values():
+        for i, a in enumerate(group):
+            for b in group[i + 1 :]:
+                if tier_of[id(a)] == tier_of[id(b)] or a.value.normalized == b.value.normalized:
+                    continue
+                pair = frozenset((id(a), id(b)))
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                edges.append(
+                    Edge(
+                        type="contradicts",
+                        from_=element_id_for(a),
+                        to=element_id_for(b),
+                        basis=(
+                            f"page {_page_of(a)}: {tier_of[id(a)]} ({a.value.raw!r}) and "
+                            f"{tier_of[id(b)]} ({b.value.raw!r}) disagree on the same attribute"
+                        ),
+                    )
+                )
+
+    return edges
 
 
 def extract_claims(
@@ -236,11 +357,13 @@ def extract_claims(
     file = source_file or ""
 
     claims: list[Claim] = []
+    tier_claims: list[tuple[str, list[Claim]]] = []
     skipped_pages: list[SkippedPage] = []
+    table_claims: list[Claim] = []
     for page in result.pages:
         for table in tables_on_page(tables, page.page):
             try:
-                claims += claims_from_table(
+                table_claims += claims_from_table(
                     table,
                     page,
                     entity=entity,
@@ -264,6 +387,8 @@ def extract_claims(
                     f"{type(exc).__name__}: {exc}",
                     file=sys.stderr,
                 )
+    claims += table_claims
+    tier_claims.append(("table", table_claims))
     print(f"tier tables: {len(claims)} claims", file=sys.stderr)
 
     if want_prose:
@@ -279,6 +404,7 @@ def extract_claims(
         )
         claims += prose_claims
         skipped_pages.extend(prose_failed)
+        tier_claims.append(("prose", prose_claims))
         if complete:
             complete_claims, complete_failed = _completeness_claims(
                 result.pages,
@@ -290,6 +416,7 @@ def extract_claims(
             )
             claims += complete_claims
             skipped_pages.extend(complete_failed)
+            tier_claims.append(("complete", complete_claims))
         if qualitative:
             qualitative_claims, qualitative_failed = _prose_claims(
                 "qualitative",
@@ -302,12 +429,22 @@ def extract_claims(
             )
             claims += qualitative_claims
             skipped_pages.extend(qualitative_failed)
+            tier_claims.append(("qualitative", qualitative_claims))
+
+    edges = _reduce_same_fact(tier_claims)
+    same_fact_count = sum(1 for e in edges if e.type == "same_fact")
+    contradicts_count = sum(1 for e in edges if e.type == "contradicts")
+    print(
+        f"reducer: {same_fact_count} same_fact edge(s), {contradicts_count} contradicts edge(s)",
+        file=sys.stderr,
+    )
 
     payload = {
         "run_id": flag_log.run_id,
         "sha256": result.sha256,
         "source_file": source_file,
         "claims": [c.to_json() for c in claims],
+        "edges": [e.to_json() for e in edges],
         "flag_log": flag_log.to_json(),
         "skipped_pages": [
             s.to_json() for s in sorted(skipped_pages, key=lambda s: (s.page, s.tier))
@@ -317,7 +454,7 @@ def extract_claims(
         f"\n\nemitted {len(claims)} claims "
         f"({sum(1 for c in claims if c.status != 'missing')} cited, "
         f"{sum(1 for c in claims if c.status == 'missing')} missing), "
-        f"{len(flag_log.entries)} flags, {len(skipped_pages)} skip(s)",
+        f"{len(edges)} edges, {len(flag_log.entries)} flags, {len(skipped_pages)} skip(s)",
         file=sys.stderr,
     )
     return payload

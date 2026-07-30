@@ -15,7 +15,7 @@ import json
 import pytest
 
 from parser_service import extract_service
-from parser_service.emit import Claim, ClaimValue, PdfLocation
+from parser_service.emit import Claim, ClaimValue, PdfLocation, element_id_for
 from parser_service.schemas import CharBox, PageIndex
 from scripts import emit_claims
 
@@ -188,8 +188,12 @@ def test_a_failed_prose_page_is_recorded_and_the_run_still_succeeds(
         pages = [_Page(1), _Page(2)]
         sha256 = "0" * 64
 
+    class _Value:
+        normalized = None  # no magnitude -> the fan-in reducer skips this claim
+
     class _FakeClaim:
         status = "proposed"
+        value = _Value()
 
         def to_json(self) -> dict:
             return {"entity": "ACME", "status": "proposed"}
@@ -271,3 +275,65 @@ def test_complete_recovers_a_gate1_miss_the_prose_tier_left_uncovered(
     assert len(completeness_calls) == 1
     missed_numbers = {number for number, _context in completeness_calls[0]}
     assert missed_numbers == {"$200"}
+
+
+def test_edges_link_a_table_and_prose_duplicate_on_the_same_page(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    # SIM-341: the table tier and the prose tier both see the same figure on
+    # the same page. Both claims must survive in `claims` -- the reducer only
+    # emits a `same_fact` edge, it never drops or merges one -- and the table
+    # claim must be the edge's `to` (table wins on numbers).
+    monkeypatch.setattr(extract_service, "api_key_present", lambda: True)
+
+    page = _page("Revenue was $15,295 in fiscal 2024, driven by strong demand.")
+
+    table_claim = Claim(
+        entity="ACME",
+        attribute="Revenue | 2024F",
+        value=ClaimValue(raw="$15,295", normalized=15_295_000, unit="USD", value_type="currency"),
+        location=PdfLocation(file="cim.pdf", page=1, char_start=13, char_end=20),
+        status="proposed",
+    )
+    prose_claim = Claim(
+        entity="ACME",
+        attribute="total revenue in fiscal 2024",
+        value=ClaimValue(raw="$15,295", normalized=15_295_000, unit="USD", value_type="currency"),
+        location=PdfLocation(file="cim.pdf", page=1, char_start=13, char_end=20),
+        status="proposed",
+    )
+
+    class _Doc:
+        pass
+
+    class _Result:
+        document = _Doc()
+        pages = [page]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda *_a, **_k: _Result())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: ["a-table"])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda tables, _page_no: tables)
+    monkeypatch.setattr(extract_service, "claims_from_table", lambda *_a, **_k: [table_claim])
+    monkeypatch.setattr(extract_service, "extract_text_blocks", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "prose_text", lambda *_a, **_k: page.text)
+    monkeypatch.setattr(extract_service, "claims_from_prose", lambda *_a, **_k: [prose_claim])
+
+    pdf = tmp_path / "cim.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    emit_claims.main([str(pdf), "--entity", "ACME", "--prose", "--workers", "1"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["claims"]) == 2
+    assert payload["edges"] == [
+        {
+            "type": "same_fact",
+            "from": element_id_for(prose_claim),
+            "to": element_id_for(table_claim),
+            "basis": (
+                "page 1: prose and table tiers agree on entity, value type + normalized value"
+            ),
+        }
+    ]

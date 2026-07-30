@@ -1,0 +1,144 @@
+"""SIM-341: per-page tier reducer (same-fact fan-in) tests.
+
+Fixtures build Claim objects directly rather than through the real resolver
+pipeline (test_emit.py's job) -- the reducer only ever looks at entity,
+attribute, page, status and value.normalized/raw, so a minimal Claim is
+enough to exercise its grouping logic in isolation.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from parser_service.emit import Claim, ClaimValue, PdfLocation, element_id_for
+from parser_service.extract_service import _reduce_same_fact
+from parser_service.scale import ValueType
+
+
+def _claim(
+    *,
+    entity: str = "ACME",
+    attribute: str,
+    raw: str,
+    normalized: float | None,
+    value_type: ValueType | None = None,
+    unit: str | None = None,
+    page: int = 1,
+    char_start: int = 0,
+    status: Literal["proposed", "cited", "missing"] = "proposed",
+) -> Claim:
+    missing = status == "missing"
+    resolved_type: ValueType = value_type or ("text" if normalized is None else "currency")
+    return Claim(
+        entity=entity,
+        attribute=attribute,
+        value=ClaimValue(
+            raw=raw,
+            normalized=normalized,
+            unit=unit,
+            value_type=resolved_type,
+        ),
+        location=PdfLocation(
+            file="cim.pdf",
+            page=page,
+            char_start=None if missing else char_start,
+            char_end=None if missing else char_start + len(raw),
+        ),
+        status=status,
+    )
+
+
+def test_same_fact_links_prose_to_table_and_table_wins() -> None:
+    table_claim = _claim(attribute="Revenue | 2024F", raw="$15,295", normalized=15295000, page=3)
+    prose_claim = _claim(
+        attribute="total revenue for fiscal 2024",
+        raw="fifteen million two hundred ninety-five thousand",
+        normalized=15295000,
+        page=3,
+        char_start=500,
+    )
+
+    edges = _reduce_same_fact([("table", [table_claim]), ("prose", [prose_claim])])
+
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge.type == "same_fact"
+    assert edge.from_ == element_id_for(prose_claim)
+    assert edge.to == element_id_for(table_claim)
+
+
+def test_same_fact_does_not_collapse_across_value_types() -> None:
+    # 40% (a margin), 40 (a headcount) and $40 (a price) share one page and one
+    # normalized magnitude (40.0), yet they are three different facts. Keying
+    # same_fact on the bare value alone fused them into a bogus corroboration;
+    # value_type in the key keeps them apart.
+    pct = _claim(
+        attribute="gross margin", raw="40%", normalized=40.0, value_type="percent", unit="%"
+    )
+    headcount = _claim(
+        attribute="employees", raw="40", normalized=40.0, value_type="count", char_start=20
+    )
+    price = _claim(
+        attribute="Revenue", raw="$40", normalized=40.0, value_type="currency", char_start=40
+    )
+
+    edges = _reduce_same_fact([("prose", [pct]), ("qualitative", [headcount]), ("table", [price])])
+
+    assert [edge for edge in edges if edge.type == "same_fact"] == []
+
+
+def test_same_tier_repeating_a_value_is_not_a_duplicate() -> None:
+    # Two table cells legitimately citing the same figure (e.g. a subtotal
+    # repeated elsewhere) is not the cross-tier collision this reducer exists
+    # to catch.
+    claim_a = _claim(attribute="Subtotal A", raw="$5,000", normalized=5000, char_start=10)
+    claim_b = _claim(attribute="Subtotal B", raw="$5,000", normalized=5000, char_start=50)
+
+    edges = _reduce_same_fact([("table", [claim_a, claim_b])])
+
+    assert edges == []
+
+
+def test_contradicts_when_tiers_disagree_on_the_same_attribute() -> None:
+    table_claim = _claim(
+        attribute="Revenue | 2024F", raw="$15,000,000", normalized=15_000_000, page=5
+    )
+    prose_claim = _claim(
+        attribute="Revenue | 2024F",
+        raw="$12,000,000 excluding settlement",
+        normalized=12_000_000,
+        page=5,
+        char_start=200,
+    )
+
+    edges = _reduce_same_fact([("table", [table_claim]), ("prose", [prose_claim])])
+
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge.type == "contradicts"
+    assert {edge.from_, edge.to} == {element_id_for(table_claim), element_id_for(prose_claim)}
+
+
+def test_missing_and_qualitative_claims_take_no_part() -> None:
+    missing_claim = _claim(attribute="X", raw="", normalized=None, status="missing")
+    qualitative_claim = _claim(attribute="X", raw="growing steadily", normalized=None)
+
+    edges = _reduce_same_fact([("table", [missing_claim]), ("qualitative", [qualitative_claim])])
+
+    assert edges == []
+
+
+def test_different_pages_do_not_collide() -> None:
+    claim_a = _claim(attribute="Revenue", raw="$100", normalized=100, page=1)
+    claim_b = _claim(attribute="Revenue", raw="$100", normalized=100, page=2, char_start=50)
+
+    edges = _reduce_same_fact([("table", [claim_a]), ("prose", [claim_b])])
+
+    assert edges == []
+
+
+def test_element_id_distinguishes_claims_sharing_page_and_attribute() -> None:
+    claim_a = _claim(attribute="Revenue", raw="$100", normalized=100_000, char_start=0)
+    claim_b = _claim(attribute="Revenue", raw="$200", normalized=200_000, char_start=50)
+
+    assert element_id_for(claim_a) != element_id_for(claim_b)
