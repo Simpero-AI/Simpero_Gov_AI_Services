@@ -21,8 +21,9 @@ Three tiers, each a strict superset of the last:
 prose page and require ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN); the script
 fails closed with that message rather than part way through a document. The
 per-page calls are independent -- a quote only ever resolves against its own
-page -- so they run concurrently, and a page whose call fails is recorded and
-skipped rather than aborting the run.
+page -- so they run concurrently, and a page whose call fails is recorded in
+the emitted payload's `skipped_pages` (page number, tier, reason) rather than
+aborting the run.
 
 Not the real extractor: entity is passed in, and attributes are the document's
 own words (see parser_service/extract.py and parser_service/propose.py). This
@@ -39,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from parser_service.docling_parser import parse_pdf_bytes
-from parser_service.emit import Claim, FlagLog
+from parser_service.emit import Claim, FlagLog, SkippedPage
 from parser_service.extract import claims_from_table
 from parser_service.propose import (
     api_key_present,
@@ -61,13 +62,14 @@ def _prose_claims(
     file: str,
     flag_log: FlagLog,
     workers: int,
-) -> list[Claim]:
+) -> tuple[list[Claim], list[SkippedPage]]:
     """Run one prose tier over every page that has prose, concurrently.
 
     `kind` selects the extractor: "prose" for the numeric pass, "qualitative"
-    for the assertion pass. A page whose model call fails is reported on stderr
-    and skipped -- a partial result that names its gaps is more useful than
-    none, and the caller can re-run the named pages.
+    for the assertion pass. A page whose model call fails is recorded as a
+    `SkippedPage` (page number, tier, exception type/message) and skipped --
+    a partial result that names its gaps is more useful than none, and the
+    caller can re-run the named pages.
     """
     extractor = claims_from_prose if kind == "prose" else assertions_from_prose
 
@@ -82,7 +84,7 @@ def _prose_claims(
 
     with_prose = [p for p in pages if prose_text(blocks_on_page(blocks, p.page), p).strip()]
     claims: list[Claim] = []
-    failed: list[tuple[int, str]] = []
+    skipped: list[SkippedPage] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(run, p): p.page for p in with_prose}
         for future in as_completed(futures):
@@ -90,19 +92,25 @@ def _prose_claims(
                 _, page_claims = future.result()
                 claims += page_claims
             except Exception as exc:  # noqa: BLE001 -- one bad page must not lose the run
-                failed.append((futures[future], f"{type(exc).__name__}: {exc}"))
+                skipped.append(
+                    SkippedPage(
+                        page=futures[future],
+                        tier=kind,
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                )
     resolved = sum(1 for c in claims if c.status != "missing")
     print(
         f"tier {kind}: {len(claims)} claims over {len(with_prose)} prose pages "
         f"({resolved} resolved)",
         file=sys.stderr,
     )
-    if failed:
+    if skipped:
         print(
-            f"  {len(failed)} page(s) failed and were skipped: {[p for p, _ in failed]}",
+            f"  {len(skipped)} page(s) failed and were skipped: {[s.page for s in skipped]}",
             file=sys.stderr,
         )
-    return claims
+    return claims, skipped
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -139,6 +147,7 @@ def main(argv: list[str] | None = None) -> None:
     flag_log = FlagLog(run_id=args.run_id)
 
     claims: list[Claim] = []
+    skipped_pages: list[SkippedPage] = []
     for page in result.pages:
         for table in tables_on_page(tables, page.page):
             claims += claims_from_table(
@@ -152,7 +161,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if want_prose:
         blocks = extract_text_blocks(result.document, result.pages)
-        claims += _prose_claims(
+        prose_claims, prose_skipped = _prose_claims(
             "prose",
             result.pages,
             blocks,
@@ -161,8 +170,10 @@ def main(argv: list[str] | None = None) -> None:
             flag_log=flag_log,
             workers=args.workers,
         )
+        claims += prose_claims
+        skipped_pages += prose_skipped
         if args.qualitative:
-            claims += _prose_claims(
+            qual_claims, qual_skipped = _prose_claims(
                 "qualitative",
                 result.pages,
                 blocks,
@@ -171,6 +182,8 @@ def main(argv: list[str] | None = None) -> None:
                 flag_log=flag_log,
                 workers=args.workers,
             )
+            claims += qual_claims
+            skipped_pages += qual_skipped
 
     # sha256 is the document identity the backend will map to a data_source; the
     # parser reports it, the backend assigns the id.
@@ -180,13 +193,14 @@ def main(argv: list[str] | None = None) -> None:
         "source_file": args.pdf_path.name,
         "claims": [c.to_json() for c in claims],
         "flag_log": flag_log.to_json(),
+        "skipped_pages": [s.to_json() for s in skipped_pages],
     }
     json.dump(payload, sys.stdout, indent=2)
     print(
         f"\n\nemitted {len(claims)} claims "
         f"({sum(1 for c in claims if c.status != 'missing')} cited, "
         f"{sum(1 for c in claims if c.status == 'missing')} missing), "
-        f"{len(flag_log.entries)} flags",
+        f"{len(flag_log.entries)} flags, {len(skipped_pages)} page(s) skipped",
         file=sys.stderr,
     )
 

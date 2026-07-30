@@ -7,6 +7,8 @@ through a document, and that the table tier needs neither key nor network.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from scripts import emit_claims
@@ -82,3 +84,53 @@ def test_tables_only_needs_no_key(monkeypatch, tmp_path) -> None:
 
     emit_claims.main([str(pdf), "--entity", "ACME"])
     assert ran is True
+
+
+def test_a_failed_prose_page_is_recorded_and_the_run_still_succeeds(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    # A page whose model call raises must not lose the run: the good page's
+    # claim still comes out, and the bad page is named in the payload's
+    # `skipped_pages` -- not just printed to stderr and forgotten.
+    monkeypatch.setattr(emit_claims, "api_key_present", lambda: True)
+
+    class _Doc:
+        pass
+
+    class _Page:
+        def __init__(self, page: int) -> None:
+            self.page = page
+
+    class _Result:
+        document = _Doc()
+        pages = [_Page(1), _Page(2)]
+        sha256 = "0" * 64
+
+    class _FakeClaim:
+        status = "proposed"
+
+        def to_json(self) -> dict:
+            return {"entity": "ACME", "status": "proposed"}
+
+    def _fake_claims_from_prose(_blocks, page, **_kwargs):
+        if page.page == 2:
+            raise ValueError("model call failed")
+        return [_FakeClaim()]
+
+    monkeypatch.setattr(emit_claims, "parse_pdf_bytes", lambda _bytes: _Result())
+    monkeypatch.setattr(emit_claims, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(emit_claims, "extract_text_blocks", lambda *_a, **_k: [])
+    monkeypatch.setattr(emit_claims, "blocks_on_page", lambda *_a, **_k: [])
+    monkeypatch.setattr(emit_claims, "prose_text", lambda *_a, **_k: "some prose")
+    monkeypatch.setattr(emit_claims, "claims_from_prose", _fake_claims_from_prose)
+
+    pdf = tmp_path / "cim.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    emit_claims.main([str(pdf), "--entity", "ACME", "--prose", "--workers", "1"])
+
+    payload = json.loads(capsys.readouterr().out.split("\n\nemitted", 1)[0])
+    assert len(payload["claims"]) == 1
+    assert payload["skipped_pages"] == [
+        {"page": 2, "tier": "prose", "reason": "ValueError: model call failed"}
+    ]

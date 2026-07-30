@@ -228,6 +228,21 @@ class Claim(BaseModel):
         return out
 
 
+class SkippedPage(BaseModel):
+    """One page a prose tier could not read -- the run-level record that makes
+    a caught-and-skipped page auditable instead of a stderr line lost when the
+    run ends."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    page: int
+    tier: str
+    reason: str
+
+    def to_json(self) -> dict:
+        return {"page": self.page, "tier": self.tier, "reason": self.reason}
+
+
 class FlagLogEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
