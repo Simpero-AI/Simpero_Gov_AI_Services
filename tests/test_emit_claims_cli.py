@@ -15,7 +15,40 @@ import json
 import pytest
 
 from parser_service import extract_service
+from parser_service.emit import Claim, ClaimValue, PdfLocation
+from parser_service.schemas import CharBox, PageIndex
 from scripts import emit_claims
+
+
+def _page(text: str, page_no: int = 1) -> PageIndex:
+    char_map: list[CharBox] = []
+    x = 0.0
+    for character in text:
+        char_map.append(
+            CharBox(
+                char=character,
+                x0=x,
+                top=100.0,
+                x1=x + 5.0,
+                bottom=110.0,
+                page=page_no,
+                precision="char",
+            )
+        )
+        x += 5.0
+    return PageIndex(page=page_no, text=text, char_map=char_map)
+
+
+def _proposed_claim(entity: str, attribute: str, text: str, page: PageIndex) -> Claim:
+    start = page.text.index(text)
+    end = start + len(text)
+    return Claim(
+        entity=entity,
+        attribute=attribute,
+        value=ClaimValue(raw=text, normalized=None, unit=None, value_type="currency"),
+        location=PdfLocation(file="cim.pdf", page=page.page, char_start=start, char_end=end),
+        status="proposed",
+    )
 
 
 def test_prose_without_a_key_fails_closed_before_any_work(monkeypatch, tmp_path) -> None:
@@ -53,6 +86,19 @@ def test_qualitative_implies_prose_and_also_needs_a_key(monkeypatch, tmp_path) -
 
     with pytest.raises(SystemExit):
         emit_claims.main([str(pdf), "--entity", "ACME", "--qualitative"])
+
+
+def test_complete_implies_prose_and_also_needs_a_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        extract_service, "parse_pdf_bytes", lambda *_a, **_k: AssertionError("unreachable")
+    )
+    pdf = tmp_path / "cim.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    with pytest.raises(SystemExit):
+        emit_claims.main([str(pdf), "--entity", "ACME", "--complete"])
 
 
 def test_tables_only_needs_no_key(monkeypatch, tmp_path) -> None:
@@ -170,3 +216,58 @@ def test_a_failed_prose_page_is_recorded_and_the_run_still_succeeds(
     assert payload["skipped_pages"] == [
         {"page": 2, "tier": "prose", "reason": "ValueError: model call failed"}
     ]
+
+
+def test_complete_recovers_a_gate1_miss_the_prose_tier_left_uncovered(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    # The prose tier claims $100 and walks past $200 on the same page. Both are
+    # financially-meaningful and $200 resolves to a unique span, so it is a
+    # Gate-1 miss -- exactly what --complete exists to recover. The recovery
+    # runs inside extract_service now, so the tiers are patched there.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    page = _page("Revenue was $100 in year one and $200 in year two.")
+
+    class _Doc:
+        pass
+
+    class _Result:
+        document = _Doc()
+        pages = [page]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda *_a, **_k: _Result())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "extract_text_blocks", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda _blocks, _page_no: [])
+    monkeypatch.setattr(extract_service, "prose_text", lambda _blocks, page_: page_.text)
+    monkeypatch.setattr(
+        extract_service,
+        "claims_from_prose",
+        lambda *_a, **_k: [_proposed_claim("ACME", "revenue | year one", "$100", page)],
+    )
+
+    completeness_calls: list[list[tuple[str, str]]] = []
+
+    def _fake_completeness(page_, missed, *, entity_hint, file, flag_log):
+        completeness_calls.append(missed)
+        return [_proposed_claim(entity_hint, "revenue | year two", "$200", page_)]
+
+    monkeypatch.setattr(extract_service, "claims_from_completeness", _fake_completeness)
+
+    pdf = tmp_path / "cim.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    emit_claims.main([str(pdf), "--entity", "ACME", "--complete"])
+
+    stdout = capsys.readouterr().out
+    payload = json.loads(stdout)
+    attributes = {c["attribute"] for c in payload["claims"]}
+    assert "revenue | year one" in attributes
+    assert "revenue | year two" in attributes
+
+    # Only the real Gate-1 miss ($200) was handed to the recovery pass -- $100
+    # was already covered by the prose tier and must not be re-proposed.
+    assert len(completeness_calls) == 1
+    missed_numbers = {number for number, _context in completeness_calls[0]}
+    assert missed_numbers == {"$200"}
