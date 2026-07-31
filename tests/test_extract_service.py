@@ -187,6 +187,88 @@ def test_skipped_pages_is_empty_when_nothing_failed(monkeypatch) -> None:
     assert payload["skipped_pages"] == []
 
 
+def test_canonicalize_attributes_without_a_key_raises_before_any_parsing(monkeypatch) -> None:
+    # SIM-344's pass calls the Anthropic API just as the prose tiers do, and it
+    # is independent of them -- so it must fail closed at the door the same way
+    # even when prose/complete/qualitative are all off.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("parse must not start when the key is absent")
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", _must_not_run)
+
+    with pytest.raises(extract_service.ProseCredentialMissing):
+        extract_service.extract_claims(
+            b"%PDF-1.4 stub",
+            entity="ACME",
+            run_id="run-1",
+            correlation_id="doc-1",
+            source_file="cim.pdf",
+            canonicalize_attributes=True,
+        )
+
+
+def test_canonicalize_attributes_maps_table_claims_end_to_end(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class _OnePageResult:
+        document = _Doc()
+        pages = [_Page(1)]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _OnePageResult())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda *_a, **_k: ["t1"])
+    monkeypatch.setattr(
+        extract_service,
+        "claims_from_table",
+        lambda table, page, *, entity, file, flag_log: [
+            _table_claim(page.page, attribute="Revenue | 2019F")
+        ],
+    )
+    monkeypatch.setattr(
+        extract_service,
+        "canonicalize_attributes",
+        lambda labels: {"Revenue | 2019F": ("revenue", [])},
+    )
+
+    payload = extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+        canonicalize_attributes=True,
+    )
+
+    assert len(payload["claims"]) == 1
+    claim = payload["claims"][0]
+    assert claim["attribute"] == "revenue"
+    assert claim["attribute_raw"] == "Revenue | 2019F"
+
+
+def test_canonicalize_attributes_defaults_to_off(monkeypatch) -> None:
+    # Table-only extraction stays credential-free unless the caller opts in --
+    # this is the regression this ticket must not introduce.
+    def _fake_key_check() -> bool:  # pragma: no cover - must not be called
+        raise AssertionError("table-only extraction must not consult the credential")
+
+    monkeypatch.setattr(extract_service, "api_key_present", _fake_key_check)
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _Result())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+
+    payload = extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+    )
+    assert payload["claims"] == []
+
+
 def test_cli_and_direct_call_produce_an_identical_payload_for_the_same_input(
     monkeypatch, tmp_path, capsys
 ) -> None:

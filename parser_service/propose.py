@@ -45,7 +45,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from .emit import Claim, FlagLog, emit_pdf_claim
+from .emit import CORE_ATTRIBUTES, Claim, FlagLog, emit_pdf_claim, gate_canonical_attribute
 from .resolver import contains_flexible, find_exact_span
 from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
@@ -606,6 +606,134 @@ def claims_from_completeness(
         resolved,
     )
     return claims
+
+
+# --------------------------------------------------------------------------- #
+# SIM-344 / E2: attribute vocabulary mapping.
+#
+# Proposer-with-code-gate, same shape as everywhere else in this module: the
+# model proposes, and nothing it says is trusted past a deterministic check --
+# here, emit.gate_canonical_attribute's literal membership test in
+# emit.CORE_ATTRIBUTES. The blast radius of a bad proposal is a claim landing
+# in the OPERATING_METRIC bucket with attribute_unmapped set, never a wrong
+# canonical name silently accepted.
+#
+# One call for the whole document's DISTINCT raw labels, not one per claim or
+# per page: a CIM repeats "Revenue | 2019F"-shaped labels across every table
+# and prose mention, and mapping is keyed on the label text alone, so there is
+# nothing page-scoped about it worth paying for twice.
+# --------------------------------------------------------------------------- #
+
+# A small, cheap model for a closed-vocabulary classification task, deliberately
+# not DEFAULT_MODEL (Opus) -- that budget is reserved for extraction quality the
+# claims spine's provenance depends on. Mapping a label onto ~25 fixed strings
+# is exactly the kind of task where the code gate, not model strength, is what
+# earns trust.
+ATTRIBUTE_MODEL = "claude-haiku-4-5-20251001"
+
+_ATTRIBUTE_SYSTEM = f"""\
+You map financial-statement labels from a confidential information memorandum \
+(CIM) onto a closed canonical vocabulary.
+
+For each label, decide ONE of three things:
+
+1. It names one of these {len(CORE_ATTRIBUTES)} core financial-statement line \
+items -- answer with EXACTLY that string, nothing else:
+{", ".join(sorted(CORE_ATTRIBUTES))}
+
+2. It is a sector or operating metric, NOT a core financial-statement line item \
+(a room count, an occupancy rate, same-store sales growth, a headcount, a square \
+footage, a customer count, and similar). Answer exactly: operating_metric
+
+3. It looks like it SHOULD be a core financial-statement line item -- plausibly a \
+revenue, cost, profit, balance-sheet or cash-flow figure -- but you cannot \
+confidently place it in exactly one of the fixed names above (an ambiguous or \
+nonstandard label, a subtotal you cannot classify, an adjusted figure where you \
+are unsure which convention applies). Answer exactly: core_unmapped
+
+Never invent a canonical name outside the fixed list above. Never guess when \
+unsure -- answer core_unmapped instead; a wrong guess is worse than an honest \
+"unmapped".
+
+A label may carry a period, section banner or column header appended to it \
+("Revenue | 2019F", "TURNOVER | Coffee Shop | YEAR 1") -- classify what the label \
+NAMES, ignoring the period/section/column qualifiers riding along with it.
+"""
+
+
+class AttributeMapping(BaseModel):
+    """One label's proposed classification, before the code gate runs."""
+
+    raw: str = Field(description="The document label exactly as given.")
+    canonical: str = Field(
+        description=(
+            "One of the fixed core attribute names, or the literal string "
+            "'operating_metric', or the literal string 'core_unmapped'."
+        )
+    )
+
+
+class AttributeMappings(BaseModel):
+    mappings: list[AttributeMapping] = Field(default_factory=list)
+
+
+def propose_attribute_mappings(
+    raw_labels: list[str],
+    *,
+    model: str = ATTRIBUTE_MODEL,
+    client=None,
+) -> dict[str, str]:
+    """Ask the model to classify each of `raw_labels` against the closed
+    vocabulary, keyed by the raw label. Nothing here is trusted yet --
+    gate_canonical_attribute (emit.py) is the code gate that turns a proposal
+    into an actual canonical attribute; see canonicalize_attributes below.
+
+    Returns {} for an empty input without a network call: a page-less or
+    attribute-less run has nothing to map.
+    """
+    if not raw_labels:
+        return {}
+    if client is None:
+        import anthropic
+
+        client = anthropic.Anthropic()
+
+    listing = "\n".join(f"- {label}" for label in raw_labels)
+    response = _parse_with_retry(
+        lambda: client.messages.parse(
+            model=model,
+            max_tokens=8000,
+            system=[
+                {"type": "text", "text": _ATTRIBUTE_SYSTEM, "cache_control": {"type": "ephemeral"}}
+            ],
+            messages=[{"role": "user", "content": f"Labels:\n{listing}"}],
+            output_format=AttributeMappings,
+        ),
+        page_no=0,
+        what="attribute mapping",
+    )
+    parsed = response.parsed_output
+    if parsed is None:
+        return {}
+    return {mapping.raw: mapping.canonical for mapping in parsed.mappings}
+
+
+def canonicalize_attributes(
+    raw_labels: list[str],
+    *,
+    model: str = ATTRIBUTE_MODEL,
+    client=None,
+) -> dict[str, tuple[str, list[str]]]:
+    """raw label -> (canonical attribute, extra flags) for every DISTINCT label
+    in `raw_labels`, proposer + code gate both applied.
+
+    A label the model's response omitted entirely is treated exactly like an
+    out-of-enum answer -- gated to OPERATING_METRIC with attribute_unmapped --
+    rather than silently left unmapped with no record of the gap.
+    """
+    unique = sorted(set(raw_labels))
+    proposed = propose_attribute_mappings(unique, model=model, client=client)
+    return {raw: gate_canonical_attribute(proposed.get(raw, "core_unmapped")) for raw in unique}
 
 
 def api_key_present() -> bool:

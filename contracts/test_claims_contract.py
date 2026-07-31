@@ -358,6 +358,28 @@ def test_xlsx_blocking_flags_accepted(validator: Draft202012Validator) -> None:
     assert not list(validator.iter_errors(ok)), "xlsx blocking flags should validate"
 
 
+# --- SIM-344: attribute_raw + attribute_unmapped ------------------------------
+
+
+def test_attribute_raw_accepted_alongside_canonical_attribute(
+    validator: Draft202012Validator,
+) -> None:
+    ok = {**VALID_PDF_CLAIM, "attribute": "revenue", "attribute_raw": "Revenue | 2019F"}
+    assert not list(validator.iter_errors(ok)), "attribute_raw should validate alongside attribute"
+
+
+def test_attribute_raw_is_optional(validator: Draft202012Validator) -> None:
+    # A claim the canonicalization pass never reached (e.g. qualitative) must
+    # still validate without attribute_raw.
+    assert "attribute_raw" not in VALID_PDF_CLAIM
+    assert not list(validator.iter_errors(VALID_PDF_CLAIM))
+
+
+def test_attribute_unmapped_flag_accepted(validator: Draft202012Validator) -> None:
+    ok = {**VALID_PDF_CLAIM, "flags": ["attribute_unmapped"]}
+    assert not list(validator.iter_errors(ok)), "attribute_unmapped should be a valid flag"
+
+
 # --- SIM-341: the `edges` array's element shape ------------------------------
 # `edges` sits beside `claims` in the emitted payload, not inside a Claim row,
 # so it is validated against the schema's `$defs/edge` sub-schema directly

@@ -443,10 +443,17 @@ def attribute_for(
     "<section banner> | <row label> | <column header>".
 
     Deliberately the source document's words rather than a product attribute
-    (`revenueLatestUsd`). Mapping a CIM's phrasing onto a fixed vocabulary is the
-    extractor's real job and is not guessed here -- inventing a canonical name
-    from a string match would be a silent, confident error of exactly the kind
-    this codebase refuses elsewhere.
+    (`revenueLatestUsd`). Mapping a CIM's phrasing onto a fixed vocabulary is not
+    guessed here -- inventing a canonical name from a string match would be a
+    silent, confident error of exactly the kind this codebase refuses elsewhere.
+    That mapping is SIM-344's job instead: a downstream proposer-with-code-gate
+    pass (parser_service.propose.canonicalize_attributes, wired in by
+    extract_service.extract_claims when canonicalize_attributes=True) reads
+    whatever this function returns as the raw label, maps it onto the closed
+    core-financial-statement enum or the operating_metric bucket, and moves it
+    into Claim.attribute_raw while Claim.attribute becomes the canonical value.
+    This function's job stays exactly what it always was: produce the document's
+    own words, honestly and without inventing structure the table doesn't have.
 
     The banner is included because without it the name is not unique inside its
     own table: "Coffee Shop | YEAR 1" is both a revenue line and a cost line on

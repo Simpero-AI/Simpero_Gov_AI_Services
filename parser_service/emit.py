@@ -42,7 +42,7 @@ scope for alpha.
 from __future__ import annotations
 
 import uuid
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -90,8 +90,82 @@ FLAG_TYPES = frozenset(
         # quote_unresolved -- that one means the resolver could not find the text
         # at all, and merging the two makes each unreadable.
         "binding_unsupported",
+        # SIM-344: a label the attribute-mapping proposer judged core-adjacent
+        # (or produced a string outside the closed enum for) but could not map to
+        # one of CORE_ATTRIBUTES. Never guessed past -- see gate_canonical_attribute.
+        "attribute_unmapped",
     }
 )
+
+
+# --------------------------------------------------------------------------- #
+# SIM-344 / E2: attribute vocabulary mapping.
+#
+# The closed, versioned enum for the financial-statement core -- recurring line
+# items that feed consistency (revenue, margin, ...). The ticket calls for
+# seeding this from a recall-audit's actual observed attributes; no such
+# dataset is checked into this repo, so this list is seeded from the ticket's
+# own examples plus the standard recurring CIM financial-statement line items
+# instead. Extend it the same way FLAG_TYPES/AssertionClass get extended: from
+# an observed gap on a real document, never from imagination.
+#
+# Everything that is NOT one of these is NOT invented a synthetic core name --
+# it lands in the OPERATING_METRIC bucket below, raw label retained via
+# Claim.attribute_raw. A fully-closed enum covering sector/operating metrics
+# (occupancy, ARPU, same-store sales, ...) would flag-storm; this two-tier
+# split is the ticket's landed decision, not a shortcut.
+# --------------------------------------------------------------------------- #
+
+CoreAttribute = Literal[
+    "revenue",
+    "cogs",
+    "gross_profit",
+    "opex",
+    "ebitda",
+    "ebit",
+    "net_income",
+    "margin",
+    "depreciation_and_amortization",
+    "interest_expense",
+    "tax_expense",
+    "capex",
+    "total_assets",
+    "total_liabilities",
+    "total_equity",
+    "cash_and_equivalents",
+    "total_debt",
+    "net_debt",
+    "working_capital",
+    "accounts_receivable",
+    "accounts_payable",
+    "inventory",
+    "operating_cash_flow",
+    "free_cash_flow",
+]
+
+CORE_ATTRIBUTES: frozenset[str] = frozenset(get_args(CoreAttribute))
+
+# The escape valve for everything outside the closed core -- a sector metric,
+# an operating KPI, or any label the core enum was never meant to cover.
+OPERATING_METRIC = "operating_metric"
+
+CANONICAL_ATTRIBUTES: frozenset[str] = CORE_ATTRIBUTES | {OPERATING_METRIC}
+
+
+def gate_canonical_attribute(proposed: str) -> tuple[str, list[str]]:
+    """The code half of SIM-344's proposer-with-code-gate: a proposed canonical
+    string earns that exact value only by literal membership in CORE_ATTRIBUTES,
+    or by being the OPERATING_METRIC escape valve. Anything else -- a
+    hallucinated near-miss, a paraphrase, the proposer's own "this looks
+    core-adjacent but I can't place it" signal -- falls to OPERATING_METRIC and
+    is flagged attribute_unmapped rather than trusted. Nothing calling this
+    function can end up with a canonical attribute outside CANONICAL_ATTRIBUTES.
+    """
+    if proposed in CORE_ATTRIBUTES:
+        return proposed, []
+    if proposed == OPERATING_METRIC:
+        return OPERATING_METRIC, []
+    return OPERATING_METRIC, ["attribute_unmapped"]
 
 
 class ClaimValue(BaseModel):
@@ -194,6 +268,11 @@ class Claim(BaseModel):
 
     entity: str
     attribute: str
+    # SIM-344: the document's own words for this attribute, before canonical
+    # mapping. None for a claim the canonicalization pass never reached (e.g.
+    # qualitative assertions, which keep their own attribute vocabulary via
+    # assertion_class) -- absence here means "not in scope", not "unmapped".
+    attribute_raw: str | None = None
     value: ClaimValue
     location: Location
     status: Status
@@ -213,6 +292,8 @@ class Claim(BaseModel):
             "location": self.location.to_json(),
             "status": self.status,
         }
+        if self.attribute_raw is not None:
+            out["attribute_raw"] = self.attribute_raw
         # Emitted only when trust was actually earned. The contract requires it
         # once status is cited or later, and forbids inventing one before that.
         if self.verification_method is not None:
@@ -368,6 +449,7 @@ def _missing_pdf_claim(
     section: str | None,
     claim_kind: Literal["quantitative", "qualitative"] | None = None,
     assertion_class: str | None = None,
+    attribute_raw: str | None = None,
 ) -> Claim:
     """A claim we looked for and did not find.
 
@@ -379,6 +461,7 @@ def _missing_pdf_claim(
     return Claim(
         entity=entity,
         attribute=attribute,
+        attribute_raw=attribute_raw,
         value=ClaimValue(raw=raw, normalized=None, unit=None, value_type=value_type),
         location=PdfLocation(
             file=file,
@@ -415,6 +498,7 @@ def emit_pdf_claim(
     document_name: str | None = None,
     page_header_ok: bool = True,
     stage: str = _STAGE_CLAIM_EMISSION,
+    attribute_raw: str | None = None,
 ) -> Claim:
     """Emit one PDF-sourced claim for `quote` on `page`. Fails closed to
     `status="missing"` on a zero-text page or an unresolved/ambiguous
@@ -455,6 +539,7 @@ def emit_pdf_claim(
             section=section,
             claim_kind=claim_kind,
             assertion_class=assertion_class,
+            attribute_raw=attribute_raw,
         )
 
     # Cell-scoped first when we know the cell, page-wide otherwise. Both go
@@ -478,6 +563,7 @@ def emit_pdf_claim(
             section=section,
             claim_kind=claim_kind,
             assertion_class=assertion_class,
+            attribute_raw=attribute_raw,
         )
 
     # Seeded, not empty: a caller-supplied flag (e.g. magnitude_unparseable from
@@ -568,6 +654,7 @@ def emit_pdf_claim(
     return Claim(
         entity=entity,
         attribute=attribute,
+        attribute_raw=attribute_raw,
         value=value,
         location=PdfLocation(
             file=file,
@@ -601,6 +688,7 @@ def emit_pdf_table_cell_claim(
     document_name: str | None = None,
     page_header_ok: bool = True,
     stage: str = _STAGE_CLAIM_EMISSION,
+    attribute_raw: str | None = None,
 ) -> Claim:
     """Emit a fact for one table cell. A cell with no resolvable bbox (neither
     Docling-native nor DS-2's reconstruction fallback located it) is written
@@ -625,6 +713,7 @@ def emit_pdf_table_cell_claim(
             document_id=document_id,
             document_name=document_name,
             section=section,
+            attribute_raw=attribute_raw,
         )
 
     return emit_pdf_claim(
@@ -645,6 +734,7 @@ def emit_pdf_table_cell_claim(
         document_name=document_name,
         page_header_ok=page_header_ok,
         stage=stage,
+        attribute_raw=attribute_raw,
     )
 
 

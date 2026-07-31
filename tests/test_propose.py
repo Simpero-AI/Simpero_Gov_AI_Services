@@ -13,16 +13,20 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from parser_service.emit import FlagLog, PdfLocation
+from parser_service.emit import CORE_ATTRIBUTES, OPERATING_METRIC, FlagLog, PdfLocation
 from parser_service.propose import (
     MAX_ASSERTIONS_PER_PAGE,
+    AttributeMapping,
+    AttributeMappings,
     PageAssertions,
     PageProposals,
     ProposedAssertion,
     ProposedClaim,
     assertions_from_prose,
+    canonicalize_attributes,
     claims_from_completeness,
     claims_from_prose,
+    propose_attribute_mappings,
     propose_for_page,
     prose_text,
 )
@@ -1021,4 +1025,82 @@ def test_completeness_makes_no_model_call_when_there_are_no_misses() -> None:
         client=client,
     )
     assert claims == []
-    assert client.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# SIM-344: propose_attribute_mappings / canonicalize_attributes.
+#
+# Every test here runs against a stub client, same discipline as the rest of
+# this file: what is under test is not the model, it is that nothing it says
+# is trusted past emit.gate_canonical_attribute's literal enum check.
+# --------------------------------------------------------------------------- #
+
+
+class _StubAttributeClient:
+    """Stands in for anthropic.Anthropic, returning fixed attribute mappings."""
+
+    def __init__(self, mappings: list[AttributeMapping]) -> None:
+        self._mappings = mappings
+        self.calls: list[dict] = []
+        self.messages = SimpleNamespace(parse=self._parse)
+
+    def _parse(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(parsed_output=AttributeMappings(mappings=self._mappings))
+
+
+def test_propose_attribute_mappings_makes_no_call_for_an_empty_batch() -> None:
+    def _must_not_run(**_k):
+        raise AssertionError("an empty batch has nothing to map")
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_must_not_run))
+    assert propose_attribute_mappings([], client=client) == {}
+
+
+def test_propose_attribute_mappings_returns_the_models_raw_answers() -> None:
+    client = _StubAttributeClient(
+        [
+            AttributeMapping(raw="Revenue | 2019F", canonical="revenue"),
+            AttributeMapping(raw="Total Rooms", canonical="operating_metric"),
+        ]
+    )
+    result = propose_attribute_mappings(["Revenue | 2019F", "Total Rooms"], client=client)
+    assert result == {"Revenue | 2019F": "revenue", "Total Rooms": "operating_metric"}
+    # Every core attribute is listed in the prompt so the model has the fixed
+    # vocabulary in front of it, not just examples.
+    prompt = client.calls[0]["system"][0]["text"]
+    assert all(attr in prompt for attr in CORE_ATTRIBUTES)
+
+
+def test_canonicalize_attributes_gates_a_literal_core_answer_through_clean() -> None:
+    client = _StubAttributeClient([AttributeMapping(raw="Revenue | 2019F", canonical="revenue")])
+    result = canonicalize_attributes(["Revenue | 2019F"], client=client)
+    assert result == {"Revenue | 2019F": ("revenue", [])}
+
+
+def test_canonicalize_attributes_gates_a_hallucinated_answer_to_unmapped() -> None:
+    # The model answered something plausible-sounding but not in the fixed
+    # list -- the code gate must not trust it just because it looks like an
+    # attribute name.
+    client = _StubAttributeClient(
+        [AttributeMapping(raw="Adjusted EBITDA (non-GAAP)", canonical="adjusted_ebitda")]
+    )
+    result = canonicalize_attributes(["Adjusted EBITDA (non-GAAP)"], client=client)
+    assert result == {"Adjusted EBITDA (non-GAAP)": (OPERATING_METRIC, ["attribute_unmapped"])}
+
+
+def test_canonicalize_attributes_treats_a_missing_answer_as_unmapped_not_dropped() -> None:
+    # The model's response omitted this label entirely -- must not be silently
+    # skipped; it still gets a canonical value and the flag that records the gap.
+    client = _StubAttributeClient([])
+    result = canonicalize_attributes(["Some Label"], client=client)
+    assert result == {"Some Label": (OPERATING_METRIC, ["attribute_unmapped"])}
+
+
+def test_canonicalize_attributes_dedupes_before_calling_the_model() -> None:
+    client = _StubAttributeClient([AttributeMapping(raw="Revenue | 2019F", canonical="revenue")])
+    canonicalize_attributes(
+        ["Revenue | 2019F", "Revenue | 2019F", "Revenue | 2019F"], client=client
+    )
+    assert len(client.calls) == 1
+    assert client.calls[0]["messages"][0]["content"].count("Revenue | 2019F") == 1

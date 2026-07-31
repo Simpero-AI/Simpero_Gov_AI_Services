@@ -24,8 +24,11 @@ from pydantic import ValidationError
 
 from parser_service.elements import ChartElement, TableElement
 from parser_service.emit import (
+    CANONICAL_ATTRIBUTES,
+    CORE_ATTRIBUTES,
     EDGE_TYPES,
     FLAG_TYPES,
+    OPERATING_METRIC,
     Claim,
     Edge,
     FlagLog,
@@ -35,6 +38,7 @@ from parser_service.emit import (
     emit_pdf_claim,
     emit_pdf_table_cell_claim,
     emit_xlsx_claim,
+    gate_canonical_attribute,
     log_chart_element_flags,
     log_table_element_flags,
 )
@@ -614,6 +618,107 @@ def test_all_edge_types_constant_matches_schema_enum(validator: Draft202012Valid
         validator.schema["$defs"]["edge"]["properties"]["type"]["enum"]  # type: ignore[index]
     )
     assert schema_edge_types == EDGE_TYPES
+
+
+# --------------------------------------------------------------------------- #
+# SIM-344: gate_canonical_attribute -- the code-gate half of proposer-with-
+# code-gate. Nothing here calls a model; these are the deterministic rules
+# every proposed mapping is judged against regardless of what the model said.
+# --------------------------------------------------------------------------- #
+
+
+def test_gate_accepts_a_literal_core_attribute() -> None:
+    canonical, flags = gate_canonical_attribute("ebitda")
+    assert canonical == "ebitda"
+    assert flags == []
+
+
+def test_gate_accepts_the_operating_metric_escape_valve() -> None:
+    canonical, flags = gate_canonical_attribute("operating_metric")
+    assert canonical == OPERATING_METRIC
+    assert flags == []
+
+
+def test_gate_flags_a_near_miss_rather_than_trusting_it() -> None:
+    # "revenues" is not "revenue" -- a plausible model paraphrase, and exactly
+    # what the code gate exists to catch rather than fuzzy-match.
+    canonical, flags = gate_canonical_attribute("revenues")
+    assert canonical == OPERATING_METRIC
+    assert flags == ["attribute_unmapped"]
+
+
+def test_gate_flags_the_explicit_core_unmapped_sentinel() -> None:
+    canonical, flags = gate_canonical_attribute("core_unmapped")
+    assert canonical == OPERATING_METRIC
+    assert flags == ["attribute_unmapped"]
+
+
+def test_core_attributes_and_operating_metric_are_disjoint() -> None:
+    assert OPERATING_METRIC not in CORE_ATTRIBUTES
+    assert CORE_ATTRIBUTES | {OPERATING_METRIC} == CANONICAL_ATTRIBUTES
+
+
+def test_attribute_unmapped_is_a_real_flag_type() -> None:
+    assert "attribute_unmapped" in FLAG_TYPES
+
+
+# --------------------------------------------------------------------------- #
+# SIM-344: Claim.attribute_raw -- optional, and only present in the emitted
+# JSON when actually set.
+# --------------------------------------------------------------------------- #
+
+
+def test_claim_to_json_omits_attribute_raw_when_unset() -> None:
+    claim = emit_pdf_claim(
+        "PTL Group",
+        "revenue",
+        "$15,295",
+        make_page("Revenue $15,295 total", page_no=1),
+        origin="table",
+        value_type="currency",
+        file="cim.pdf",
+        flag_log=FlagLog(),
+    )
+    assert "attribute_raw" not in claim.to_json()
+
+
+def test_claim_to_json_includes_attribute_raw_when_set(
+    validator: Draft202012Validator,
+) -> None:
+    claim = emit_pdf_claim(
+        "PTL Group",
+        "revenue",
+        "$15,295",
+        make_page("Revenue $15,295 total", page_no=1),
+        origin="table",
+        value_type="currency",
+        file="cim.pdf",
+        flag_log=FlagLog(),
+        attribute_raw="Revenue | 2019F",
+    )
+    payload = claim.to_json()
+    assert payload["attribute_raw"] == "Revenue | 2019F"
+    assert payload["attribute"] == "revenue"
+    errors = sorted(validator.iter_errors(payload), key=str)
+    assert not errors, "\n".join(e.message for e in errors)
+
+
+def test_missing_claim_still_carries_attribute_raw() -> None:
+    # A claim that failed to resolve still benefits from provenance about what
+    # the document called it -- attribute_raw is not conditional on status.
+    claim = emit_pdf_claim(
+        "PTL Group",
+        "revenue",
+        "not-on-this-page",
+        make_page("Revenue $15,295 total", page_no=1),
+        origin="table",
+        value_type="currency",
+        file="cim.pdf",
+        flag_log=FlagLog(),
+        attribute_raw="Revenue | 2019F",
+    )
+    assert claim.status == "missing"
+    assert claim.attribute_raw == "Revenue | 2019F"
 
 
 # --------------------------------------------------------------------------- #

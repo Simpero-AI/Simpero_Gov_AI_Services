@@ -105,6 +105,7 @@ async def extract(
     x_source_file: str | None = Header(default=None),
     x_prose: bool = Header(default=False),
     x_qualitative: bool = Header(default=False),
+    x_canonicalize_attributes: bool = Header(default=False),
 ) -> dict:
     """Parse a PDF and emit its claims -- the callable form of scripts/emit_claims.py.
 
@@ -129,6 +130,7 @@ async def extract(
             source_file=x_source_file,
             prose=x_prose,
             qualitative=x_qualitative,
+            canonicalize_attributes=x_canonicalize_attributes,
         )
     except ProseCredentialMissing as exc:
         logger.warning("extract rejected: run_id=%s missing prose credential", x_run_id)

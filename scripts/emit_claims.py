@@ -21,14 +21,23 @@ Four tiers, each additive:
                               Numeric only -- see coverage.py's module docstring
                               for why the qualitative tier does not get this pass.
   --qualitative            + assertions_from_prose  -- claims that carry no number (1 call/page)
+  --canonicalize-attributes + SIM-344 attribute mapping -- maps every quantitative
+                              claim's document-label attribute onto a closed
+                              canonical vocabulary (financial-statement core, or
+                              the operating_metric bucket), one batched call for
+                              the whole document. Independent of the other three:
+                              works on --table-only output just as well as on
+                              --prose output.
 
---qualitative and --complete both imply --prose. All three call the Anthropic API
-once per prose page (--complete once per page with an addressable miss, which may
-be zero pages) and require ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN); the script
-fails closed with that message rather than part way through a document. The
-per-page calls are independent -- a quote only ever resolves against its own
-page -- so they run concurrently, and a page whose call fails is recorded and
-skipped rather than aborting the run.
+--qualitative and --complete both imply --prose. --canonicalize-attributes does
+not -- it runs standalone on top of --table-only output too. Every flag except
+the default table tier calls the Anthropic API and requires ANTHROPIC_API_KEY
+(or ANTHROPIC_AUTH_TOKEN); the script fails closed with that message rather than
+part way through a document. The per-page prose calls are independent -- a quote
+only ever resolves against its own page -- so they run concurrently, and a page
+whose call fails is recorded and skipped rather than aborting the run.
+--canonicalize-attributes is one batched call for the whole document instead, not
+per-page.
 
 This is a thin CLI over parser_service.extract_service.extract_claims -- the
 same entry point POST /extract (main.py) calls, so the two can never drift.
@@ -74,6 +83,15 @@ def main(argv: list[str] | None = None) -> None:
         help="Also read claims that carry no number (implies --prose).",
     )
     parser.add_argument(
+        "--canonicalize-attributes",
+        action="store_true",
+        help=(
+            "Also map every quantitative claim's attribute onto the closed SIM-344 "
+            "canonical vocabulary (one batched model call for the whole document). "
+            "Independent of --prose/--complete/--qualitative."
+        ),
+    )
+    parser.add_argument(
         "--workers", type=int, default=8, help="Concurrent prose-page calls (default 8)."
     )
     args = parser.parse_args(argv)
@@ -88,6 +106,7 @@ def main(argv: list[str] | None = None) -> None:
             prose=args.prose,
             complete=args.complete,
             qualitative=args.qualitative,
+            canonicalize_attributes=args.canonicalize_attributes,
             workers=args.workers,
         )
     except ProseCredentialMissing as exc:
