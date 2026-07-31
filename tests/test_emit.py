@@ -20,14 +20,18 @@ from pathlib import Path
 import openpyxl
 import pytest
 from jsonschema import Draft202012Validator
+from pydantic import ValidationError
 
 from parser_service.elements import ChartElement, TableElement
 from parser_service.emit import (
+    EDGE_TYPES,
     FLAG_TYPES,
     Claim,
+    Edge,
     FlagLog,
     PdfLocation,
     XlsxLocation,
+    element_id_for,
     emit_pdf_claim,
     emit_pdf_table_cell_claim,
     emit_xlsx_claim,
@@ -602,6 +606,16 @@ def test_all_flag_types_constant_matches_schema_enum(validator: Draft202012Valid
     assert schema_flags == FLAG_TYPES
 
 
+def test_all_edge_types_constant_matches_schema_enum(validator: Draft202012Validator) -> None:
+    # The same lockstep FLAG_TYPES keeps: emit.EDGE_TYPES and the contract's
+    # $defs/edge enum must never drift, so adding an edge type in one place
+    # without the other fails here rather than silently at the seam.
+    schema_edge_types = set(
+        validator.schema["$defs"]["edge"]["properties"]["type"]["enum"]  # type: ignore[index]
+    )
+    assert schema_edge_types == EDGE_TYPES
+
+
 # --------------------------------------------------------------------------- #
 # Contract conformance -- every emitted claim must validate against the frozen
 # C3 schema, and a corrupted claim must fail loudly.
@@ -642,6 +656,88 @@ def test_missing_pdf_fact_json_conforms_to_schema(validator: Draft202012Validato
 
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)
+
+
+# --- SIM-341: element_id_for / Edge ------------------------------------------
+
+
+def test_element_id_for_pdf_claim_includes_the_resolved_span() -> None:
+    page = make_page("Revenue was $100 here.")
+    claim = emit_pdf_claim(
+        "ACME",
+        "revenue",
+        "$100",
+        page,
+        origin="prose",
+        value_type="currency",
+        file="cim.pdf",
+        flag_log=FlagLog(),
+    )
+    assert element_id_for(claim).startswith("pdf:cim.pdf:p1:revenue:c")
+
+
+def test_element_id_for_distinguishes_claims_sharing_page_and_attribute() -> None:
+    # Two different quotes for the same attribute on the same page must not
+    # collapse onto one id -- an edge between them would point a claim at
+    # itself.
+    page = make_page("Revenue was $100 and $200 here.")
+    flag_log = FlagLog()
+    claim_a = emit_pdf_claim(
+        "ACME",
+        "revenue",
+        "$100",
+        page,
+        origin="prose",
+        value_type="currency",
+        file="cim.pdf",
+        flag_log=flag_log,
+    )
+    claim_b = emit_pdf_claim(
+        "ACME",
+        "revenue",
+        "$200",
+        page,
+        origin="prose",
+        value_type="currency",
+        file="cim.pdf",
+        flag_log=flag_log,
+    )
+    assert element_id_for(claim_a) != element_id_for(claim_b)
+
+
+def test_element_id_for_missing_claim_has_no_span() -> None:
+    page = make_page("")
+    claim = emit_pdf_claim(
+        "ACME",
+        "revenue",
+        "$100",
+        page,
+        origin="prose",
+        value_type="currency",
+        file="cim.pdf",
+        flag_log=FlagLog(),
+    )
+    assert claim.status == "missing"
+    assert element_id_for(claim) == "pdf:cim.pdf:p1:revenue"
+
+
+def test_edge_to_json_uses_the_from_alias() -> None:
+    edge = Edge(type="same_fact", from_="elem-a", to="elem-b", basis="test basis")
+    assert edge.to_json() == {
+        "type": "same_fact",
+        "from": "elem-a",
+        "to": "elem-b",
+        "basis": "test basis",
+    }
+
+
+def test_edge_rejects_unknown_type() -> None:
+    with pytest.raises(ValidationError):
+        Edge(type="duplicate_of", from_="elem-a", to="elem-b", basis="test basis")  # type: ignore[arg-type]
+
+
+def test_edge_types_constant_matches_the_pair_the_reducer_emits() -> None:
+    assert {"same_fact", "contradicts"} == EDGE_TYPES
 
 
 def test_extracted_xlsx_claim_json_conforms_to_schema(validator: Draft202012Validator) -> None:

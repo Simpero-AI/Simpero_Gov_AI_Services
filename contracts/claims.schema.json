@@ -3,6 +3,31 @@
   "$id": "https://simpero.ai/contracts/claims.schema.json",
   "title": "Claim",
   "description": "The C3 seam contract: one claim row as emitted by the Python parse service across the JSON boundary to the backend. The consuming side validates against this SAME file. A change here must be made on both sides together, or the contract job fails.\n\nA claim is an assertion pending verification, not a verified truth (hence claims, not facts). Nothing is emitted without a citation attached at write time, and provenance is all-or-nothing: a claim resolves to an exact span, or it is emitted with status=missing. A partial or approximate citation is never written.",
+  "$defs": {
+    "edge": {
+      "title": "Edge",
+      "description": "SIM-341: a within-page relationship between two claims a per-page reducer found at the extraction fan-in, sitting beside `claims` in the emitted payload (not a property of a single claim row, so it is not referenced from the Claim schema above). `from`/`to` name claims by their parser-run-scoped element_id (parser_service.emit.element_id_for) -- not the backend's `id`, which does not exist yet at parse time. The parser only emits the edge; it never merges or drops a claim because of one -- store persistence and cross-document edges are the backend's job at ingest.\n\nsame_fact: `to` is the higher-precision source (table wins on a number); `from` is corroboration of the same real-world fact, not a duplicate to discard. contradicts: `from`/`to` disagree on value for what looks like the same fact -- neither is preferred, and the disagreement itself is what a consumer needs to see.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "from", "to", "basis"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["same_fact", "contradicts"]
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "basis": {
+          "type": "string",
+          "description": "Human-readable reason the reducer linked these two claims, e.g. which tiers agreed or disagreed and on what."
+        }
+      }
+    }
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [

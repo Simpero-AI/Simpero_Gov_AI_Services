@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+from parser_service.emit import Edge
 from parser_service.scale import scale_invariant_holds
 
 SCHEMA_PATH = Path(__file__).parent / "claims.schema.json"
@@ -355,3 +356,72 @@ def test_xlsx_blocking_flags_accepted(validator: Draft202012Validator) -> None:
     # The XLSX path's blocking flags must be part of the contract.
     ok = {**VALID_XLSX_CLAIM, "flags": ["formula_mismatch", "external_reference_unresolved"]}
     assert not list(validator.iter_errors(ok)), "xlsx blocking flags should validate"
+
+
+# --- SIM-341: the `edges` array's element shape ------------------------------
+# `edges` sits beside `claims` in the emitted payload, not inside a Claim row,
+# so it is validated against the schema's `$defs/edge` sub-schema directly
+# rather than through the top-level Claim validator above.
+
+VALID_SAME_FACT_EDGE = {
+    "type": "same_fact",
+    "from": "pdf:cim.pdf:p3:total revenue for fiscal 2024:c500-551",
+    "to": "pdf:cim.pdf:p3:Revenue | 2024F:c10-17",
+    "basis": "page 3: table and prose tiers agree on entity, value type + normalized value",
+}
+
+VALID_CONTRADICTS_EDGE = {
+    "type": "contradicts",
+    "from": "pdf:cim.pdf:p5:Revenue | 2024F:c10-21",
+    "to": "pdf:cim.pdf:p5:Revenue | 2024F:c200-233",
+    "basis": "page 5: table ('$15,000,000') and prose ('$12,000,000 excluding "
+    "settlement') disagree on the same attribute",
+}
+
+
+@pytest.fixture(scope="module")
+def edge_validator() -> Draft202012Validator:
+    schema = json.loads(SCHEMA_PATH.read_text())
+    edge_schema = schema["$defs"]["edge"]
+    Draft202012Validator.check_schema(edge_schema)
+    return Draft202012Validator(edge_schema)
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [VALID_SAME_FACT_EDGE, VALID_CONTRADICTS_EDGE],
+    ids=["same_fact", "contradicts"],
+)
+def test_valid_edges_pass(edge_validator: Draft202012Validator, edge: dict) -> None:
+    errors = sorted(edge_validator.iter_errors(edge), key=str)
+    assert not errors, "\n".join(e.message for e in errors)
+
+
+def test_unknown_edge_type_rejected(edge_validator: Draft202012Validator) -> None:
+    bad = {**VALID_SAME_FACT_EDGE, "type": "duplicate_of"}
+    assert list(edge_validator.iter_errors(bad)), "unknown edge type should be rejected"
+
+
+def test_edge_extra_top_level_key_rejected(edge_validator: Draft202012Validator) -> None:
+    bad = {**VALID_SAME_FACT_EDGE, "surprise": "drift"}
+    assert list(edge_validator.iter_errors(bad)), "unexpected edge key should be rejected"
+
+
+@pytest.mark.parametrize("field", ["type", "from", "to", "basis"])
+def test_edge_requires_all_fields(edge_validator: Draft202012Validator, field: str) -> None:
+    bad = {k: v for k, v in VALID_SAME_FACT_EDGE.items() if k != field}
+    assert list(edge_validator.iter_errors(bad)), f"edge without {field!r} should be rejected"
+
+
+def test_a_real_emitted_edge_conforms_to_the_schema(edge_validator: Draft202012Validator) -> None:
+    # The literals above are hand-authored; a real Edge.to_json() can drift from
+    # them and still be the thing actually shipped. Validate the serializer's own
+    # output so a rename like `from_` no longer mapping to `from` fails here.
+    edge = Edge(
+        type="same_fact",
+        from_="pdf:cim.pdf:p3:total revenue for fiscal 2024:c500-551",
+        to="pdf:cim.pdf:p3:Revenue | 2024F:c10-17",
+        basis="page 3: table and prose tiers agree on entity, value type + normalized value",
+    ).to_json()
+    errors = sorted(edge_validator.iter_errors(edge), key=str)
+    assert not errors, "\n".join(e.message for e in errors)

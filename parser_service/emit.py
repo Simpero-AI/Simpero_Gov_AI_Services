@@ -244,6 +244,67 @@ class SkippedPage(BaseModel):
         return {"page": self.page, "tier": self.tier, "reason": self.reason}
 
 
+def element_id_for(claim: Claim) -> str:
+    """A per-claim id, stable within one parse run, for cross-referencing
+    claims outside the C3 contract itself (SIM-341's `edges`). Not persisted
+    and not the backend's eventual `id` -- the backend assigns that at
+    ingest and maps these run-scoped ids onto it.
+
+    Deliberately distinct from the page+attribute id FlagLog entries key on
+    (built inline in emit_pdf_claim): that one exists to bucket flags raised
+    before a quote resolves, so it intentionally collides across claims that
+    share a page and attribute. An edge instead names ONE specific claim, so
+    this includes the resolved span (or cell ref) too -- two claims with the
+    same page and attribute but different quotes must not collapse onto one
+    id, or a `contradicts` edge would point from a claim to itself.
+    """
+    location = claim.location
+    if isinstance(location, PdfLocation):
+        base = f"pdf:{location.file}:p{location.page}:{claim.attribute}"
+        if location.char_start is not None and location.char_end is not None:
+            return f"{base}:c{location.char_start}-{location.char_end}"
+        return base
+    return f"xlsx:{location.file}:{location.sheet}!{location.cell_ref}:{claim.attribute}"
+
+
+# The two within-page relationships the fan-in reducer
+# (parser_service/extract_service.py) can find between claims two different
+# tiers produced on the same page. Kept
+# here, mirrored in the C3 contract's edge definition, same pattern as
+# FLAG_TYPES above.
+EdgeType = Literal["same_fact", "contradicts"]
+
+EDGE_TYPES = frozenset({"same_fact", "contradicts"})
+
+
+class Edge(BaseModel):
+    """One within-page relationship between two claims, emitted by the SIM-341
+    fan-in reducer. The parser only emits the edge -- it never drops or merges
+    the claims it connects, so both provenances survive; the backend maps
+    `from`/`to` (element_id_for) onto real claim rows at ingest and is where
+    cross-document edges get added, not here.
+
+    `same_fact`: `to` is the higher-precision source (table beats prose on a
+    number) and `from` is kept as corroboration of the same real-world fact.
+    `contradicts`: `from`/`to` name what looks like the same fact but disagree
+    on value -- neither wins, both stay, and the disagreement is the signal.
+    """
+
+    # No alias for `from_`: this model is only ever constructed in Python (the
+    # reducer) and serialized outward via to_json(), never parsed FROM JSON --
+    # so there is no need for pydantic to accept the reserved-word key "from"
+    # as input, only to emit it, which to_json() does directly.
+    model_config = ConfigDict(extra="forbid")
+
+    type: EdgeType
+    from_: str
+    to: str
+    basis: str
+
+    def to_json(self) -> dict:
+        return {"type": self.type, "from": self.from_, "to": self.to, "basis": self.basis}
+
+
 class FlagLogEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
