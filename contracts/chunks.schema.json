@@ -2,53 +2,26 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://simpero.ai/contracts/chunks.schema.json",
   "title": "Chunk",
-  "description": "The retrieval-index seam contract: one chunk as emitted by the Python parse service (scripts/emit_chunks.py, as ChunkRecord.model_dump(mode='json')) across the JSON boundary to the backend, which validates against this SAME file and ingests it into the `chunks` table. This validates ONE chunk; the backend walks payload['chunks']. A change here must be made on both repos' contracts/ together, or the contract job fails -- the same discipline claims.schema.json carries.\n\nA chunk is element-based and PAGE-BOUNDED: it never spans two pages, so every span resolves back to an exact source location in that page's text. Retrieval metadata (document_id, scale_context, element_type) is stamped at creation and immutable.",
+  "description": "The retrieval-index seam contract: one chunk as emitted by the Python parse service (scripts/emit_chunks.py, as ChunkRecord.model_dump(mode='json')) across the JSON boundary to the backend, which validates against this SAME file and ingests it into the `chunks` table. This validates ONE chunk; the backend walks payload['chunks']. A change here must be made on both repos' contracts/ together, or the contract job fails -- the same discipline claims.schema.json carries.\n\nEvery field ChunkRecord.model_dump(mode='json') emits is `required`: it emits all of them (nulls included, never omitted), so a serializer that stops emitting one -- a dropped span, a lost flag -- must fail here, not silently at ingest.\n\nA chunk is element-based and PAGE-BOUNDED: it never spans two pages, so every span resolves back to an exact source location in that page's text.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["content", "element_type", "page", "order", "document_id", "source_file"],
+  "required": [
+    "content", "element_type", "page", "order", "document_id", "source_file",
+    "scale_context", "scale_multiplier", "spans", "bbox", "section", "flags"
+  ],
   "properties": {
-    "content": {
-      "type": "string",
-      "description": "The chunk's text as retrieved and embedded."
-    },
-    "element_type": {
-      "enum": ["prose", "table", "chart"],
-      "description": "What the chunk is cut from; the three retrieve differently."
-    },
-    "page": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "1-based source page. A chunk never spans two pages."
-    },
-    "order": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "Document-order sort key, stable across a run."
-    },
-    "document_id": {
-      "type": "string",
-      "description": "Source document sha256; the backend maps it to a data_source id."
-    },
-    "source_file": {
-      "type": "string",
-      "description": "Debug/human-readable only; identity is document_id."
-    },
-    "scale_context": {
-      "type": ["string", "null"],
-      "description": "The page/column scale banner in force for numbers in this chunk (e.g. 'CAD in Thousands'), or null."
-    },
-    "scale_multiplier": {
-      "type": ["number", "null"]
-    },
+    "content": { "type": "string", "description": "The chunk's text as retrieved and embedded." },
+    "element_type": { "enum": ["prose", "table", "chart"], "description": "What the chunk is cut from; the three retrieve differently." },
+    "page": { "type": "integer", "minimum": 1, "description": "1-based source page. A chunk never spans two pages." },
+    "order": { "type": "integer", "minimum": 0, "description": "Document-order sort key, stable across a run." },
+    "document_id": { "type": "string", "description": "Source document sha256; the backend maps it to a data_source id." },
+    "source_file": { "type": "string", "description": "Debug/human-readable only; identity is document_id." },
+    "scale_context": { "type": ["string", "null"], "description": "The page/column scale banner for numbers in this chunk (e.g. 'CAD in Thousands'), or null." },
+    "scale_multiplier": { "type": ["number", "null"] },
     "spans": {
       "type": "array",
-      "description": "(char_start, char_end) pairs into the page's text, one per source block, so page.text[start:end] round-trips the block.",
-      "items": {
-        "type": "array",
-        "items": { "type": "integer", "minimum": 0 },
-        "minItems": 2,
-        "maxItems": 2
-      }
+      "description": "(char_start, char_end) pairs into the page's text, one per source block.",
+      "items": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 2, "maxItems": 2 }
     },
     "bbox": {
       "type": ["object", "null"],
@@ -63,13 +36,7 @@
       },
       "description": "Region citation for a chart/table chunk gathered by geometry, not reading order; null for prose."
     },
-    "section": {
-      "type": ["string", "null"],
-      "description": "The section heading governing this chunk, or null."
-    },
-    "flags": {
-      "type": "array",
-      "items": { "type": "string" }
-    }
+    "section": { "type": ["string", "null"], "description": "The section heading governing this chunk, or null." },
+    "flags": { "type": "array", "items": { "type": "string" } }
   }
 }

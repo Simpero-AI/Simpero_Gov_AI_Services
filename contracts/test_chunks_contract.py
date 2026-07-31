@@ -97,7 +97,21 @@ def test_a_real_emitted_chunk_conforms(validator: Draft202012Validator) -> None:
         source_file="cim.pdf",
         bbox=BBox(x0=72.0, top=100.0, x1=300.0, bottom=240.0, page=12),
     ).model_dump(mode="json")
-    for emitted in (prose, chart):
+    # The table shape is the one that populates scale_multiplier (float), a bbox
+    # citation, and flags -- the fields a prose/chart-only case never exercises.
+    table = ChunkRecord(
+        content="Revenue 15,295 | EBITDA 4,200",
+        element_type="table",
+        page=11,
+        order=2,
+        document_id="a" * 64,
+        source_file="cim.pdf",
+        scale_context="$ in thousands",
+        scale_multiplier=1000.0,
+        bbox=BBox(x0=50.0, top=200.0, x1=520.0, bottom=410.0, page=11),
+        flags=["ragged_table_rows"],
+    ).model_dump(mode="json")
+    for emitted in (prose, chart, table):
         errors = sorted(validator.iter_errors(emitted), key=str)
         assert not errors, "\n".join(e.message for e in errors)
 
@@ -126,7 +140,24 @@ def test_span_must_be_a_pair(validator: Draft202012Validator) -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["content", "element_type", "page", "order", "document_id", "source_file"]
+    "field",
+    # ChunkRecord.model_dump(mode="json") emits ALL 12 fields (nulls included),
+    # so every one is required -- dropping any (e.g. a serializer that stopped
+    # emitting `spans` or `flags`) must fail here, not silently at ingest.
+    [
+        "content",
+        "element_type",
+        "page",
+        "order",
+        "document_id",
+        "source_file",
+        "scale_context",
+        "scale_multiplier",
+        "spans",
+        "bbox",
+        "section",
+        "flags",
+    ],
 )
 def test_required_fields(validator: Draft202012Validator, field: str) -> None:
     bad = {k: v for k, v in VALID_PROSE_CHUNK.items() if k != field}
