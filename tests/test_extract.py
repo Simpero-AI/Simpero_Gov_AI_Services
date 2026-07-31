@@ -23,6 +23,7 @@ from parser_service.extract import (
     claims_from_table,
     infer_value_type_for,
     is_confident_currency,
+    resolve_period,
     section_banners,
 )
 from parser_service.schemas import CharBox, PageIndex, TableCellRecord, TableRecord
@@ -260,6 +261,57 @@ def test_value_type_is_judged_from_the_value_and_its_attribute(
 
 
 # --------------------------------------------------------------------------- #
+# resolve_period -- SIM-345
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("column_header", "expected_year", "expected_kind"),
+    [
+        # The ticket's own acceptance figures.
+        ("2019F", 2019, "P"),
+        ("FY19E", 2019, "E"),
+        ("2020A", 2020, "A"),
+        # "P" spells the same forward-looking kind as "F".
+        ("2020P", 2020, "P"),
+        # "FY" with a full four-digit year, with and without a separating space.
+        ("FY2019E", 2019, "E"),
+        ("FY 2019E", 2019, "E"),
+        # A footnote marker trailing the suffix.
+        ("2008E (1)", 2008, "E"),
+        # An unqualified year names the year with no kind -- the header does not
+        # say which, so nothing is guessed.
+        ("2020", 2020, None),
+    ],
+)
+def test_resolve_period_reads_the_column_header_suffix(
+    column_header: str, expected_year: int | None, expected_kind: str | None
+) -> None:
+    assert resolve_period(column_header) == (expected_year, expected_kind)
+
+
+@pytest.mark.parametrize(
+    "column_header",
+    [
+        # LTM/TTM name a trailing period this contract has no slot for yet
+        # (deferred; see resolve_period's docstring) -- unresolved, not guessed.
+        "LTM",
+        "TTM",
+        "LTM 2020",
+        # A bare two-digit number with no "FY" marker is too easy to collide
+        # with an unrelated count or footnote number to trust as a year.
+        "19",
+        "19E",
+        # Not period-shaped at all.
+        "Hotel Rooms",
+        "",
+    ],
+)
+def test_resolve_period_does_not_guess_what_it_cannot_read(column_header: str) -> None:
+    assert resolve_period(column_header) == (None, None)
+
+
+# --------------------------------------------------------------------------- #
 # attribute_for
 # --------------------------------------------------------------------------- #
 
@@ -449,6 +501,9 @@ def test_emits_one_cited_claim_per_numeric_cell() -> None:
         location = claim.location
         assert isinstance(location, PdfLocation)
         assert location.char_start is not None and location.char_end is not None
+        # SIM-345: both cells sit under the same "2019F" column header.
+        assert claim.period_year == 2019
+        assert claim.period_kind == "P"
 
 
 def test_skips_labels_headers_and_prose() -> None:
@@ -506,6 +561,10 @@ def test_an_uncitable_cell_is_missing_not_dropped() -> None:
     assert isinstance(location, PdfLocation)
     assert location.char_start is None and location.char_end is None
     assert [e.flag_type for e in flag_log.entries] == ["quote_unresolved"]
+    # SIM-345: the period was read off the column header, not the resolved
+    # span, so it survives even though the value itself could not be cited.
+    assert claims[0].period_year == 2019
+    assert claims[0].period_kind == "P"
 
 
 # --------------------------------------------------------------------------- #

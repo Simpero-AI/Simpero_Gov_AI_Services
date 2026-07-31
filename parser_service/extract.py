@@ -17,9 +17,11 @@ CIM. It cannot:
   - name an attribute in the product's vocabulary ("Revenue | 2019F" is the
     table's own words, not `revenueLatestUsd`)
   - read prose, or any table whose meaning is not carried by its row labels
-  - know a period from a fiscal-year convention (period_year/period_kind are
-    left for a later pass; the year, where present, is in the column header
-    the attribute string quotes)
+  - map a period to a fiscal-year END-MONTH convention: resolve_period reads
+    (year, A/E/P) straight off the column-header suffix, which is document-
+    local and unambiguous on its own (SIM-345), but a stated "fiscal year
+    ending <month>" -- needed only to compare across documents with different
+    FY ends -- is a separate, still-deferred field
 
 The real extractor is an open design question (deterministic vs LLM). Treat this
 as the floor: the thing that proves the pipeline end-to-end and gives that
@@ -39,7 +41,7 @@ from __future__ import annotations
 
 import re
 
-from .emit import Claim, FlagLog, emit_pdf_table_cell_claim
+from .emit import Claim, FlagLog, PeriodKind, emit_pdf_table_cell_claim
 from .scale import ValueType, has_parseable_magnitude
 from .schemas import PageIndex, TableCellRecord, TableRecord
 
@@ -111,6 +113,63 @@ def _column_header(table: TableRecord, col: int) -> str:
             seen.add(id(cell))
             parts.append(text)
     return " ".join(parts)
+
+
+# An optional "FY" marker, stripped separately from the year/kind match below so
+# a bare two-digit year ("19") -- too easy to collide with an unrelated count or
+# footnote number -- is only trusted with that marker in front of it. "FY2019E"
+# and "FY 2019E" both strip to "2019E" here; a plain "2019E" never had a prefix
+# to strip.
+_FY_PREFIX = re.compile(r"^\s*FY\s*", re.IGNORECASE)
+
+# year (2 digit, only trustworthy once FY has been stripped by the caller, or 4
+# digit standing alone) + an optional actual/estimate/projected suffix letter +
+# an optional trailing footnote marker ("2008E (1)"). Anchored to the WHOLE
+# (post-FY-strip) string: this is asked only of a column header, never a row
+# label, so "2019F" resolves and a row label that happens to end in a year does
+# not silently gain a period.
+_PERIOD_RE = re.compile(
+    r"^(?P<year>(?:19|20)\d{2}|\d{2})(?P<kind>[AEFP])?\s*(?:\(\d+\))?$",
+    re.IGNORECASE,
+)
+
+# F and P both spell a forward-looking figure ("2019F", "2019P") -- the ticket's
+# landed decision (SIM-345) reads them as the same period_kind. LTM/TTM name a
+# trailing period that has no slot in the contract's A/E/P enum (a Postgres
+# String(1) CHECK constraint on the backend) and are deliberately left
+# unresolved rather than guessing one; see resolve_period's docstring.
+_PERIOD_KIND_BY_LETTER: dict[str, PeriodKind] = {"A": "A", "E": "E", "F": "P", "P": "P"}
+
+
+def resolve_period(column_header: str) -> tuple[int | None, PeriodKind | None]:
+    """(period_year, period_kind) parsed from a column header suffix -- SIM-345.
+
+    Document-local and unambiguous, so this needs no fiscal-year convention:
+    A -> actual, E -> estimate, F/P -> projected. A bare year ("2019") resolves
+    the year with no kind, since the header does not qualify it.
+
+    Returns (None, None), never a guess, when the header is not period-shaped
+    at all -- including LTM/TTM, which names a trailing period this contract
+    has no slot for yet (deferred; see the module docstring and _PERIOD_RE).
+    """
+    text = column_header.strip()
+    had_fy_prefix = bool(_FY_PREFIX.match(text))
+    text = _FY_PREFIX.sub("", text, count=1)
+
+    match = _PERIOD_RE.match(text)
+    if match is None:
+        return None, None
+
+    year_text = match.group("year")
+    if len(year_text) == 2 and not had_fy_prefix:
+        return None, None
+    year = int(year_text)
+    if len(year_text) == 2:
+        year += 2000 if year < 69 else 1900
+
+    kind_letter = match.group("kind")
+    kind = _PERIOD_KIND_BY_LETTER.get(kind_letter.upper()) if kind_letter else None
+    return year, kind
 
 
 # --------------------------------------------------------------------------- #
@@ -522,6 +581,10 @@ def claims_from_table(
     silently. That matters: a dropped cell is invisible, a `missing` claim is a
     recall gap you can see.
 
+    period_year/period_kind (SIM-345) are resolved from the cell's own column
+    header, independent of whether the value resolves -- a missing claim still
+    carries the period it was searched under.
+
     Rows are read under their in-table section banner (see section_banners), so a
     line keeps the heading the document filed it under. That is what separates
     the two "Coffee Shop" rows on a P&L, and what names the unlabelled subtotal
@@ -541,6 +604,8 @@ def claims_from_table(
         if attribute is None:
             continue
 
+        period_year, period_kind = resolve_period(_column_header(table, cell.col))
+
         claims.append(
             emit_pdf_table_cell_claim(
                 entity,
@@ -553,6 +618,8 @@ def claims_from_table(
                 flag_log=flag_log,
                 section=section,
                 page_header_ok=is_confident_currency(raw, attribute),
+                period_year=period_year,
+                period_kind=period_kind,
             )
         )
     return claims
