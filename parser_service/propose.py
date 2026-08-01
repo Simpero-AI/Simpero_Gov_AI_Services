@@ -655,6 +655,11 @@ Never invent a canonical name outside the fixed list above. Never guess when \
 unsure -- answer core_unmapped instead; a wrong guess is worse than an honest \
 "unmapped".
 
+gross_margin, net_margin and ebitda_margin are three separate names, not one \
+generic "margin" -- pick the one the label actually names (gross profit margin, \
+net income margin, EBITDA margin); if the label just says "margin" with no \
+qualifier telling you which, that is the ambiguous case in (3), core_unmapped.
+
 A label may carry a period, section banner or column header appended to it \
 ("Revenue | 2019F", "TURNOVER | Coffee Shop | YEAR 1") -- classify what the label \
 NAMES, ignoring the period/section/column qualifiers riding along with it.

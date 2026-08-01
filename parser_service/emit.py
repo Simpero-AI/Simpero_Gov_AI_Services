@@ -114,6 +114,15 @@ FLAG_TYPES = frozenset(
 # Claim.attribute_raw. A fully-closed enum covering sector/operating metrics
 # (occupancy, ARPU, same-store sales, ...) would flag-storm; this two-tier
 # split is the ticket's landed decision, not a shortcut.
+#
+# "margin" was originally one bucket for every margin figure. A single core
+# fact-slot review found this too coarse: a gross-margin claim and a net-margin
+# claim on the same CIM page both canonicalized to "margin", so the extract
+# reducer's `contradicts` pass (keyed on page/entity/attribute/value_type) read
+# two different real facts as one fact-slot disagreeing with itself. Split into
+# gross/net/EBITDA margin so each keeps its own fact-slot identity; the
+# reducer needs no change; the attribute-mapping prompt already lists whatever
+# is in this enum, so the model sees the split automatically.
 # --------------------------------------------------------------------------- #
 
 CoreAttribute = Literal[
@@ -124,7 +133,9 @@ CoreAttribute = Literal[
     "ebitda",
     "ebit",
     "net_income",
-    "margin",
+    "gross_margin",
+    "net_margin",
+    "ebitda_margin",
     "depreciation_and_amortization",
     "interest_expense",
     "tax_expense",

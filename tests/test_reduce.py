@@ -255,6 +255,40 @@ def test_canonicalization_makes_no_call_when_nothing_is_in_scope(monkeypatch) ->
     )
 
 
+def test_gross_and_net_margin_no_longer_false_contradict_after_canonicalization(
+    monkeypatch,
+) -> None:
+    # Reproduces the review's residual: before CORE_ATTRIBUTES split "margin"
+    # into gross_margin/net_margin/ebitda_margin, a gross-margin claim and a
+    # net-margin claim on the same page both canonicalized to the single
+    # "margin" bucket and false-contradicted (contradicts is keyed on
+    # attribute, and a coarse bucket is not one fact-slot). With the split,
+    # each keeps its own canonical name, so the reducer no longer collapses
+    # them.
+    gross = _claim(
+        attribute="Gross Margin", raw="40%", normalized=40.0, value_type="percent", page=7
+    )
+    net = _claim(
+        attribute="Net Margin",
+        raw="12%",
+        normalized=12.0,
+        value_type="percent",
+        page=7,
+        char_start=30,
+    )
+    monkeypatch.setattr(
+        extract_service,
+        "canonicalize_attributes",
+        lambda labels: {"Gross Margin": ("gross_margin", []), "Net Margin": ("net_margin", [])},
+    )
+    tier_claims = [("table", [gross]), ("prose", [net])]
+
+    _canonicalize_quantitative_claims(tier_claims, FlagLog())
+    edges = _reduce_same_fact(tier_claims)
+
+    assert edges == []
+
+
 def test_canonicalization_before_reduction_keeps_edges_consistent_with_final_attributes(
     monkeypatch,
 ) -> None:
