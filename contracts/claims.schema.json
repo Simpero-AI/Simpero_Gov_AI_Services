@@ -67,6 +67,13 @@
       "type": "string",
       "description": "The field, e.g. revenueLatestUsd."
     },
+    "attribute_raw": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "SIM-344: the document's own label for this attribute, before canonical mapping (e.g. \"Revenue | 2019F\"), retained alongside the canonical `attribute`. Null for a claim the canonicalization pass never reached -- e.g. a qualitative assertion, which is categorized by assertion_class instead and keeps its own attribute vocabulary."
+    },
     "period_year": {
       "type": [
         "integer",
@@ -413,7 +420,8 @@
           "external_reference_unresolved",
           "magnitude_unparseable",
           "cites_boilerplate",
-          "binding_unsupported"
+          "binding_unsupported",
+          "attribute_unmapped"
         ]
       }
     },

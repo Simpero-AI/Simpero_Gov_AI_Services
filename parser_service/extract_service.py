@@ -21,11 +21,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .coverage import NumberMiss, document_coverage
 from .docling_parser import parse_pdf_bytes
-from .emit import Claim, Edge, FlagLog, PdfLocation, SkippedPage, element_id_for
+from .emit import OPERATING_METRIC, Claim, Edge, FlagLog, PdfLocation, SkippedPage, element_id_for
 from .extract import claims_from_table
 from .propose import (
     api_key_present,
     assertions_from_prose,
+    canonicalize_attributes,
     claims_from_completeness,
     claims_from_prose,
     prose_text,
@@ -205,6 +206,53 @@ def _page_of(claim: Claim) -> int:
     return claim.location.page
 
 
+_STAGE_ATTRIBUTE_MAPPING = "attribute_mapping"
+
+# SIM-344 scope: quantitative claims only. "qualitative" is deliberately
+# excluded -- assertions_from_prose's assertion_class already categorizes
+# those, and their attributes are open noun phrases ("on-site dry cleaning
+# availability") that do not fit a financial-core-or-operating_metric enum.
+_CANONICALIZABLE_TIERS = frozenset({"table", "prose", "complete"})
+
+
+def _canonicalize_quantitative_claims(
+    tier_claims: list[tuple[str, list[Claim]]], flag_log: FlagLog
+) -> None:
+    """SIM-344: map each quantitative claim's document-label attribute onto the
+    closed canonical vocabulary, in place.
+
+    Must run before _reduce_same_fact: edges are addressed by
+    emit.element_id_for(claim), which reads claim.attribute, so an edge built
+    from the pre-canonicalization attribute would point at an element_id no
+    claim carries by the time the payload is returned.
+
+    One batched call across every distinct raw label in the in-scope tiers --
+    see propose.canonicalize_attributes -- never one call per claim.
+    """
+    raw_labels = [
+        claim.attribute
+        for tier, claims in tier_claims
+        if tier in _CANONICALIZABLE_TIERS
+        for claim in claims
+    ]
+    if not raw_labels:
+        return
+    mapping = canonicalize_attributes(raw_labels)
+    for tier, claims in tier_claims:
+        if tier not in _CANONICALIZABLE_TIERS:
+            continue
+        for claim in claims:
+            raw = claim.attribute
+            canonical, extra_flags = mapping[raw]
+            claim.attribute_raw = raw
+            claim.attribute = canonical
+            if extra_flags:
+                claim.flags = [*claim.flags, *extra_flags]
+                flag_log.log_all(
+                    _STAGE_ATTRIBUTE_MAPPING, element_id_for(claim), extra_flags, detail=raw
+                )
+
+
 def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
     """SIM-341: the per-page extraction fan-in. Reconciles a fact two tiers
     both saw on the same page, without dropping either claim -- the parser
@@ -231,10 +279,18 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
     on numbers; otherwise the first tier in pipeline order) and links every
     other claim in the group to it with a `same_fact` edge.
 
-    contradicts: group by (page, entity, attribute) instead -- the same
-    labeled fact-slot, stated with different numbers by different tiers ("$15M"
-    table vs "$12M excluding settlement" prose). That disagreement is signal,
-    not noise, so it is flagged and neither claim is preferred.
+    contradicts: group by (page, entity, attribute, value_type) instead -- the
+    same labeled fact-slot, stated with different numbers by different tiers
+    ("$15M" table vs "$12M excluding settlement" prose). value_type is in the
+    key for the same reason it is in same_fact's: without it, a percent and a
+    currency that both canonicalized to the same attribute look like one
+    fact-slot disagreeing with itself. OPERATING_METRIC claims are excluded
+    from this pass entirely -- it is SIM-344's catch-all bucket for every
+    sector/operating metric the core enum does not cover, so two claims
+    landing there share nothing but the bucket, not a fact-slot (occupancy vs
+    ARPU would otherwise fuse into a false `contradicts` edge). That
+    disagreement is signal, not noise, so it is flagged and neither claim is
+    preferred.
     """
     tier_of: dict[int, str] = {}
     numeric_claims: list[Claim] = []
@@ -273,9 +329,13 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
                 )
             )
 
-    attribute_groups: dict[tuple[int, str, str], list[Claim]] = defaultdict(list)
+    attribute_groups: dict[tuple[int, str, str, str], list[Claim]] = defaultdict(list)
     for claim in numeric_claims:
-        attribute_groups[(_page_of(claim), claim.entity, claim.attribute)].append(claim)
+        if claim.attribute == OPERATING_METRIC:
+            continue
+        attribute_groups[
+            (_page_of(claim), claim.entity, claim.attribute, claim.value.value_type)
+        ].append(claim)
     seen_pairs: set[frozenset[int]] = set()
     for group in attribute_groups.values():
         for i, a in enumerate(group):
@@ -311,15 +371,20 @@ def extract_claims(
     prose: bool = False,
     complete: bool = False,
     qualitative: bool = False,
+    canonicalize_attributes: bool = False,
     workers: int = 8,
 ) -> dict:
     """Parse `data` and emit its claims as the payload that crosses the C3 seam.
 
     The one code path both entry points call: scripts/emit_claims.py (CLI) and
     POST /extract (main.py). Raises ProseCredentialMissing at the door, before
-    any parsing, if `prose`/`complete`/`qualitative` are set without a
-    credential in the environment -- fail closed, not partway through a
-    document. `complete` and `qualitative` each imply the prose tier.
+    any parsing, if `prose`/`complete`/`qualitative`/`canonicalize_attributes`
+    are set without a credential in the environment -- fail closed, not
+    partway through a document. `complete` and `qualitative` each imply the
+    prose tier. `canonicalize_attributes` (SIM-344) does not -- it maps every
+    quantitative claim's attribute onto the closed canonical vocabulary
+    regardless of which tiers ran, table-only included, since a table-only run
+    has attributes just as much as a prose run does.
 
     `source_file` is the real filename when the caller has one (the CLI
     always does); an HTTP caller that genuinely has none should leave it
@@ -332,22 +397,24 @@ def extract_claims(
     "the filename was an empty string".
     """
     want_prose = prose or complete or qualitative
-    if want_prose and not api_key_present():
+    if (want_prose or canonicalize_attributes) and not api_key_present():
         raise ProseCredentialMissing(
-            "the prose tiers call the Anthropic API and need ANTHROPIC_API_KEY "
-            "(or ANTHROPIC_AUTH_TOKEN) in the environment; set it, or drop prose/"
-            "complete/qualitative to emit table claims only."
+            "the prose tiers and attribute canonicalization call the Anthropic API "
+            "and need ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) in the "
+            "environment; set it, or drop prose/complete/qualitative/"
+            "canonicalize_attributes to emit table claims only."
         )
 
     logger.info(
         "extract_claims start: run_id=%s correlation_id=%s entity=%s prose=%s "
-        "complete=%s qualitative=%s",
+        "complete=%s qualitative=%s canonicalize_attributes=%s",
         run_id,
         correlation_id,
         entity,
         prose,
         complete,
         qualitative,
+        canonicalize_attributes,
     )
 
     result = parse_pdf_bytes(data)
@@ -430,6 +497,28 @@ def extract_claims(
             claims += qualitative_claims
             skipped_pages.extend(qualitative_failed)
             tier_claims.append(("qualitative", qualitative_claims))
+
+    if canonicalize_attributes:
+        try:
+            _canonicalize_quantitative_claims(tier_claims, flag_log)
+        except Exception as exc:  # noqa: BLE001 -- one bad API call must not abort the document
+            # Document-wide, not page-scoped (one batched call over every
+            # distinct label) -- page=0 is the same sentinel propose.py's
+            # _parse_with_retry already uses for this call's retries. Claims
+            # already emitted survive with their raw (pre-canonicalization)
+            # attribute rather than being discarded.
+            skipped_pages.append(
+                SkippedPage(
+                    page=0,
+                    tier="attribute_mapping",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            print(
+                f"tier attribute_mapping: failed and was skipped, claims keep their raw "
+                f"attribute labels: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
 
     edges = _reduce_same_fact(tier_claims)
     same_fact_count = sum(1 for e in edges if e.type == "same_fact")

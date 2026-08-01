@@ -101,6 +101,63 @@ def test_complete_implies_prose_and_also_needs_a_key(monkeypatch, tmp_path) -> N
         emit_claims.main([str(pdf), "--entity", "ACME", "--complete"])
 
 
+def test_canonicalize_attributes_also_needs_a_key(monkeypatch, tmp_path) -> None:
+    # SIM-344's pass is independent of --prose but still calls the Anthropic
+    # API, so it must fail closed at the door the same way.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        extract_service, "parse_pdf_bytes", lambda *_a, **_k: AssertionError("unreachable")
+    )
+    pdf = tmp_path / "cim.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    with pytest.raises(SystemExit):
+        emit_claims.main([str(pdf), "--entity", "ACME", "--canonicalize-attributes"])
+
+
+def test_canonicalize_attributes_flag_maps_a_table_claim(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class _Doc:
+        pass
+
+    class _Page:
+        def __init__(self, page: int) -> None:
+            self.page = page
+
+    class _Result:
+        document = _Doc()
+        pages = [_Page(1)]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda *_a, **_k: _Result())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: ["a-table"])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda tables, _page_no: tables)
+    monkeypatch.setattr(
+        extract_service,
+        "claims_from_table",
+        lambda table, page, *, entity, file, flag_log: [
+            _proposed_claim(entity, "Revenue | 2019F", "$1", _page("$1 total", page_no=page.page))
+        ],
+    )
+    monkeypatch.setattr(
+        extract_service,
+        "canonicalize_attributes",
+        lambda labels: {"Revenue | 2019F": ("revenue", [])},
+    )
+
+    pdf = tmp_path / "cim.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    emit_claims.main([str(pdf), "--entity", "ACME", "--canonicalize-attributes"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["claims"]) == 1
+    assert payload["claims"][0]["attribute"] == "revenue"
+    assert payload["claims"][0]["attribute_raw"] == "Revenue | 2019F"
+
+
 def test_tables_only_needs_no_key(monkeypatch, tmp_path) -> None:
     # The default tier calls no model and must run with the environment stripped.
     # A present key must not be consulted for a table-only run, so the guard is
