@@ -120,6 +120,50 @@ def test_contradicts_when_tiers_disagree_on_the_same_attribute() -> None:
     assert {edge.from_, edge.to} == {element_id_for(table_claim), element_id_for(prose_claim)}
 
 
+def test_contradicts_excludes_the_operating_metric_catch_all_bucket() -> None:
+    # Two unrelated operating metrics (an occupancy rate and an ARPU figure)
+    # both canonicalize into OPERATING_METRIC -- SIM-344's catch-all bucket,
+    # not a fact-slot. Grouping `contradicts` on attribute alone fused them
+    # into a false "these disagree" edge even though they are not the same
+    # fact. Reproduces the review's example: a percent and a currency, both
+    # operating_metric, on the same page.
+    occupancy = _claim(
+        attribute="operating_metric", raw="95%", normalized=95.0, value_type="percent", page=7
+    )
+    arpu = _claim(
+        attribute="operating_metric",
+        raw="$52",
+        normalized=52.0,
+        value_type="currency",
+        page=7,
+        char_start=30,
+    )
+
+    edges = _reduce_same_fact([("table", [occupancy]), ("prose", [arpu])])
+
+    assert edges == []
+
+
+def test_contradicts_requires_matching_value_type() -> None:
+    # A core attribute stated once as a percent and once as a currency (e.g. a
+    # mis-canonicalized label) is not the same fact-slot disagreeing with
+    # itself -- value_type belongs in the key the same way it already does
+    # for same_fact.
+    pct = _claim(attribute="revenue", raw="15%", normalized=15.0, value_type="percent", page=9)
+    currency = _claim(
+        attribute="revenue",
+        raw="$15",
+        normalized=15.0,
+        value_type="currency",
+        page=9,
+        char_start=30,
+    )
+
+    edges = _reduce_same_fact([("table", [pct]), ("prose", [currency])])
+
+    assert edges == []
+
+
 def test_missing_and_qualitative_claims_take_no_part() -> None:
     missing_claim = _claim(attribute="X", raw="", normalized=None, status="missing")
     qualitative_claim = _claim(attribute="X", raw="growing steadily", normalized=None)

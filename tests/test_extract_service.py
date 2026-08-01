@@ -249,6 +249,53 @@ def test_canonicalize_attributes_maps_table_claims_end_to_end(monkeypatch) -> No
     assert claim["attribute_raw"] == "Revenue | 2019F"
 
 
+def test_canonicalize_attributes_failure_does_not_abort_the_document(monkeypatch) -> None:
+    # Unlike the sibling tiers (table/prose/completeness), the canonicalization
+    # pass had no try/except -- a transient API error discarded every
+    # already-emitted claim, including pure-table claims that never needed the
+    # API. It must degrade the same way a bad table does: report the failure
+    # and keep what was already extracted.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class _OnePageResult:
+        document = _Doc()
+        pages = [_Page(1)]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _OnePageResult())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda *_a, **_k: ["t1"])
+    monkeypatch.setattr(
+        extract_service,
+        "claims_from_table",
+        lambda table, page, *, entity, file, flag_log: [
+            _table_claim(page.page, attribute="Revenue | 2019F")
+        ],
+    )
+
+    def _fake_canonicalize(labels):
+        raise RuntimeError("transient API error")
+
+    monkeypatch.setattr(extract_service, "canonicalize_attributes", _fake_canonicalize)
+
+    payload = extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+        canonicalize_attributes=True,
+    )
+
+    assert len(payload["claims"]) == 1
+    claim = payload["claims"][0]
+    assert claim["attribute"] == "Revenue | 2019F"
+    assert "attribute_raw" not in claim
+    assert payload["skipped_pages"] == [
+        {"page": 0, "tier": "attribute_mapping", "reason": "RuntimeError: transient API error"}
+    ]
+
+
 def test_canonicalize_attributes_defaults_to_off(monkeypatch) -> None:
     # Table-only extraction stays credential-free unless the caller opts in --
     # this is the regression this ticket must not introduce.

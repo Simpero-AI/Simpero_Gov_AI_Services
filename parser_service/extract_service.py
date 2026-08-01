@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .coverage import NumberMiss, document_coverage
 from .docling_parser import parse_pdf_bytes
-from .emit import Claim, Edge, FlagLog, PdfLocation, SkippedPage, element_id_for
+from .emit import OPERATING_METRIC, Claim, Edge, FlagLog, PdfLocation, SkippedPage, element_id_for
 from .extract import claims_from_table
 from .propose import (
     api_key_present,
@@ -279,10 +279,18 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
     on numbers; otherwise the first tier in pipeline order) and links every
     other claim in the group to it with a `same_fact` edge.
 
-    contradicts: group by (page, entity, attribute) instead -- the same
-    labeled fact-slot, stated with different numbers by different tiers ("$15M"
-    table vs "$12M excluding settlement" prose). That disagreement is signal,
-    not noise, so it is flagged and neither claim is preferred.
+    contradicts: group by (page, entity, attribute, value_type) instead -- the
+    same labeled fact-slot, stated with different numbers by different tiers
+    ("$15M" table vs "$12M excluding settlement" prose). value_type is in the
+    key for the same reason it is in same_fact's: without it, a percent and a
+    currency that both canonicalized to the same attribute look like one
+    fact-slot disagreeing with itself. OPERATING_METRIC claims are excluded
+    from this pass entirely -- it is SIM-344's catch-all bucket for every
+    sector/operating metric the core enum does not cover, so two claims
+    landing there share nothing but the bucket, not a fact-slot (occupancy vs
+    ARPU would otherwise fuse into a false `contradicts` edge). That
+    disagreement is signal, not noise, so it is flagged and neither claim is
+    preferred.
     """
     tier_of: dict[int, str] = {}
     numeric_claims: list[Claim] = []
@@ -321,9 +329,13 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
                 )
             )
 
-    attribute_groups: dict[tuple[int, str, str], list[Claim]] = defaultdict(list)
+    attribute_groups: dict[tuple[int, str, str, str], list[Claim]] = defaultdict(list)
     for claim in numeric_claims:
-        attribute_groups[(_page_of(claim), claim.entity, claim.attribute)].append(claim)
+        if claim.attribute == OPERATING_METRIC:
+            continue
+        attribute_groups[
+            (_page_of(claim), claim.entity, claim.attribute, claim.value.value_type)
+        ].append(claim)
     seen_pairs: set[frozenset[int]] = set()
     for group in attribute_groups.values():
         for i, a in enumerate(group):
@@ -487,7 +499,26 @@ def extract_claims(
             tier_claims.append(("qualitative", qualitative_claims))
 
     if canonicalize_attributes:
-        _canonicalize_quantitative_claims(tier_claims, flag_log)
+        try:
+            _canonicalize_quantitative_claims(tier_claims, flag_log)
+        except Exception as exc:  # noqa: BLE001 -- one bad API call must not abort the document
+            # Document-wide, not page-scoped (one batched call over every
+            # distinct label) -- page=0 is the same sentinel propose.py's
+            # _parse_with_retry already uses for this call's retries. Claims
+            # already emitted survive with their raw (pre-canonicalization)
+            # attribute rather than being discarded.
+            skipped_pages.append(
+                SkippedPage(
+                    page=0,
+                    tier="attribute_mapping",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            print(
+                f"tier attribute_mapping: failed and was skipped, claims keep their raw "
+                f"attribute labels: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
 
     edges = _reduce_same_fact(tier_claims)
     same_fact_count = sum(1 for e in edges if e.type == "same_fact")
