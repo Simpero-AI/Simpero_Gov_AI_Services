@@ -218,6 +218,54 @@ def test_emit_pdf_claim_extracted_with_page_header_scale() -> None:
     assert not flag_log.entries
 
 
+def test_emit_pdf_claim_carries_period_year_and_kind_through_to_json() -> None:
+    # SIM-345: the caller resolves (year, kind) from the column header and
+    # passes it straight through -- emit_pdf_claim itself has no header to read.
+    page = make_page("CAD (in Thousands)\nRevenue $15,295 total", page_no=11)
+    flag_log = FlagLog()
+
+    claim = emit_pdf_claim(
+        "PTL Group",
+        "Revenue | 2019F",
+        "$15,295",
+        page,
+        origin="table",
+        value_type="currency",
+        file="1st-App-H-PTL-Group-CIM.pdf",
+        flag_log=flag_log,
+        period_year=2019,
+        period_kind="P",
+    )
+
+    assert claim.period_year == 2019
+    assert claim.period_kind == "P"
+    assert claim.to_json()["period_year"] == 2019
+    assert claim.to_json()["period_kind"] == "P"
+
+
+def test_emit_pdf_claim_omits_period_fields_from_json_when_unresolved() -> None:
+    # Absence, not a null: mirrors verification_method/claim_kind, and keeps
+    # the (very common today) unqualified-period case free of JSON noise.
+    page = make_page("CAD (in Thousands)\nRevenue $15,295 total", page_no=11)
+    flag_log = FlagLog()
+
+    claim = emit_pdf_claim(
+        "PTL Group",
+        "Revenue | Historical",
+        "$15,295",
+        page,
+        origin="table",
+        value_type="currency",
+        file="1st-App-H-PTL-Group-CIM.pdf",
+        flag_log=flag_log,
+    )
+
+    assert claim.period_year is None
+    assert claim.period_kind is None
+    assert "period_year" not in claim.to_json()
+    assert "period_kind" not in claim.to_json()
+
+
 def test_emit_pdf_claim_missing_on_unresolved_quote_logs_flag() -> None:
     page = make_page("Revenue $15,295 total", page_no=3)
     flag_log = FlagLog(run_id="run-2")

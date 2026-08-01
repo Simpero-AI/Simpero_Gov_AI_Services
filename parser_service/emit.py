@@ -62,6 +62,13 @@ Status = Literal["proposed", "cited", "missing"]
 # checked -- the contract requires a method once status is cited or later.
 VerificationMethod = Literal["direct_read"]
 
+# A=Actual, E=Estimate, P=Projected -- mirrors the contract's period_kind enum
+# exactly (contracts/claims.schema.json), which is itself a Postgres
+# String(1) CHECK constraint on the backend (app/models/claim.py). There is no
+# fourth slot for a trailing period (LTM/TTM): that needs a schema + DB
+# migration on the backend side and is out of scope here (SIM-345).
+PeriodKind = Literal["A", "E", "P"]
+
 # Mirrors contracts/claims.schema.json's flags enum exactly. Kept here (rather
 # than re-derived from the schema file at import time) so an unknown flag string
 # raises immediately, at the call site that produced it.
@@ -287,6 +294,8 @@ class Claim(BaseModel):
     value: ClaimValue
     location: Location
     status: Status
+    period_year: int | None = None
+    period_kind: PeriodKind | None = None
     verification_method: VerificationMethod | None = None
     section: str | None = None
     flags: list[str] = Field(default_factory=list)
@@ -305,6 +314,14 @@ class Claim(BaseModel):
         }
         if self.attribute_raw is not None:
             out["attribute_raw"] = self.attribute_raw
+        # Omitted rather than emitted null when unresolved, matching every other
+        # optional field here -- the contract treats absence and null the same,
+        # and this keeps the JSON free of noise for the (currently common) case
+        # where the source doesn't qualify the period at all.
+        if self.period_year is not None:
+            out["period_year"] = self.period_year
+        if self.period_kind is not None:
+            out["period_kind"] = self.period_kind
         # Emitted only when trust was actually earned. The contract requires it
         # once status is cited or later, and forbids inventing one before that.
         if self.verification_method is not None:
@@ -458,6 +475,8 @@ def _missing_pdf_claim(
     document_id: str | None,
     document_name: str | None,
     section: str | None,
+    period_year: int | None = None,
+    period_kind: PeriodKind | None = None,
     claim_kind: Literal["quantitative", "qualitative"] | None = None,
     assertion_class: str | None = None,
     attribute_raw: str | None = None,
@@ -468,6 +487,10 @@ def _missing_pdf_claim(
     span -- char_start=0/char_end=0 is not an absence, it is a citation to the
     first character of the page, and a highlight UI would draw it over unrelated
     text while the claim says nothing was found. The contract rejects it.
+
+    period_year/period_kind are carried through even here: the period was read
+    off the column header, not the resolved span, so a cell whose value fails
+    to resolve still keeps the period it was searched under.
     """
     return Claim(
         entity=entity,
@@ -481,6 +504,8 @@ def _missing_pdf_claim(
             document_name=document_name,
         ),
         status="missing",
+        period_year=period_year,
+        period_kind=period_kind,
         section=section,
         flags=flags,
         claim_kind=claim_kind,
@@ -502,6 +527,8 @@ def emit_pdf_claim(
     cell: TableCellRecord | None = None,
     section: str | None = None,
     value_text: str | None = None,
+    period_year: int | None = None,
+    period_kind: PeriodKind | None = None,
     claim_kind: Literal["quantitative", "qualitative"] | None = None,
     assertion_class: str | None = None,
     extra_flags: list[str] | None = None,
@@ -548,6 +575,8 @@ def emit_pdf_claim(
             document_id=document_id,
             document_name=document_name,
             section=section,
+            period_year=period_year,
+            period_kind=period_kind,
             claim_kind=claim_kind,
             assertion_class=assertion_class,
             attribute_raw=attribute_raw,
@@ -572,6 +601,8 @@ def emit_pdf_claim(
             document_id=document_id,
             document_name=document_name,
             section=section,
+            period_year=period_year,
+            period_kind=period_kind,
             claim_kind=claim_kind,
             assertion_class=assertion_class,
             attribute_raw=attribute_raw,
@@ -677,6 +708,8 @@ def emit_pdf_claim(
             document_name=document_name,
         ),
         status="proposed",
+        period_year=period_year,
+        period_kind=period_kind,
         section=section,
         flags=flags,
         claim_kind=claim_kind,
@@ -698,13 +731,20 @@ def emit_pdf_table_cell_claim(
     document_id: str | None = None,
     document_name: str | None = None,
     page_header_ok: bool = True,
+    period_year: int | None = None,
+    period_kind: PeriodKind | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
     attribute_raw: str | None = None,
 ) -> Claim:
     """Emit a fact for one table cell. A cell with no resolvable bbox (neither
     Docling-native nor DS-2's reconstruction fallback located it) is written
     missing outright -- citing a cell whose own region is unknown would be a
-    partial citation, which all-or-nothing provenance forbids."""
+    partial citation, which all-or-nothing provenance forbids.
+
+    period_year/period_kind (SIM-345) are the caller's to supply: this function
+    reads one table cell and has no view of the column header its value sits
+    under, so the caller (extract.claims_from_table, which does) resolves the
+    period and passes it through."""
     if cell.bbox_source is None:
         element_id = f"pdf:{file}:p{page.page}:table:r{cell.row}c{cell.col}:{attribute}"
         flag_log.log(
@@ -725,6 +765,8 @@ def emit_pdf_table_cell_claim(
             document_name=document_name,
             section=section,
             attribute_raw=attribute_raw,
+            period_year=period_year,
+            period_kind=period_kind,
         )
 
     return emit_pdf_claim(
@@ -744,6 +786,8 @@ def emit_pdf_table_cell_claim(
         document_id=document_id,
         document_name=document_name,
         page_header_ok=page_header_ok,
+        period_year=period_year,
+        period_kind=period_kind,
         stage=stage,
         attribute_raw=attribute_raw,
     )
