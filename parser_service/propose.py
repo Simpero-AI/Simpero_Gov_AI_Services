@@ -658,13 +658,26 @@ unsure -- answer core_unmapped instead; a wrong guess is worse than an honest \
 A label may carry a period, section banner or column header appended to it \
 ("Revenue | 2019F", "TURNOVER | Coffee Shop | YEAR 1") -- classify what the label \
 NAMES, ignoring the period/section/column qualifiers riding along with it.
+
+Each label is numbered. Answer with that same number, not the label text.
 """
 
 
 class AttributeMapping(BaseModel):
-    """One label's proposed classification, before the code gate runs."""
+    """One label's proposed classification, before the code gate runs.
 
-    raw: str = Field(description="The document label exactly as given.")
+    Identifies the label by its 1-based position in the input list, not by
+    echoing the label text back -- a model reply need only reproduce a
+    quote verbatim when the resolver depends on finding that exact text in
+    a document (propose.py's module docstring); this is a caller-supplied
+    list with no such text-matching step, and keying the result on the
+    model's echo of it made a whitespace/punctuation-level rewrite (a
+    trimmed space, a normalized dash) silently miss its lookup and fall
+    back to core_unmapped -- fail-closed, but a real recall loss. A
+    position number cannot drift the way echoed text can.
+    """
+
+    index: int = Field(description="The label's number from the list, exactly as given.")
     canonical: str = Field(
         description=(
             "One of the fixed core attribute names, or the literal string "
@@ -698,7 +711,7 @@ def propose_attribute_mappings(
 
         client = anthropic.Anthropic()
 
-    listing = "\n".join(f"- {label}" for label in raw_labels)
+    listing = "\n".join(f"{i}. {label}" for i, label in enumerate(raw_labels, start=1))
     response = _parse_with_retry(
         lambda: client.messages.parse(
             model=model,
@@ -715,7 +728,15 @@ def propose_attribute_mappings(
     parsed = response.parsed_output
     if parsed is None:
         return {}
-    return {mapping.raw: mapping.canonical for mapping in parsed.mappings}
+    # An out-of-range index (a hallucinated number, an off-by-one) is dropped
+    # rather than trusted -- canonicalize_attributes' default-to-core_unmapped
+    # for any label missing from this dict already covers it, the same
+    # fail-closed path an omitted label takes.
+    return {
+        raw_labels[mapping.index - 1]: mapping.canonical
+        for mapping in parsed.mappings
+        if 1 <= mapping.index <= len(raw_labels)
+    }
 
 
 def canonicalize_attributes(

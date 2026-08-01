@@ -1057,11 +1057,11 @@ def test_propose_attribute_mappings_makes_no_call_for_an_empty_batch() -> None:
     assert propose_attribute_mappings([], client=client) == {}
 
 
-def test_propose_attribute_mappings_returns_the_models_raw_answers() -> None:
+def test_propose_attribute_mappings_returns_the_models_answers_keyed_by_position() -> None:
     client = _StubAttributeClient(
         [
-            AttributeMapping(raw="Revenue | 2019F", canonical="revenue"),
-            AttributeMapping(raw="Total Rooms", canonical="operating_metric"),
+            AttributeMapping(index=1, canonical="revenue"),
+            AttributeMapping(index=2, canonical="operating_metric"),
         ]
     )
     result = propose_attribute_mappings(["Revenue | 2019F", "Total Rooms"], client=client)
@@ -1072,8 +1072,31 @@ def test_propose_attribute_mappings_returns_the_models_raw_answers() -> None:
     assert all(attr in prompt for attr in CORE_ATTRIBUTES)
 
 
+def test_propose_attribute_mappings_is_immune_to_a_non_verbatim_echo() -> None:
+    # Keying by position, not by the model re-typing the label, is the fix for
+    # the recall loss the review flagged: a model that answers with a
+    # whitespace/punctuation-level rewrite of the label (trimmed space,
+    # normalized dash) must still land on the right label -- an index cannot
+    # drift the way echoed text can.
+    client = _StubAttributeClient([AttributeMapping(index=1, canonical="revenue")])
+    result = propose_attribute_mappings(["Revenue | 2019F "], client=client)
+    assert result == {"Revenue | 2019F ": "revenue"}
+
+
+def test_propose_attribute_mappings_drops_an_out_of_range_index() -> None:
+    # A hallucinated or off-by-one index must not raise or silently corrupt
+    # another label's answer -- it is dropped, and canonicalize_attributes'
+    # missing-answer fallback (attribute_unmapped) covers the gap the same way
+    # an omitted label already does.
+    client = _StubAttributeClient(
+        [AttributeMapping(index=0, canonical="revenue"), AttributeMapping(index=5, canonical="x")]
+    )
+    result = propose_attribute_mappings(["Revenue | 2019F"], client=client)
+    assert result == {}
+
+
 def test_canonicalize_attributes_gates_a_literal_core_answer_through_clean() -> None:
-    client = _StubAttributeClient([AttributeMapping(raw="Revenue | 2019F", canonical="revenue")])
+    client = _StubAttributeClient([AttributeMapping(index=1, canonical="revenue")])
     result = canonicalize_attributes(["Revenue | 2019F"], client=client)
     assert result == {"Revenue | 2019F": ("revenue", [])}
 
@@ -1082,9 +1105,7 @@ def test_canonicalize_attributes_gates_a_hallucinated_answer_to_unmapped() -> No
     # The model answered something plausible-sounding but not in the fixed
     # list -- the code gate must not trust it just because it looks like an
     # attribute name.
-    client = _StubAttributeClient(
-        [AttributeMapping(raw="Adjusted EBITDA (non-GAAP)", canonical="adjusted_ebitda")]
-    )
+    client = _StubAttributeClient([AttributeMapping(index=1, canonical="adjusted_ebitda")])
     result = canonicalize_attributes(["Adjusted EBITDA (non-GAAP)"], client=client)
     assert result == {"Adjusted EBITDA (non-GAAP)": (OPERATING_METRIC, ["attribute_unmapped"])}
 
@@ -1098,7 +1119,7 @@ def test_canonicalize_attributes_treats_a_missing_answer_as_unmapped_not_dropped
 
 
 def test_canonicalize_attributes_dedupes_before_calling_the_model() -> None:
-    client = _StubAttributeClient([AttributeMapping(raw="Revenue | 2019F", canonical="revenue")])
+    client = _StubAttributeClient([AttributeMapping(index=1, canonical="revenue")])
     canonicalize_attributes(
         ["Revenue | 2019F", "Revenue | 2019F", "Revenue | 2019F"], client=client
     )
