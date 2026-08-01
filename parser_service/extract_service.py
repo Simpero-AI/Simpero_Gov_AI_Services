@@ -279,18 +279,22 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
     on numbers; otherwise the first tier in pipeline order) and links every
     other claim in the group to it with a `same_fact` edge.
 
-    contradicts: group by (page, entity, attribute, value_type) instead -- the
-    same labeled fact-slot, stated with different numbers by different tiers
-    ("$15M" table vs "$12M excluding settlement" prose). value_type is in the
-    key for the same reason it is in same_fact's: without it, a percent and a
-    currency that both canonicalized to the same attribute look like one
-    fact-slot disagreeing with itself. OPERATING_METRIC claims are excluded
-    from this pass entirely -- it is SIM-344's catch-all bucket for every
-    sector/operating metric the core enum does not cover, so two claims
-    landing there share nothing but the bucket, not a fact-slot (occupancy vs
-    ARPU would otherwise fuse into a false `contradicts` edge). That
-    disagreement is signal, not noise, so it is flagged and neither claim is
-    preferred.
+    contradicts: group by (page, entity, attribute, value_type, period_year,
+    period_kind) instead -- the same labeled fact-slot, stated with different
+    numbers by different tiers ("$15M" table vs "$12M excluding settlement"
+    prose). value_type is in the key for the same reason it is in same_fact's:
+    without it, a percent and a currency that both canonicalized to the same
+    attribute look like one fact-slot disagreeing with itself. period is in the
+    key because canonicalization strips the year off the attribute (SIM-344:
+    "Revenue | 2019F" and "Revenue | 2020F" both -> "revenue"), so without it a
+    2019 figure and a 2020 figure of the same metric would fuse into a false
+    `contradicts` edge -- E3 (SIM-345) is what makes the period the structured
+    field this keys on. OPERATING_METRIC claims are excluded from this pass
+    entirely -- it is SIM-344's catch-all bucket for every sector/operating
+    metric the core enum does not cover, so two claims landing there share
+    nothing but the bucket, not a fact-slot (occupancy vs ARPU would otherwise
+    fuse into a false `contradicts` edge). That disagreement is signal, not
+    noise, so it is flagged and neither claim is preferred.
     """
     tier_of: dict[int, str] = {}
     numeric_claims: list[Claim] = []
@@ -329,12 +333,21 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
                 )
             )
 
-    attribute_groups: dict[tuple[int, str, str, str], list[Claim]] = defaultdict(list)
+    attribute_groups: dict[tuple[int, str, str, str, int | None, str | None], list[Claim]] = (
+        defaultdict(list)
+    )
     for claim in numeric_claims:
         if claim.attribute == OPERATING_METRIC:
             continue
         attribute_groups[
-            (_page_of(claim), claim.entity, claim.attribute, claim.value.value_type)
+            (
+                _page_of(claim),
+                claim.entity,
+                claim.attribute,
+                claim.value.value_type,
+                claim.period_year,
+                claim.period_kind,
+            )
         ].append(claim)
     seen_pairs: set[frozenset[int]] = set()
     for group in attribute_groups.values():
