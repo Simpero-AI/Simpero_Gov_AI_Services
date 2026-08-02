@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Literal
 
 from parser_service import extract_service
-from parser_service.emit import Claim, ClaimValue, FlagLog, PdfLocation, element_id_for
+from parser_service.emit import Claim, ClaimValue, FlagLog, PdfLocation, PeriodKind, element_id_for
 from parser_service.extract_service import _canonicalize_quantitative_claims, _reduce_same_fact
 from parser_service.scale import ValueType
 
@@ -24,6 +24,8 @@ def _claim(
     normalized: float | None,
     value_type: ValueType | None = None,
     unit: str | None = None,
+    period_year: int | None = None,
+    period_kind: PeriodKind | None = None,
     page: int = 1,
     char_start: int = 0,
     status: Literal["proposed", "cited", "missing"] = "proposed",
@@ -45,6 +47,8 @@ def _claim(
             char_start=None if missing else char_start,
             char_end=None if missing else char_start + len(raw),
         ),
+        period_year=period_year,
+        period_kind=period_kind,
         status=status,
     )
 
@@ -162,6 +166,72 @@ def test_contradicts_requires_matching_value_type() -> None:
     edges = _reduce_same_fact([("table", [pct]), ("prose", [currency])])
 
     assert edges == []
+
+
+def test_contradicts_requires_matching_period() -> None:
+    # Canonicalization strips the year off the label (SIM-344: "Revenue | 2019F"
+    # and "Revenue | 2020F" both -> "revenue"), so two years of the same metric
+    # reach the reducer sharing attribute AND value_type. Without period in the
+    # key they fuse into a false "these disagree" edge -- revenue was $100 in
+    # 2019 and $120 in 2020, two different fact-slots, not a contradiction. E3
+    # (SIM-345) makes the period the structured field the key can carry.
+    fy2019 = _claim(
+        attribute="revenue",
+        raw="$100",
+        normalized=100.0,
+        value_type="currency",
+        period_year=2019,
+        period_kind="A",
+        page=5,
+    )
+    fy2020 = _claim(
+        attribute="revenue",
+        raw="$120",
+        normalized=120.0,
+        value_type="currency",
+        period_year=2020,
+        period_kind="A",
+        page=5,
+        char_start=30,
+    )
+
+    edges = _reduce_same_fact([("table", [fy2019]), ("prose", [fy2020])])
+
+    assert edges == []
+
+
+def test_contradicts_still_fires_within_one_period() -> None:
+    # The period key must not over-split: two tiers disagreeing on the SAME
+    # metric in the SAME period is the genuine contradiction this pass exists to
+    # catch, and adding period to the key must leave it intact.
+    table_claim = _claim(
+        attribute="revenue",
+        raw="$15,000,000",
+        normalized=15_000_000,
+        value_type="currency",
+        period_year=2024,
+        period_kind="P",
+        page=5,
+    )
+    prose_claim = _claim(
+        attribute="revenue",
+        raw="$12,000,000 excluding settlement",
+        normalized=12_000_000,
+        value_type="currency",
+        period_year=2024,
+        period_kind="P",
+        page=5,
+        char_start=200,
+    )
+
+    edges = _reduce_same_fact([("table", [table_claim]), ("prose", [prose_claim])])
+
+    assert len(edges) == 1
+    assert edges[0].type == "contradicts"
+    assert {edges[0].from_, edges[0].to} == {
+        element_id_for(table_claim),
+        element_id_for(prose_claim),
+    }
 
 
 def test_missing_and_qualitative_claims_take_no_part() -> None:
