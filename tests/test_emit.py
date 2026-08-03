@@ -916,6 +916,7 @@ def test_extracted_xlsx_claim_json_conforms_to_schema(validator: Draft202012Vali
         flag_log=flag_log,
     )
 
+    assert claim.claim_type == "numerical", "a directly-read numeric xlsx cell is numerical"
     claim.claim_ref = f"{claim_ref_base(claim)}[#0]"  # pipeline stamps this pre-emit
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)
@@ -940,6 +941,7 @@ def test_stub_xlsx_formula_claim_json_conforms_to_schema(validator: Draft202012V
         flag_log=flag_log,
     )
 
+    assert claim.claim_type == "computational", "an xlsx formula cell is computational"
     claim.claim_ref = f"{claim_ref_base(claim)}[#0]"  # pipeline stamps this pre-emit
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)

@@ -32,6 +32,7 @@
   "additionalProperties": false,
   "required": [
     "claim_ref",
+    "claim_type",
     "entity",
     "attribute",
     "value",
@@ -63,6 +64,19 @@
     "claim_ref": {
       "type": "string",
       "description": "SIM-365: a stable, positional, attribute-independent id the parser assigns to every claim -- {page}:{char_start}-{char_end}[#n] for a PDF span, {sheet}!{cell_ref}[#n] for XLSX, or {page}:none[#n] for a spanless claim; [#n] disambiguates claims sharing one span. Deterministic across runs and unaffected by attribute canonicalization. `edges` name their endpoints by it, and the backend keys idempotent re-ingest on it (unique per org + data_source). Distinct from the backend-assigned surrogate `id`, which does not exist at parse time."
+    },
+    "claim_type": {
+      "type": "string",
+      "enum": [
+        "numerical",
+        "temporal",
+        "entity_attribute",
+        "comparative",
+        "regulatory",
+        "computational",
+        "unknown"
+      ],
+      "description": "SIM-364 / FinGround (arXiv:2604.23588): the TYPE of assertion, assigned at extraction, orthogonal to the binding-audit verdicts. Verification routes on it: computational -> formula reconstruction, numerical -> exact-span, comparative/regulatory -> their own checks. Non-null with `unknown` as the explicit fallback for an un-typeable claim -- an untyped claim is skipped by type-routing, never defaulted to a wrong type. The table/XLSX tiers set it in code (numerical, or computational for a formula cell); the prose/qualitative tiers set it from the model."
     },
     "entity": {
       "type": "string",

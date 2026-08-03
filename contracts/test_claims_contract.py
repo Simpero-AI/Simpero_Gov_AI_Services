@@ -46,6 +46,7 @@ def validator() -> Draft202012Validator:
 VALID_PDF_CLAIM = {
     "entity": "PTL Group",
     "claim_ref": "11:1502-1509[#0]",
+    "claim_type": "numerical",
     "attribute": "revenueTrailing5yrAvg",
     "period_year": 2024,
     "period_kind": "A",
@@ -75,6 +76,7 @@ VALID_PDF_CLAIM = {
 VALID_XLSX_CLAIM = {
     "entity": "TargetCo",
     "claim_ref": "Financials!B14[#0]",
+    "claim_type": "computational",
     "attribute": "ebitdaFy2024",
     "period_year": 2024,
     "period_kind": "A",
@@ -102,6 +104,7 @@ VALID_XLSX_CLAIM = {
 VALID_XLSX_LITERAL_CLAIM = {
     "entity": "TargetCo",
     "claim_ref": "Ops!C7[#0]",
+    "claim_type": "numerical",
     "attribute": "headcount",
     "value": {
         "raw": "1200",
@@ -125,6 +128,7 @@ VALID_XLSX_LITERAL_CLAIM = {
 VALID_DOCX_CLAIM = {
     "entity": "TargetCo",
     "claim_ref": "42:118-161[#0]",
+    "claim_type": "entity_attribute",
     "attribute": "customerConcentrationNote",
     "value": {
         "raw": "top three customers represent 62% of revenue",
@@ -152,6 +156,7 @@ VALID_DOCX_CLAIM = {
 VALID_MISSING_CLAIM = {
     "entity": "TargetCo",
     "claim_ref": "4:none[#0]",
+    "claim_type": "numerical",
     "attribute": "churnRate",
     "value": {
         "raw": "",
