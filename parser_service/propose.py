@@ -45,7 +45,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from .emit import CORE_ATTRIBUTES, Claim, FlagLog, emit_pdf_claim, gate_canonical_attribute
+from .emit import (
+    CORE_ATTRIBUTES,
+    Claim,
+    ClaimType,
+    FlagLog,
+    emit_pdf_claim,
+    gate_canonical_attribute,
+)
 from .resolver import contains_flexible, find_exact_span
 from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
@@ -95,6 +102,10 @@ everything to the subject company.
 - `attribute` names the metric in the document's own words, not a canonical vocabulary.
 - `value_type`: currency for money, percent for a rate, count for a countable quantity, \
 date for a period, ratio for a multiple, text where there is no magnitude.
+- `claim_type`: the KIND of assertion -- numerical (a directly stated number), \
+computational (a total/margin/ratio computed from other numbers), temporal (the value IS \
+a date or period), or comparative (a stated change or comparison). Use unknown only if \
+none fit.
 - Prefer fewer, well-grounded claims over many speculative ones. A page with no factual \
 assertions yields none, and that is a correct answer.
 """
@@ -110,6 +121,15 @@ class ProposedClaim(BaseModel):
     entity: str = Field(description="Who the fact is about, in the document's words.")
     attribute: str = Field(description="What is being measured, in the document's words.")
     value_type: ValueType = Field(description="currency|percent|count|date|ratio|text")
+    claim_type: ClaimType = Field(
+        default="unknown",
+        description=(
+            "The KIND of assertion. numerical: a directly stated number. computational: a "
+            "figure that is a total/subtotal/margin/ratio computed from other numbers. "
+            "temporal: the value IS a date or period. comparative: a stated change or "
+            "comparison (grew 20%, up from $Y). Use unknown only if none of these fit."
+        ),
+    )
 
 
 class PageProposals(BaseModel):
@@ -282,6 +302,15 @@ class ProposedAssertion(BaseModel):
     entity: str = Field(description="Who the claim is about; must be readable in the quote.")
     attribute: str = Field(description="What is asserted, as a noun phrase, evaluative words cut.")
     assertion_class: AssertionClass
+    claim_type: ClaimType = Field(
+        default="unknown",
+        description=(
+            "The KIND of assertion. entity_attribute: a non-numeric attribute of an entity "
+            "(what it is, does, or owns). comparative: a stated comparison or ranking between "
+            "entities. regulatory: a compliance, legal, or licensing requirement. Use unknown "
+            "only if none of these fit."
+        ),
+    )
 
 
 class PageAssertions(BaseModel):
@@ -481,6 +510,7 @@ def _emit_numeric_proposal(
         flag_log=flag_log,
         value_text=value_text,
         claim_kind="quantitative",
+        claim_type=proposal.claim_type,
         extra_flags=downgrade_flags,
     )
 
@@ -907,6 +937,7 @@ def assertions_from_prose(
                 flag_log=flag_log,
                 claim_kind="qualitative",
                 assertion_class=proposal.assertion_class,
+                claim_type=proposal.claim_type,
                 stage=_STAGE_ASSERTION,
             )
         )
