@@ -34,6 +34,7 @@ from parser_service.emit import (
     FlagLog,
     PdfLocation,
     XlsxLocation,
+    claim_ref_base,
     element_id_for,
     emit_pdf_claim,
     emit_pdf_table_cell_claim,
@@ -744,6 +745,7 @@ def test_claim_to_json_includes_attribute_raw_when_set(
         flag_log=FlagLog(),
         attribute_raw="Revenue | 2019F",
     )
+    claim.claim_ref = f"{claim_ref_base(claim)}[#0]"  # pipeline stamps this pre-emit
     payload = claim.to_json()
     assert payload["attribute_raw"] == "Revenue | 2019F"
     assert payload["attribute"] == "revenue"
@@ -789,6 +791,7 @@ def test_extracted_pdf_fact_json_conforms_to_schema(validator: Draft202012Valida
         flag_log=flag_log,
     )
 
+    claim.claim_ref = f"{claim_ref_base(claim)}[#0]"  # pipeline stamps this pre-emit
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)
 
@@ -807,6 +810,7 @@ def test_missing_pdf_fact_json_conforms_to_schema(validator: Draft202012Validato
         flag_log=flag_log,
     )
 
+    claim.claim_ref = f"{claim_ref_base(claim)}[#0]"  # pipeline stamps this pre-emit
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)
 
@@ -912,6 +916,7 @@ def test_extracted_xlsx_claim_json_conforms_to_schema(validator: Draft202012Vali
         flag_log=flag_log,
     )
 
+    claim.claim_ref = f"{claim_ref_base(claim)}[#0]"  # pipeline stamps this pre-emit
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)
 
@@ -935,6 +940,7 @@ def test_stub_xlsx_formula_claim_json_conforms_to_schema(validator: Draft202012V
         flag_log=flag_log,
     )
 
+    claim.claim_ref = f"{claim_ref_base(claim)}[#0]"  # pipeline stamps this pre-emit
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)
 
@@ -1432,6 +1438,7 @@ def test_ptl_page_11_revenue_claim_persists_with_full_provenance(
     assert location.char_end - location.char_start == len("$15,295")
     assert location.bbox
 
+    claim.claim_ref = f"{claim_ref_base(claim)}[#0]"  # pipeline stamps this pre-emit
     errors = sorted(validator.iter_errors(claim.to_json()), key=str)
     assert not errors, "\n".join(e.message for e in errors)
 

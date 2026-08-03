@@ -294,6 +294,12 @@ class Claim(BaseModel):
     value: ClaimValue
     location: Location
     status: Status
+    # SIM-365: a stable, positional, attribute-independent id for this claim.
+    # Assigned once at extraction by extract_service._assign_claim_refs (None
+    # until that pass runs; the pipeline always runs it before emit). Edges
+    # reference it instead of the run-scoped element_id_for, and the backend keys
+    # idempotent re-ingest on it (unique per org + data_source).
+    claim_ref: str | None = None
     period_year: int | None = None
     period_kind: PeriodKind | None = None
     verification_method: VerificationMethod | None = None
@@ -312,6 +318,8 @@ class Claim(BaseModel):
             "location": self.location.to_json(),
             "status": self.status,
         }
+        if self.claim_ref is not None:
+            out["claim_ref"] = self.claim_ref
         if self.attribute_raw is not None:
             out["attribute_raw"] = self.attribute_raw
         # Omitted rather than emitted null when unresolved, matching every other
@@ -374,6 +382,24 @@ def element_id_for(claim: Claim) -> str:
             return f"{base}:c{location.char_start}-{location.char_end}"
         return base
     return f"xlsx:{location.file}:{location.sheet}!{location.cell_ref}:{claim.attribute}"
+
+
+def claim_ref_base(claim: Claim) -> str:
+    """The positional stem of a claim's `claim_ref` (SIM-365), before the
+    disambiguating ordinal `_assign_claim_refs` appends.
+
+    PDF: `{page}:{char_start}-{char_end}`, or `{page}:none` for a claim with no
+    resolved span (a `missing` claim, or a spanless qualitative one). XLSX:
+    `{sheet}!{cell_ref}`. Deliberately excludes `attribute`: E2 canonicalizes
+    attribute, so an id built on it would not be stable across runs -- exactly
+    what element_id_for above does and why edges must not use it.
+    """
+    location = claim.location
+    if isinstance(location, PdfLocation):
+        if location.char_start is not None and location.char_end is not None:
+            return f"{location.page}:{location.char_start}-{location.char_end}"
+        return f"{location.page}:none"
+    return f"{location.sheet}!{location.cell_ref}"
 
 
 # The two within-page relationships the fan-in reducer

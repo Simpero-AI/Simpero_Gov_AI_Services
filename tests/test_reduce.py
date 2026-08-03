@@ -68,8 +68,8 @@ def test_same_fact_links_prose_to_table_and_table_wins() -> None:
     assert len(edges) == 1
     edge = edges[0]
     assert edge.type == "same_fact"
-    assert edge.from_ == element_id_for(prose_claim)
-    assert edge.to == element_id_for(table_claim)
+    assert edge.from_ == prose_claim.claim_ref
+    assert edge.to == table_claim.claim_ref
 
 
 def test_same_fact_does_not_collapse_across_value_types() -> None:
@@ -121,7 +121,7 @@ def test_contradicts_when_tiers_disagree_on_the_same_attribute() -> None:
     assert len(edges) == 1
     edge = edges[0]
     assert edge.type == "contradicts"
-    assert {edge.from_, edge.to} == {element_id_for(table_claim), element_id_for(prose_claim)}
+    assert {edge.from_, edge.to} == {table_claim.claim_ref, prose_claim.claim_ref}
 
 
 def test_contradicts_excludes_the_operating_metric_catch_all_bucket() -> None:
@@ -229,8 +229,8 @@ def test_contradicts_still_fires_within_one_period() -> None:
     assert len(edges) == 1
     assert edges[0].type == "contradicts"
     assert {edges[0].from_, edges[0].to} == {
-        element_id_for(table_claim),
-        element_id_for(prose_claim),
+        table_claim.claim_ref,
+        prose_claim.claim_ref,
     }
 
 
@@ -362,11 +362,12 @@ def test_gross_and_net_margin_no_longer_false_contradict_after_canonicalization(
 def test_canonicalization_before_reduction_keeps_edges_consistent_with_final_attributes(
     monkeypatch,
 ) -> None:
-    # Ordering guard: if canonicalization ran AFTER the reducer, the edge's
-    # from_/to would be built from the pre-canonicalization attribute and would
-    # not match element_id_for(claim) once attribute is mutated afterward --
-    # exactly the drift a backend consumer mapping edges onto claims by
-    # element_id would hit.
+    # SIM-365: edges now anchor on claim_ref, which is positional and
+    # attribute-independent, so canonicalization (which rewrites attribute) can no
+    # longer desync an edge endpoint from the claim it names -- the drift the old
+    # attribute-keyed element_id risked if canonicalization ran after the reducer.
+    # Guards that the same_fact edge is still produced and its endpoints are the
+    # claims' claim_ref, not their (canonicalized) attribute.
     table_claim = _claim(attribute="Revenue | 2024F", raw="$15,295", normalized=15295000, page=3)
     prose_claim = _claim(
         attribute="total revenue for fiscal 2024",
@@ -387,6 +388,9 @@ def test_canonicalization_before_reduction_keeps_edges_consistent_with_final_att
 
     assert len(edges) == 1
     edge = edges[0]
-    assert edge.from_ == element_id_for(prose_claim)
-    assert edge.to == element_id_for(table_claim)
-    assert ":revenue:" in edge.to
+    assert edge.from_ == prose_claim.claim_ref
+    assert edge.to == table_claim.claim_ref
+    # Both canonicalized to "revenue" before the reducer grouped them, but the
+    # edge id itself carries no attribute -- the inverse of the old assertion.
+    assert table_claim.attribute == "revenue"
+    assert "revenue" not in edge.to
