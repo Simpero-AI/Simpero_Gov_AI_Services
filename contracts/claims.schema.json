@@ -6,7 +6,7 @@
   "$defs": {
     "edge": {
       "title": "Edge",
-      "description": "SIM-341: a within-page relationship between two claims a per-page reducer found at the extraction fan-in, sitting beside `claims` in the emitted payload (not a property of a single claim row, so it is not referenced from the Claim schema above). `from`/`to` name claims by their parser-run-scoped element_id (parser_service.emit.element_id_for) -- not the backend's `id`, which does not exist yet at parse time. The parser only emits the edge; it never merges or drops a claim because of one -- store persistence and cross-document edges are the backend's job at ingest.\n\nsame_fact: `to` is the higher-precision source (table wins on a number); `from` is corroboration of the same real-world fact, not a duplicate to discard. contradicts: `from`/`to` disagree on value for what looks like the same fact -- neither is preferred, and the disagreement itself is what a consumer needs to see.",
+      "description": "SIM-341: a within-page relationship between two claims a per-page reducer found at the extraction fan-in, sitting beside `claims` in the emitted payload (not a property of a single claim row, so it is not referenced from the Claim schema above). `from`/`to` name claims by their `claim_ref` (SIM-365) -- the stable, positional, attribute-independent id every claim carries -- not the backend's `id`, which does not exist yet at parse time. The parser only emits the edge; it never merges or drops a claim because of one -- store persistence and cross-document edges are the backend's job at ingest.\n\nsame_fact: `to` is the higher-precision source (table wins on a number); `from` is corroboration of the same real-world fact, not a duplicate to discard. contradicts: `from`/`to` disagree on value for what looks like the same fact -- neither is preferred, and the disagreement itself is what a consumer needs to see.",
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "from", "to", "basis"],
@@ -31,6 +31,8 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "claim_ref",
+    "claim_type",
     "entity",
     "attribute",
     "value",
@@ -58,6 +60,23 @@
         "null"
       ],
       "description": "FK to data_sources (document identity + versioning). Assigned by the ingesting backend; the parse service cites the file by name in location.file."
+    },
+    "claim_ref": {
+      "type": "string",
+      "description": "SIM-365: a stable, positional, attribute-independent id the parser assigns to every claim -- {page}:{char_start}-{char_end}[#n] for a PDF span, {sheet}!{cell_ref}[#n] for XLSX, or {page}:none[#n] for a spanless claim; [#n] disambiguates claims sharing one span. Deterministic across runs and unaffected by attribute canonicalization. `edges` name their endpoints by it, and the backend keys idempotent re-ingest on it (unique per org + data_source). Distinct from the backend-assigned surrogate `id`, which does not exist at parse time."
+    },
+    "claim_type": {
+      "type": "string",
+      "enum": [
+        "numerical",
+        "temporal",
+        "entity_attribute",
+        "comparative",
+        "regulatory",
+        "computational",
+        "unknown"
+      ],
+      "description": "SIM-364 / FinGround (arXiv:2604.23588): the TYPE of assertion, assigned at extraction, orthogonal to the binding-audit verdicts. Verification routes on it: computational -> formula reconstruction, numerical -> exact-span, comparative/regulatory -> their own checks. Non-null with `unknown` as the explicit fallback for an un-typeable claim -- an untyped claim is skipped by type-routing, never defaulted to a wrong type. The table/XLSX tiers set it in code (numerical, or computational for a formula cell); the prose/qualitative tiers set it from the model."
     },
     "entity": {
       "type": "string",

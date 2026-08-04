@@ -69,6 +69,24 @@ VerificationMethod = Literal["direct_read"]
 # migration on the backend side and is out of scope here (SIM-345).
 PeriodKind = Literal["A", "E", "P"]
 
+# SIM-364 / FinGround (arXiv:2604.23588): the TYPE of assertion a claim makes,
+# orthogonal to the binding-audit verdicts (which are failure modes). Verification
+# routes on it -- a `computational` claim to formula reconstruction, a `numerical`
+# claim to exact-span, and so on. Assigned once at extraction by the tier best
+# placed to know: the table/XLSX tiers set it in code, the prose/qualitative tiers
+# via the model. `unknown` is the explicit fallback for an un-typeable claim --
+# never defaulted to a wrong type, which would mis-route it downstream.
+ClaimType = Literal[
+    "numerical",
+    "temporal",
+    "entity_attribute",
+    "comparative",
+    "regulatory",
+    "computational",
+    "unknown",
+]
+CLAIM_TYPES: frozenset[str] = frozenset(get_args(ClaimType))
+
 # Mirrors contracts/claims.schema.json's flags enum exactly. Kept here (rather
 # than re-derived from the schema file at import time) so an unknown flag string
 # raises immediately, at the call site that produced it.
@@ -294,6 +312,12 @@ class Claim(BaseModel):
     value: ClaimValue
     location: Location
     status: Status
+    # SIM-365: a stable, positional, attribute-independent id for this claim.
+    # Assigned once at extraction by extract_service._assign_claim_refs (None
+    # until that pass runs; the pipeline always runs it before emit). Edges
+    # reference it instead of the run-scoped element_id_for, and the backend keys
+    # idempotent re-ingest on it (unique per org + data_source).
+    claim_ref: str | None = None
     period_year: int | None = None
     period_kind: PeriodKind | None = None
     verification_method: VerificationMethod | None = None
@@ -303,6 +327,10 @@ class Claim(BaseModel):
     # every claim written before this field existed stays valid and unchanged.
     claim_kind: Literal["quantitative", "qualitative"] | None = None
     assertion_class: str | None = None
+    # SIM-364: the assertion type (see ClaimType), assigned at extraction.
+    # Non-null with an `unknown` fallback so an un-typeable claim is visibly
+    # untyped and skipped by type-routing, never mis-routed as the wrong type.
+    claim_type: ClaimType = "unknown"
 
     def to_json(self) -> dict:
         out: dict = {
@@ -311,7 +339,10 @@ class Claim(BaseModel):
             "value": self.value.to_json(),
             "location": self.location.to_json(),
             "status": self.status,
+            "claim_type": self.claim_type,
         }
+        if self.claim_ref is not None:
+            out["claim_ref"] = self.claim_ref
         if self.attribute_raw is not None:
             out["attribute_raw"] = self.attribute_raw
         # Omitted rather than emitted null when unresolved, matching every other
@@ -374,6 +405,24 @@ def element_id_for(claim: Claim) -> str:
             return f"{base}:c{location.char_start}-{location.char_end}"
         return base
     return f"xlsx:{location.file}:{location.sheet}!{location.cell_ref}:{claim.attribute}"
+
+
+def claim_ref_base(claim: Claim) -> str:
+    """The positional stem of a claim's `claim_ref` (SIM-365), before the
+    disambiguating ordinal `_assign_claim_refs` appends.
+
+    PDF: `{page}:{char_start}-{char_end}`, or `{page}:none` for a claim with no
+    resolved span (a `missing` claim, or a spanless qualitative one). XLSX:
+    `{sheet}!{cell_ref}`. Deliberately excludes `attribute`: E2 canonicalizes
+    attribute, so an id built on it would not be stable across runs -- exactly
+    what element_id_for above does and why edges must not use it.
+    """
+    location = claim.location
+    if isinstance(location, PdfLocation):
+        if location.char_start is not None and location.char_end is not None:
+            return f"{location.page}:{location.char_start}-{location.char_end}"
+        return f"{location.page}:none"
+    return f"{location.sheet}!{location.cell_ref}"
 
 
 # The two within-page relationships the fan-in reducer
@@ -537,6 +586,7 @@ def emit_pdf_claim(
     page_header_ok: bool = True,
     stage: str = _STAGE_CLAIM_EMISSION,
     attribute_raw: str | None = None,
+    claim_type: ClaimType = "unknown",
 ) -> Claim:
     """Emit one PDF-sourced claim for `quote` on `page`. Fails closed to
     `status="missing"` on a zero-text page or an unresolved/ambiguous
@@ -697,6 +747,7 @@ def emit_pdf_claim(
         entity=entity,
         attribute=attribute,
         attribute_raw=attribute_raw,
+        claim_type=claim_type,
         value=value,
         location=PdfLocation(
             file=file,
@@ -778,6 +829,8 @@ def emit_pdf_table_cell_claim(
         # A table cell's origin is settled by construction: this entry point
         # cannot be called without the table it came from.
         origin="table",
+        # A printed table figure is a FinGround `numerical` claim (SIM-364).
+        claim_type="numerical",
         file=file,
         flag_log=flag_log,
         table=table,
@@ -856,6 +909,9 @@ def emit_xlsx_claim(
             value=ClaimValue(raw=cell.formula, normalized=None, unit=None, value_type=value_type),
             location=location,
             status="proposed",
+            # A workbook formula is recomputed from its operands -> FinGround
+            # `computational` (SIM-364); this is the type the consistency pass routes on.
+            claim_type="computational",
             section=section,
             flags=[],
         )
@@ -904,6 +960,8 @@ def emit_xlsx_claim(
         location=location,
         status="cited",
         verification_method="direct_read",
+        # A directly-read numeric cell -> FinGround `numerical` (SIM-364).
+        claim_type="numerical",
         section=section,
         flags=flags,
     )

@@ -21,7 +21,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .coverage import NumberMiss, document_coverage
 from .docling_parser import parse_pdf_bytes
-from .emit import OPERATING_METRIC, Claim, Edge, FlagLog, PdfLocation, SkippedPage, element_id_for
+from .emit import (
+    OPERATING_METRIC,
+    Claim,
+    Edge,
+    FlagLog,
+    PdfLocation,
+    SkippedPage,
+    claim_ref_base,
+    element_id_for,
+)
 from .extract import claims_from_table
 from .propose import (
     api_key_present,
@@ -253,6 +262,31 @@ def _canonicalize_quantitative_claims(
                 )
 
 
+def _assign_claim_refs(claims: list[Claim]) -> None:
+    """SIM-365: give every claim a stable, positional `claim_ref`.
+
+    Numbers claims within their (page, span) / (sheet, cell) bucket in emit order,
+    so two runs over one document produce identical refs and claims sharing a span
+    are disambiguated by the `[#n]` ordinal. Must run BEFORE the reducer (edges
+    reference `claim_ref`) and before emit (the payload carries it). Positional and
+    attribute-independent, so E2 canonicalization never shifts a ref.
+    """
+    counts: dict[str, int] = {}
+    for claim in claims:
+        base = claim_ref_base(claim)
+        n = counts.get(base, 0)
+        claim.claim_ref = f"{base}[#{n}]"
+        counts[base] = n + 1
+
+
+def _ref(claim: Claim) -> str:
+    """The claim's assigned `claim_ref`, for edge endpoints. Asserts it was set --
+    _assign_claim_refs runs before the reducer, so a None here is a wiring bug,
+    not a data case."""
+    assert claim.claim_ref is not None, "claim_ref must be assigned before reduction"
+    return claim.claim_ref
+
+
 def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
     """SIM-341: the per-page extraction fan-in. Reconciles a fact two tiers
     both saw on the same page, without dropping either claim -- the parser
@@ -296,6 +330,13 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
     fuse into a false `contradicts` edge). That disagreement is signal, not
     noise, so it is flagged and neither claim is preferred.
     """
+    # SIM-365: stamp every claim (all tiers, not only numeric) with its stable
+    # claim_ref first. The edges below name their endpoints by claim_ref, and the
+    # emitted payload reads these same objects -- so this is also what puts a
+    # claim_ref on every emitted claim. Positional and attribute-independent, so
+    # canonicalize-vs-reduce order never shifts a ref.
+    _assign_claim_refs([claim for _tier, tier_claims in tiers for claim in tier_claims])
+
     tier_of: dict[int, str] = {}
     numeric_claims: list[Claim] = []
     for tier, tier_claims in tiers:
@@ -323,8 +364,8 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
             edges.append(
                 Edge(
                     type="same_fact",
-                    from_=element_id_for(claim),
-                    to=element_id_for(winner),
+                    from_=_ref(claim),
+                    to=_ref(winner),
                     basis=(
                         f"page {_page_of(winner)}: {tier_of[id(claim)]} and "
                         f"{tier_of[id(winner)]} tiers agree on entity, value type "
@@ -362,8 +403,8 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
                 edges.append(
                     Edge(
                         type="contradicts",
-                        from_=element_id_for(a),
-                        to=element_id_for(b),
+                        from_=_ref(a),
+                        to=_ref(b),
                         basis=(
                             f"page {_page_of(a)}: {tier_of[id(a)]} ({a.value.raw!r}) and "
                             f"{tier_of[id(b)]} ({b.value.raw!r}) disagree on the same attribute"

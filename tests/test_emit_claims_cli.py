@@ -15,7 +15,7 @@ import json
 import pytest
 
 from parser_service import extract_service
-from parser_service.emit import Claim, ClaimValue, PdfLocation, element_id_for
+from parser_service.emit import Claim, ClaimValue, PdfLocation
 from parser_service.schemas import CharBox, PageIndex
 from scripts import emit_claims
 
@@ -251,6 +251,9 @@ def test_a_failed_prose_page_is_recorded_and_the_run_still_succeeds(
     class _FakeClaim:
         status = "proposed"
         value = _Value()
+        # SIM-365: _assign_claim_refs (top of the reducer) reads location to build
+        # claim_ref, so even a fan-in-skipped stub needs one.
+        location = PdfLocation(file="cim.pdf", page=1)
 
         def to_json(self) -> dict:
             return {"entity": "ACME", "status": "proposed"}
@@ -387,8 +390,8 @@ def test_edges_link_a_table_and_prose_duplicate_on_the_same_page(
     assert payload["edges"] == [
         {
             "type": "same_fact",
-            "from": element_id_for(prose_claim),
-            "to": element_id_for(table_claim),
+            "from": prose_claim.claim_ref,
+            "to": table_claim.claim_ref,
             "basis": (
                 "page 1: prose and table tiers agree on entity, value type + normalized value"
             ),

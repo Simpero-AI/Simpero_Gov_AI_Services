@@ -118,6 +118,60 @@ def test_a_verbatim_quote_resolves_and_carries_a_real_span() -> None:
     assert claim.value.normalized == 42_000_000.0
 
 
+def test_the_model_assigned_claim_type_flows_to_the_emitted_claim() -> None:
+    # SIM-364: the prose tier's claim_type is the model's to set (via ProposedClaim);
+    # it must reach the emitted claim unchanged -- the hybrid's model half.
+    page = _page("Total revenue was £42 million in 2003.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote="£42 million",
+                value_text="£42 million",
+                entity="BarWash",
+                attribute="totalRevenue",
+                value_type="currency",
+                claim_type="computational",
+            )
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+    assert len(claims) == 1
+    assert claims[0].claim_type == "computational"
+
+
+def test_an_unclassified_prose_proposal_falls_back_to_unknown() -> None:
+    # ProposedClaim.claim_type defaults to unknown, so a model that omits it yields a
+    # visibly-untyped claim rather than a wrongly-guessed one.
+    page = _page("The market was estimated at £42 million in 2003.")
+    client = _StubClient(
+        [
+            ProposedClaim(
+                quote="£42 million",
+                value_text="£42 million",
+                entity="Bristol student market",
+                attribute="marketSize",
+                value_type="currency",
+            )
+        ]
+    )
+    claims = claims_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=client,
+    )
+    assert claims[0].claim_type == "unknown"
+
+
 def test_a_restated_quote_fails_closed() -> None:
     # The page says "£42 million"; the model "helpfully" normalised it. A restated number
     # cannot be located, so the claim must be `missing` rather than cited to nothing.
@@ -212,6 +266,9 @@ def test_the_proposal_never_supplies_the_number() -> None:
         "entity",
         "attribute",
         "value_type",
+        # A category (like value_type), not a magnitude -- still no number for the model
+        # to supply. SIM-364.
+        "claim_type",
     }
     # value_text names WHICH token in the quote is the value; it is not a number the
     # model supplies. The magnitude is still parsed from the source text by scale.py.

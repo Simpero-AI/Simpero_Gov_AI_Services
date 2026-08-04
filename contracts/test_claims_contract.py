@@ -45,6 +45,8 @@ def validator() -> Draft202012Validator:
 # asserting `cited` here would be claiming a check it never ran.
 VALID_PDF_CLAIM = {
     "entity": "PTL Group",
+    "claim_ref": "11:1502-1509[#0]",
+    "claim_type": "numerical",
     "attribute": "revenueTrailing5yrAvg",
     "period_year": 2024,
     "period_kind": "A",
@@ -73,6 +75,8 @@ VALID_PDF_CLAIM = {
 # `formula_reexecution` -- the highest-trust path, and the point of XLSX support.
 VALID_XLSX_CLAIM = {
     "entity": "TargetCo",
+    "claim_ref": "Financials!B14[#0]",
+    "claim_type": "computational",
     "attribute": "ebitdaFy2024",
     "period_year": 2024,
     "period_kind": "A",
@@ -99,6 +103,8 @@ VALID_XLSX_CLAIM = {
 # checking, so it goes straight to `cited` via `direct_read`.
 VALID_XLSX_LITERAL_CLAIM = {
     "entity": "TargetCo",
+    "claim_ref": "Ops!C7[#0]",
+    "claim_type": "numerical",
     "attribute": "headcount",
     "value": {
         "raw": "1200",
@@ -121,6 +127,8 @@ VALID_XLSX_LITERAL_CLAIM = {
 
 VALID_DOCX_CLAIM = {
     "entity": "TargetCo",
+    "claim_ref": "42:118-161[#0]",
+    "claim_type": "entity_attribute",
     "attribute": "customerConcentrationNote",
     "value": {
         "raw": "top three customers represent 62% of revenue",
@@ -147,6 +155,8 @@ VALID_DOCX_CLAIM = {
 # is nothing to point at. It must not invent one.
 VALID_MISSING_CLAIM = {
     "entity": "TargetCo",
+    "claim_ref": "4:none[#0]",
+    "claim_type": "numerical",
     "attribute": "churnRate",
     "value": {
         "raw": "",
@@ -387,15 +397,15 @@ def test_attribute_unmapped_flag_accepted(validator: Draft202012Validator) -> No
 
 VALID_SAME_FACT_EDGE = {
     "type": "same_fact",
-    "from": "pdf:cim.pdf:p3:total revenue for fiscal 2024:c500-551",
-    "to": "pdf:cim.pdf:p3:Revenue | 2024F:c10-17",
+    "from": "3:500-551[#0]",
+    "to": "3:10-17[#0]",
     "basis": "page 3: table and prose tiers agree on entity, value type + normalized value",
 }
 
 VALID_CONTRADICTS_EDGE = {
     "type": "contradicts",
-    "from": "pdf:cim.pdf:p5:Revenue | 2024F:c10-21",
-    "to": "pdf:cim.pdf:p5:Revenue | 2024F:c200-233",
+    "from": "5:10-21[#0]",
+    "to": "5:200-233[#0]",
     "basis": "page 5: table ('$15,000,000') and prose ('$12,000,000 excluding "
     "settlement') disagree on the same attribute",
 }
@@ -441,8 +451,8 @@ def test_a_real_emitted_edge_conforms_to_the_schema(edge_validator: Draft202012V
     # output so a rename like `from_` no longer mapping to `from` fails here.
     edge = Edge(
         type="same_fact",
-        from_="pdf:cim.pdf:p3:total revenue for fiscal 2024:c500-551",
-        to="pdf:cim.pdf:p3:Revenue | 2024F:c10-17",
+        from_="3:500-551[#0]",
+        to="3:10-17[#0]",
         basis="page 3: table and prose tiers agree on entity, value type + normalized value",
     ).to_json()
     errors = sorted(edge_validator.iter_errors(edge), key=str)
