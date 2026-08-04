@@ -29,6 +29,10 @@ _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
 BOILERPLATE_ZONE_LINES = 5
 MIN_BOILERPLATE_REPEAT_PAGES = 3
 
+# Bumped when the cached parse-result shape changes, so a stale entry written by
+# an older format is treated as a miss and re-parsed rather than mis-read.
+_PARSE_CACHE_FORMAT = "parse-result-v1"
+
 
 @dataclass(frozen=True)
 class DoclingParseResult:
@@ -366,6 +370,35 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             409,
         )
 
+    # Read-through: a cached finished parse for these exact bytes lets us skip
+    # docling entirely -- extraction and chunking each parse the same PDF today.
+    # The cache holds the finished PageIndex list AND the DoclingDocument, because
+    # pages are built from the ConversionResult (not itself cacheable), so the raw
+    # document alone cannot rebuild them. Best-effort: any miss or malformed entry
+    # falls through to a full parse.
+    document_cache = get_document_cache()
+    if document_cache.enabled:
+        cached = document_cache.get_json(f"{digest}.json")
+        if isinstance(cached, dict) and cached.get("format") == _PARSE_CACHE_FORMAT:
+            try:
+                pages = [PageIndex.model_validate(p) for p in cached["pages"]]
+                cached_document = cached.get("document")
+                document = (
+                    DoclingDocument.model_validate(cached_document)
+                    if cached_document is not None
+                    else None
+                )
+                logger.info(
+                    "parse cache hit: sha256=%s pages=%d (docling skipped)", digest[:16], len(pages)
+                )
+                return DoclingParseResult(sha256=digest, pages=pages, document=document)
+            except Exception as exc:  # noqa: BLE001 -- a bad cache entry must never block a parse
+                logger.warning(
+                    "parse cache rehydrate failed for sha256=%s (%s); re-parsing",
+                    digest[:16],
+                    exc,
+                )
+
     settings = get_settings()
 
     # Pre-flight check via pypdf to fast-fail on corrupt, encrypted, or too large PDFs
@@ -436,14 +469,6 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                 422,
             )
 
-        # Cache the raw DoclingDocument for DS-W3-2/DS-W3-6. Backed by object
-        # storage (encrypted at rest); a no-op until Spaces is configured, so no
-        # confidential content is written to local disk. Best-effort, never fatal.
-        document_cache = get_document_cache()
-        if document_cache.enabled:
-            document_cache.put_json(f"{digest}.json", result.document.export_to_dict())
-            logger.debug("cached DoclingDocument: sha256=%s", digest[:16])
-
         # Per-glyph geometry the pipeline drops; see char_cells_by_page.
         char_cells = char_cells_by_page(pdf_bytes)
         page_indices = [
@@ -459,6 +484,21 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                 "no extractable text: sha256=%s (likely scanned or image-only)", digest[:16]
             )
             raise ParseError("no_extractable_text", "PDF contains no extractable text.", 422)
+
+        # Cache the finished parse -- the PageIndex list AND the DoclingDocument --
+        # so a repeat parse of these bytes skips docling. Written only after every
+        # fail-closed guard above passes, so the cache never holds an invalid parse.
+        # Backed by object storage, encrypted at rest; best-effort, never fatal.
+        if document_cache.enabled:
+            document_cache.put_json(
+                f"{digest}.json",
+                {
+                    "format": _PARSE_CACHE_FORMAT,
+                    "pages": [page.model_dump() for page in page_indices],
+                    "document": result.document.export_to_dict(),
+                },
+            )
+            logger.debug("cached parse result: sha256=%s pages=%d", digest[:16], len(page_indices))
 
         logger.info(
             "parse complete: sha256=%s pages=%d empty_pages=%d",

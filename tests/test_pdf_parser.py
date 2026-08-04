@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from hashlib import sha256
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from reportlab.pdfgen import canvas
 
+from parser_service import docling_parser
 from parser_service.docling_parser import (
     ParseError,
     normalize_numeric_tokens,
@@ -18,6 +20,7 @@ from parser_service.docling_parser import (
 )
 from parser_service.main import app
 from parser_service.schemas import CharBox, PageIndex
+from parser_service.text_extract import extract_text_blocks
 
 client = TestClient(app, headers={"X-Parser-Key": "test-parser-key"})
 
@@ -740,3 +743,67 @@ def test_pitchbook_cim_boilerplate_and_acceptance() -> None:
     for page in pages_with_boilerplate:
         boilerplate_text = "".join(c.char for c in page.char_map if c.is_boilerplate)
         assert boilerplate_text, "boilerplate chars must retain their text, not be stripped"
+
+
+def test_parse_cache_read_through_skips_docling_on_repeat(monkeypatch):
+    # A second parse of identical bytes reuses the cached finished result and
+    # never re-runs docling; the reconstructed pages and document are equivalent.
+    class _MemCache:
+        enabled = True
+
+        def __init__(self):
+            self.store: dict[str, dict] = {}
+
+        def get_json(self, key):
+            return self.store.get(key)
+
+        def put_json(self, key, document):
+            # round-trip through JSON the way real object storage does
+            self.store[key] = json.loads(json.dumps(document))
+
+    cache = _MemCache()
+    monkeypatch.setattr(docling_parser, "get_document_cache", lambda: cache)
+
+    convert_calls = {"n": 0}
+    original_convert = docling_parser.DocumentConverter.convert
+
+    def counting_convert(self, *args, **kwargs):
+        convert_calls["n"] += 1
+        return original_convert(self, *args, **kwargs)
+
+    monkeypatch.setattr(docling_parser.DocumentConverter, "convert", counting_convert)
+
+    pdf = make_text_pdf(
+        ["Revenue was 3,817 thousand dollars in 2019.", "EBITDA margin was 21 percent."]
+    )
+
+    first = parse_pdf_bytes(pdf)
+    assert convert_calls["n"] == 1, "first parse runs docling"
+    assert cache.store, "the finished parse is cached"
+
+    second = parse_pdf_bytes(pdf)
+    assert convert_calls["n"] == 1, "second parse reuses the cache -- docling is not re-run"
+
+    assert [p.model_dump() for p in second.pages] == [p.model_dump() for p in first.pages]
+    assert first.document is not None and second.document is not None
+    doc_first, doc_second = first.document, second.document
+    assert extract_text_blocks(doc_second, second.pages) == extract_text_blocks(
+        doc_first, first.pages
+    )
+
+
+def test_parse_cache_stale_entry_falls_through(monkeypatch):
+    # An old-format / malformed cache entry must never block a parse -- it is
+    # treated as a miss and re-parsed rather than mis-read.
+    class _StaleCache:
+        enabled = True
+
+        def get_json(self, key):
+            return {"schema_name": "DoclingDocument"}  # old format: no "format" key
+
+        def put_json(self, key, document):
+            pass
+
+    monkeypatch.setattr(docling_parser, "get_document_cache", lambda: _StaleCache())
+    result = parse_pdf_bytes(make_text_pdf(["Revenue was 10 million dollars."]))
+    assert result.pages and result.pages[0].text
