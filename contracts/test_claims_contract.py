@@ -468,4 +468,3 @@ def test_canonical_attribute_def_matches_the_parser_vocabulary() -> None:
     schema = json.loads(SCHEMA_PATH.read_text())
     published = set(schema["$defs"]["canonicalAttribute"]["enum"])
     assert published == CANONICAL_ATTRIBUTES
-
