@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
-from parser_service.emit import Edge
+from parser_service.emit import CANONICAL_ATTRIBUTES, Edge
 from parser_service.scale import scale_invariant_holds
 
 SCHEMA_PATH = Path(__file__).parent / "claims.schema.json"
@@ -390,6 +390,16 @@ def test_attribute_unmapped_flag_accepted(validator: Draft202012Validator) -> No
     assert not list(validator.iter_errors(ok)), "attribute_unmapped should be a valid flag"
 
 
+def test_attribute_raw_present_requires_canonical_attribute(
+    validator: Draft202012Validator,
+) -> None:
+    # VALID_PDF_CLAIM's default attribute ("revenueTrailing5yrAvg") is a stale
+    # pre-SIM-344 label -- once attribute_raw is pinned (E2 ran), it must fail.
+    bad = {**VALID_PDF_CLAIM, "attribute_raw": "Revenue | 5yr Avg"}
+    errors = list(validator.iter_errors(bad))
+    assert errors, "non-canonical attribute alongside attribute_raw should fail validation"
+
+
 # --- SIM-341: the `edges` array's element shape ------------------------------
 # `edges` sits beside `claims` in the emitted payload, not inside a Claim row,
 # so it is validated against the schema's `$defs/edge` sub-schema directly
@@ -457,3 +467,14 @@ def test_a_real_emitted_edge_conforms_to_the_schema(edge_validator: Draft202012V
     ).to_json()
     errors = sorted(edge_validator.iter_errors(edge), key=str)
     assert not errors, "\n".join(e.message for e in errors)
+
+
+def test_canonical_attribute_def_matches_the_parser_vocabulary() -> None:
+    """SIM-375: $defs/canonicalAttribute is the parser's canonical attribute
+    vocabulary published into the C3 contract, so both repos and every cross-claim
+    consumer (3b consistency, scoring) key on the SAME names. Keep it identical to
+    emit.CANONICAL_ATTRIBUTES (CoreAttribute + operating_metric): if the parser adds
+    a canonical attribute, this fails until the contract publishes it too."""
+    schema = json.loads(SCHEMA_PATH.read_text())
+    published = set(schema["$defs"]["canonicalAttribute"]["enum"])
+    assert published == CANONICAL_ATTRIBUTES
