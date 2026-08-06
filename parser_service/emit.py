@@ -119,6 +119,13 @@ FLAG_TYPES = frozenset(
         # (or produced a string outside the closed enum for) but could not map to
         # one of CORE_ATTRIBUTES. Never guessed past -- see gate_canonical_attribute.
         "attribute_unmapped",
+        # SIM-369: the dumb-consumer guard, set by alpha's 3a reconciliation on the
+        # non-canonical claim in a same_fact merge so an edge-ignorant reader does not
+        # count it as independent corroboration. The parser never writes it
+        # (reconciliation is alpha-only), but FLAG_TYPES and the contract's flags enum
+        # are kept identical (test_all_flag_types_constant_matches_schema_enum), so it
+        # lives here too.
+        "superseded_by_same_fact",
     }
 )
 

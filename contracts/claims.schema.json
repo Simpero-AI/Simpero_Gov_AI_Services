@@ -440,7 +440,8 @@
           "magnitude_unparseable",
           "cites_boilerplate",
           "binding_unsupported",
-          "attribute_unmapped"
+          "attribute_unmapped",
+          "superseded_by_same_fact"
         ]
       }
     },
