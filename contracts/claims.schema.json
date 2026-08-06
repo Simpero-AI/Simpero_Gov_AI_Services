@@ -685,6 +685,26 @@
           }
         }
       }
+    },
+    {
+      "$comment": "SIM-375: attribute is canonical only once E2 canonicalization has run -- signaled by attribute_raw being non-null. Enforces at the schema level what the contract test only checked as a list of legal values: a claim with attribute_raw pinned must give a canonical attribute, not a stale label like revenueLatestUsd.",
+      "if": {
+        "properties": {
+          "attribute_raw": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "attribute_raw"
+        ]
+      },
+      "then": {
+        "properties": {
+          "attribute": {
+            "$ref": "#/$defs/canonicalAttribute"
+          }
+        }
+      }
     }
   ]
 }

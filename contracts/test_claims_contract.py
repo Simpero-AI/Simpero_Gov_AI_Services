@@ -390,6 +390,16 @@ def test_attribute_unmapped_flag_accepted(validator: Draft202012Validator) -> No
     assert not list(validator.iter_errors(ok)), "attribute_unmapped should be a valid flag"
 
 
+def test_attribute_raw_present_requires_canonical_attribute(
+    validator: Draft202012Validator,
+) -> None:
+    # VALID_PDF_CLAIM's default attribute ("revenueTrailing5yrAvg") is a stale
+    # pre-SIM-344 label -- once attribute_raw is pinned (E2 ran), it must fail.
+    bad = {**VALID_PDF_CLAIM, "attribute_raw": "Revenue | 5yr Avg"}
+    errors = list(validator.iter_errors(bad))
+    assert errors, "non-canonical attribute alongside attribute_raw should fail validation"
+
+
 # --- SIM-341: the `edges` array's element shape ------------------------------
 # `edges` sits beside `claims` in the emitted payload, not inside a Claim row,
 # so it is validated against the schema's `$defs/edge` sub-schema directly
