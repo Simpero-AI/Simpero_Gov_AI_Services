@@ -243,6 +243,65 @@ def test_a_parenthesised_marker_is_reported_once_at_its_widest() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# SEC-style captions (SIM-377).
+#
+# The MVP recognizer demanded a ")" immediately after the magnitude word and
+# nothing before "in", so the captions that dominate 10-K financial statements
+# fell through to assumed_1x -- a silent 1000x understatement. The TAT-QA eval
+# harness pinned this as 56 of 60 in-path scale misses.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "multiplier"),
+    [
+        # Trailing "..., except|unless ...": the comma broke the old ")" anchor.
+        ("(in thousands, except per share data)", 1_000.0),
+        ("(in millions, except per-share amounts)", 1_000_000.0),
+        ("(in millions except per share)", 1_000_000.0),  # no comma before "except"
+        ("(Tabular amounts in millions, unless otherwise disclosed)", 1_000_000.0),
+        # Lead-in noun before "in": "dollars"/"amounts"/"shares"/"table".
+        ("(dollars in thousands)", 1_000.0),
+        ("(Dollars in millions)", 1_000_000.0),
+        ("(amounts in table in millions)", 1_000_000.0),
+        ("(shares in thousands, except per share data)", 1_000.0),
+        ("(table in millions)", 1_000_000.0),
+        ("(figures in millions)", 1_000_000.0),
+        # Trailing " of <currency>".
+        ("(in thousands of U.S. dollars)", 1_000.0),
+        ("(All amounts expressed in thousands of U.S. Dollars, except share data)", 1_000.0),
+        # The plain forms that already worked must keep working.
+        ("(in thousands)", 1_000.0),
+        ("(in millions)", 1_000_000.0),
+    ],
+)
+def test_sec_style_captions_are_recognized(text: str, multiplier: float) -> None:
+    found = scale_phrase_in_text(text)
+    assert found is not None, f"{text!r} declares a scale"
+    assert found[0] == multiplier
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Prose that merely contains "in <magnitude>" is not a scale caption. The
+        # lead-in carries no financial caption noun, so precision holds -- a stray
+        # match here would be a 1000x error.
+        "(as reported in millions of filings)",
+        "(available in millions of homes)",
+        "(sold in millions)",
+        "(one in a million chance)",
+        "(increase in millions of dollars over the decade)",
+        "measured in thousands of hours",  # unparenthesised prose
+        # "in thousands of <non-currency>" must not bind either.
+        "(in thousands of filings)",
+    ],
+)
+def test_prose_lookalikes_declare_no_scale(text: str) -> None:
+    assert scale_phrase_in_text(text) is None
+
+
+# --------------------------------------------------------------------------- #
 # determine_scale -- full resolution order.
 # --------------------------------------------------------------------------- #
 

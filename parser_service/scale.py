@@ -366,12 +366,39 @@ _SYMBOL_CURRENCIES: dict[str, str] = {
 # a currency code -- so both [A-Z]{3} slots stay case-sensitive.
 _CURRENCY_MARK = r"US\$|C\$|A\$|NZ\$|HK\$|\$|£|€|¥|[A-Z]{3}"
 
+# The parenthesised "(in thousands)" caption, with the two relaxations a real
+# SEC filing needs. The MVP form demanded a ")" immediately after the magnitude
+# word and nothing before "in", which recognised "(in millions)" but not the
+# captions that dominate 10-K financial statements -- "(in thousands, except per
+# share data)", "(Tabular amounts in millions, unless otherwise disclosed)",
+# "(dollars in thousands)", "(in thousands of U.S. dollars)". Each fell through
+# to assumed_1x, a silent 1000x understatement (SIM-377; surfaced by the TAT-QA
+# eval harness, where it was 56 of 60 in-path scale misses).
+#
+# LEAD-IN (optional, before "in"): kept precise by REQUIRING a financial caption
+# noun (amounts/dollars/shares/figures/values/table). "(dollars in thousands)"
+# reads; prose like "(as reported in millions of filings)" or "(sold in
+# millions)" does not, because it carries no such noun -- the strong precision
+# bar the module has always held (a stray phrase here is a 1000x error).
+#
+# TRAILING (optional, after the word): only the caption tails "..., except|unless
+# |excluding ..." and "... of <currency>". A bare "of <non-currency>" ("in
+# thousands of filings") is refused, so "thousands of X" prose cannot bind.
 _SCALE_PHRASE_RE = re.compile(
     r"(?:(?P<currency>[A-Z]{3})\s+)?"
     r"\(\s*"
+    r"(?:"
+    r"(?:[A-Za-z][A-Za-z.\s]{0,25}?\s+)?"
+    r"(?i:amounts?|dollars?|shares?|figures?|values?|table)\b"
+    r"(?:\s+(?i:expressed|stated|presented|reported|denominated|in\s+table))?"
+    r"\s+"
+    r")?"
     rf"(?:(?P<insym>{_CURRENCY_MARK})\s*)?"
     r"(?i:in)\s+"
     r"(?i:(?P<word>thousands?|millions?|billions?))"
+    r"\b"
+    r"(?:\s*,?\s*(?i:except|unless|excluding)\b[^()]*"
+    r"|\s+of\s+(?:U\.?\s*S\.?\s*)?(?i:dollars?|pounds?|euros?|yen|USD|GBP|EUR|CAD|AUD|NZD|HKD)\b[^()]*)?"
     r"\s*\)"
 )
 
