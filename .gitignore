@@ -14,6 +14,11 @@ dist/
 # Parser runtime cache (regenerated locally per-PDF, not source)
 cache/
 
+# Public eval datasets (FinanceBench, TAT-QA) cached for fixture builders.
+# Build inputs, not source: the committed eval/fixtures/*.json samples are what
+# the harness reads. Downloaded on demand by eval/build_*_fixture.py.
+eval/_datasets/
+
 # Real corpus documents copied here by the local_corpus tests. Confidential
 # CIM content -- never source, and never committed.
 tests/test_data/
