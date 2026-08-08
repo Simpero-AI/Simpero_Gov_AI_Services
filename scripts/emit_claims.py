@@ -92,6 +92,15 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--audit",
+        action="store_true",
+        help=(
+            "Also run the SIM-359 binding audit: an independent reader flags claims "
+            "whose cited span does not justify their (entity, attribute, value) binding "
+            "(one model call per routed claim). Needs a credential like the prose tiers."
+        ),
+    )
+    parser.add_argument(
         "--workers", type=int, default=8, help="Concurrent prose-page calls (default 8)."
     )
     args = parser.parse_args(argv)
@@ -107,6 +116,7 @@ def main(argv: list[str] | None = None) -> None:
             complete=args.complete,
             qualitative=args.qualitative,
             canonicalize_attributes=args.canonicalize_attributes,
+            audit=args.audit,
             workers=args.workers,
         )
     except ProseCredentialMissing as exc:
