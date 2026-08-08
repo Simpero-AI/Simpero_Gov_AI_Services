@@ -5,12 +5,15 @@ is mocked; these test the wiring, not the model."""
 from __future__ import annotations
 
 import parser_service.extract_service as extract_service
-from parser_service.emit import Claim, ClaimValue, FlagLog, PdfLocation
+from parser_service.emit import Claim, ClaimValue, FlagLog, PdfLocation, Status
+from parser_service.scale import ScaleSource
 from parser_service.schemas import PageIndex
 from parser_service.verify import AuditVerdict
 
 
-def _claim(*, scale_source, normalized=15_295_000.0, status="cited"):
+def _claim(
+    *, scale_source: ScaleSource, normalized: float | None = 15_295_000.0, status: Status = "cited"
+):
     return Claim(
         entity="Target Co",
         attribute="revenue",
