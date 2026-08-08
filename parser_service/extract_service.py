@@ -43,6 +43,7 @@ from .propose import (
 from .schemas import PageIndex
 from .table_extract import extract_tables, tables_on_page
 from .text_extract import blocks_on_page, extract_text_blocks
+from .verify import AuditVerdict, audit_claim
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +416,89 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
     return edges
 
 
+_STAGE_BINDING_AUDIT = "binding_audit"
+# Source text shown around the resolved span so the auditor reads the binding in
+# context (a list heading, a "greater than", a services rate card) -- the span
+# alone is often too tight to see the failure mode.
+_AUDIT_CONTEXT = 400
+
+
+def _should_audit(claim: Claim) -> bool:
+    """SIM-359 provisional routing: audit only the scale-risk bindings -- a value
+    a PAGE BANNER scaled, which is the exact `scale_absurd` mechanism (a
+    "(in thousands)" header bleeding onto a value it does not govern, SIM-323/377).
+    A value with no magnitude (qualitative/text) or one carrying its own or column
+    scale is left to the GS-7-tuned routing; keeping the per-claim model audit
+    narrow is the point of routing.
+    """
+    value = claim.value
+    return (
+        claim.status != "missing"
+        and value.normalized is not None
+        and value.scale_source == "page_header"
+    )
+
+
+def _audit_claims(
+    claims: list[Claim], pages: list[PageIndex], flag_log: FlagLog, *, workers: int
+) -> None:
+    """SIM-359: flag claims whose cited span does not justify their
+    (entity, attribute, value) binding, via verify.audit_claim -- an independent
+    reader that only flags, never mutates a value/span/status. Routed claims run
+    concurrently, like the prose tiers; every verdict mode collapses onto the
+    existing `binding_unsupported` flag (mode + evidence in the FlagLog detail),
+    with the per-mode flag taxonomy deferred to GS-7.
+    """
+    page_text = {p.page: p.text for p in pages}
+    routed = [(c, span) for c in claims if _should_audit(c) and (span := _pdf_span(c)) is not None]
+    if not routed:
+        return
+
+    def run(item: tuple[Claim, tuple[int, int, int]]) -> tuple[Claim, AuditVerdict]:
+        claim, (page_no, start, end) = item
+        text = page_text.get(page_no, "")
+        return claim, audit_claim(
+            entity=claim.entity,
+            attribute=claim.attribute_raw or claim.attribute,
+            value_raw=claim.value.raw,
+            value_normalized=claim.value.normalized,
+            unit=claim.value.unit,
+            quote=text[start:end],
+            context=text[max(0, start - _AUDIT_CONTEXT) : end + _AUDIT_CONTEXT],
+            page=page_no,
+        )
+
+    flagged = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(run, item) for item in routed]
+        for future in as_completed(futures):
+            try:
+                claim, verdict = future.result()
+            except Exception as exc:  # noqa: BLE001 -- one bad audit must not lose the run
+                print(
+                    f"tier binding_audit: a claim's audit failed and was skipped: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            if verdict.verdict == "supported":
+                continue
+            if "binding_unsupported" not in claim.flags:
+                claim.flags = [*claim.flags, "binding_unsupported"]
+            flag_log.log(
+                _STAGE_BINDING_AUDIT,
+                element_id_for(claim),
+                "binding_unsupported",
+                detail=f"{verdict.verdict}: {verdict.evidence}",
+            )
+            flagged += 1
+    print(
+        f"tier binding_audit: {len(routed)} claim(s) audited, "
+        f"{flagged} flagged binding_unsupported",
+        file=sys.stderr,
+    )
+
+
 def extract_claims(
     data: bytes,
     *,
@@ -426,6 +510,7 @@ def extract_claims(
     complete: bool = False,
     qualitative: bool = False,
     canonicalize_attributes: bool = False,
+    audit: bool = False,
     workers: int = 8,
 ) -> dict:
     """Parse `data` and emit its claims as the payload that crosses the C3 seam.
@@ -451,17 +536,17 @@ def extract_claims(
     "the filename was an empty string".
     """
     want_prose = prose or complete or qualitative
-    if (want_prose or canonicalize_attributes) and not api_key_present():
+    if (want_prose or canonicalize_attributes or audit) and not api_key_present():
         raise ProseCredentialMissing(
-            "the prose tiers and attribute canonicalization call the Anthropic API "
-            "and need ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) in the "
-            "environment; set it, or drop prose/complete/qualitative/"
-            "canonicalize_attributes to emit table claims only."
+            "the prose tiers, attribute canonicalization, and the binding audit call "
+            "the Anthropic API and need ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) in "
+            "the environment; set it, or drop prose/complete/qualitative/"
+            "canonicalize_attributes/audit to emit table claims only."
         )
 
     logger.info(
         "extract_claims start: run_id=%s correlation_id=%s entity=%s prose=%s "
-        "complete=%s qualitative=%s canonicalize_attributes=%s",
+        "complete=%s qualitative=%s canonicalize_attributes=%s audit=%s",
         run_id,
         correlation_id,
         entity,
@@ -469,6 +554,7 @@ def extract_claims(
         complete,
         qualitative,
         canonicalize_attributes,
+        audit,
     )
 
     result = parse_pdf_bytes(data)
@@ -573,6 +659,9 @@ def extract_claims(
                 f"attribute labels: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
+
+    if audit:
+        _audit_claims(claims, result.pages, flag_log, workers=workers)
 
     edges = _reduce_same_fact(tier_claims)
     same_fact_count = sum(1 for e in edges if e.type == "same_fact")
