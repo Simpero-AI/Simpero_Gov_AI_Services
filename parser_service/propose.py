@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -797,6 +798,39 @@ def propose_attribute_mappings(
     return mapped
 
 
+# Period, forecast-basis and scale-annotation tokens that ride along with an
+# attribute label to say WHICH period/basis a figure is for, never WHAT the
+# metric is: a year ("2006", "2006E"), a fiscal-year or apostrophe year ("FY19",
+# "'08E"), a pro-forma marker, or a scale tag ("($ in millions)"). Stripping only
+# these is safe by construction -- two labels identical afterwards differed
+# solely by period/basis, i.e. name the same metric -- so it never fuses two
+# distinct metrics the way splitting the structural "|" would: here a "|" carries
+# an entity ("Aquarius (1) | Slots") or a section as often as a period, so a
+# head-split would collapse Slots and Hotel Rooms onto one classification.
+_PERIOD_QUALIFIER_RE = re.compile(
+    r"""
+      \(\s*\$?\s*in\s+(?:thousands|millions|billions)\s*\)   # scale tag: ($ in millions)
+    | \bFY\s*['’]?\d{2}(?:\d{2})?[AEFPB]?\b             # FY19 / FY2019 / FY'19A
+    | \b(?:19|20)\d{2}[AEFPB]?\b                             # 2006 / 2006E
+    | \(\s*(?:19|20)?\d{2}\s*\)                              # (2001) / (01)
+    | ['’]\d{2}[AEFPB]?\b                               # '01 / '08E
+    | \b(?:PF|pro\s*forma)\b                                 # pro-forma basis
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _normalize_attribute_label(raw: str) -> str:
+    """A dedup key that folds a metric's period/basis/scale variants together so
+    each metric is classified ONCE and the verdict fans back to every variant --
+    fewer model calls, and one consistent canonical per metric instead of a
+    per-period coin-flip. Strips only the qualifiers in `_PERIOD_QUALIFIER_RE`;
+    deliberately does NOT split the structural "|" (it names an entity or section
+    here as often as a period, so splitting would fuse genuinely distinct
+    metrics)."""
+    return re.sub(r"\s+", " ", _PERIOD_QUALIFIER_RE.sub(" ", raw)).strip().lower()
+
+
 def canonicalize_attributes(
     raw_labels: list[str],
     *,
@@ -806,13 +840,27 @@ def canonicalize_attributes(
     """raw label -> (canonical attribute, extra flags) for every DISTINCT label
     in `raw_labels`, proposer + code gate both applied.
 
+    Labels differing only by a period/basis/scale qualifier
+    (`_normalize_attribute_label`) share one classification: a representative is
+    sent to the model and its gated verdict fans back to every variant, so one
+    metric keeps one canonical name across all its periods and the model is not
+    asked the same question once per year.
+
     A label the model's response omitted entirely is treated exactly like an
     out-of-enum answer -- gated to OPERATING_METRIC with attribute_unmapped --
     rather than silently left unmapped with no record of the gap.
     """
-    unique = sorted(set(raw_labels))
-    proposed = propose_attribute_mappings(unique, model=model, client=client)
-    return {raw: gate_canonical_attribute(proposed.get(raw, "core_unmapped")) for raw in unique}
+    groups: dict[str, list[str]] = {}
+    for raw in sorted(set(raw_labels)):
+        groups.setdefault(_normalize_attribute_label(raw), []).append(raw)
+    representatives = [members[0] for members in groups.values()]
+    proposed = propose_attribute_mappings(representatives, model=model, client=client)
+    canonical: dict[str, tuple[str, list[str]]] = {}
+    for members in groups.values():
+        gated = gate_canonical_attribute(proposed.get(members[0], "core_unmapped"))
+        for raw in members:
+            canonical[raw] = gated
+    return canonical
 
 
 def api_key_present() -> bool:
