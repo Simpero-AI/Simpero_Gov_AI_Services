@@ -725,6 +725,14 @@ class AttributeMappings(BaseModel):
     mappings: list[AttributeMapping] = Field(default_factory=list)
 
 
+# Distinct labels per model call. One call for every label overflows the
+# response on a real CIM (800+ labels): the JSON truncates past max_tokens,
+# the parse fails twice, and _canonicalize_quantitative_claims skips the whole
+# tier -- every claim keeps its raw label and 3b consistency has no canonical
+# operands (SIM-382). This bounds each response well under max_tokens.
+_ATTRIBUTE_BATCH = 80
+
+
 def propose_attribute_mappings(
     raw_labels: list[str],
     *,
@@ -746,32 +754,47 @@ def propose_attribute_mappings(
 
         client = anthropic.Anthropic()
 
-    listing = "\n".join(f"{i}. {label}" for i, label in enumerate(raw_labels, start=1))
-    response = _parse_with_retry(
-        lambda: client.messages.parse(
-            model=model,
-            max_tokens=8000,
-            system=[
-                {"type": "text", "text": _ATTRIBUTE_SYSTEM, "cache_control": {"type": "ephemeral"}}
-            ],
-            messages=[{"role": "user", "content": f"Labels:\n{listing}"}],
-            output_format=AttributeMappings,
-        ),
-        page_no=0,
-        what="attribute mapping",
-    )
-    parsed = response.parsed_output
-    if parsed is None:
-        return {}
-    # An out-of-range index (a hallucinated number, an off-by-one) is dropped
-    # rather than trusted -- canonicalize_attributes' default-to-core_unmapped
-    # for any label missing from this dict already covers it, the same
-    # fail-closed path an omitted label takes.
-    return {
-        raw_labels[mapping.index - 1]: mapping.canonical
-        for mapping in parsed.mappings
-        if 1 <= mapping.index <= len(raw_labels)
-    }
+    mapped: dict[str, str] = {}
+    for offset in range(0, len(raw_labels), _ATTRIBUTE_BATCH):
+        chunk = raw_labels[offset : offset + _ATTRIBUTE_BATCH]
+        listing = "\n".join(f"{i}. {label}" for i, label in enumerate(chunk, start=1))
+        try:
+            response = _parse_with_retry(
+                lambda listing=listing: client.messages.parse(
+                    model=model,
+                    max_tokens=8000,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": _ATTRIBUTE_SYSTEM,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=[{"role": "user", "content": f"Labels:\n{listing}"}],
+                    output_format=AttributeMappings,
+                ),
+                page_no=0,
+                what="attribute mapping",
+            )
+        except ValidationError:
+            # A batch malformed twice: skip it. Its labels are absent from the
+            # result, so canonicalize_attributes defaults them to core_unmapped
+            # rather than one bad batch sinking the whole document's mapping.
+            logger.warning(
+                "attribute mapping: a batch of %d labels failed twice; skipping it",
+                len(chunk),
+            )
+            continue
+        parsed = response.parsed_output
+        if parsed is None:
+            continue
+        # An out-of-range index (a hallucinated number, an off-by-one) is dropped
+        # rather than trusted -- canonicalize_attributes' default-to-core_unmapped
+        # for any label missing already covers it, the same fail-closed path.
+        for mapping in parsed.mappings:
+            if 1 <= mapping.index <= len(chunk):
+                mapped[chunk[mapping.index - 1]] = mapping.canonical
+    return mapped
 
 
 def canonicalize_attributes(
