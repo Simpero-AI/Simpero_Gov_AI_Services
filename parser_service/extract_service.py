@@ -14,7 +14,9 @@ means the content hash elsewhere in this codebase (emit_chunks sets
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,7 +45,7 @@ from .propose import (
 from .schemas import PageIndex
 from .table_extract import extract_tables, tables_on_page
 from .text_extract import blocks_on_page, extract_text_blocks
-from .verify import AuditVerdict, audit_claim
+from .verify import DEFAULT_MODEL, AuditVerdict, audit_claim
 
 logger = logging.getLogger(__name__)
 
@@ -422,14 +424,33 @@ _STAGE_BINDING_AUDIT = "binding_audit"
 # alone is often too tight to see the failure mode.
 _AUDIT_CONTEXT = 400
 
+# A cheap model for the widened semantic-mode sample (SIM-388). Not
+# DEFAULT_MODEL (Opus) -- same reasoning as propose.ATTRIBUTE_MODEL: a fixed
+# budget buys wider routing at the same spend. Unlike that closed-vocabulary,
+# code-gated task, a binding audit's semantic modes (attribute_mismatch,
+# basket_collapse, entity_not_in_span, fee_vs_price) need real judgment, not a
+# lookup -- so a cheap model's flag here is a CANDIDATE, never a verdict: see
+# the escalation in _audit_claims.
+_SEMANTIC_AUDIT_MODEL = "claude-haiku-4-5-20251001"
 
-def _should_audit(claim: Claim) -> bool:
-    """SIM-359 provisional routing: audit only the scale-risk bindings -- a value
-    a PAGE BANNER scaled, which is the exact `scale_absurd` mechanism (a
-    "(in thousands)" header bleeding onto a value it does not govern, SIM-323/377).
-    A value with no magnitude (qualitative/text) or one carrying its own or column
-    scale is left to the GS-7-tuned routing; keeping the per-claim model audit
-    narrow is the point of routing.
+# Bounded per run so widening the semantic routes doesn't scale audit cost
+# with document size -- a document with thousands of proposed claims still
+# pays for at most this many _SEMANTIC_AUDIT_MODEL calls (plus escalations
+# among them), not one per claim.
+_SEMANTIC_SAMPLE_CAP = 40
+
+# A span stating a BOUND ("greater than X", "up to Y", "> 5") rather than an
+# exact value -- deterministically detectable from the already-loaded span
+# text, so a match routes to audit regardless of scale_source (SIM-388): the
+# model call is spent only on a genuine bound_as_point candidate, never
+# fished for across the general population the way the semantic sample is.
+_BOUND_PATTERN_RE = re.compile(r"\b(?:greater than|at least|up to)\b|[<>]", re.IGNORECASE)
+
+
+def _is_scale_absurd_candidate(claim: Claim) -> bool:
+    """The scale_absurd route (SIM-359, unchanged): a value a PAGE BANNER
+    scaled, which is the exact mechanism scale_absurd targets (a "(in
+    thousands)" header bleeding onto a value it does not govern, SIM-323/377).
     """
     value = claim.value
     return (
@@ -439,41 +460,114 @@ def _should_audit(claim: Claim) -> bool:
     )
 
 
+def _is_bound_as_point_candidate(quote: str) -> bool:
+    return bool(_BOUND_PATTERN_RE.search(quote))
+
+
+def _semantic_sample_key(claim: Claim) -> bytes:
+    """Deterministic sort key for the bounded semantic sample. Hashes
+    element_id_for(claim) rather than claim_ref: claim_ref is not assigned
+    until _reduce_same_fact, which runs after _audit_claims, so it is still
+    None here. element_id_for is already stable within a run (SIM-341), which
+    is enough to make the sample reproducible for the same document rather
+    than depending on incidental list ordering.
+    """
+    return hashlib.sha256(element_id_for(claim).encode()).digest()
+
+
 def _audit_claims(
     claims: list[Claim], pages: list[PageIndex], flag_log: FlagLog, *, workers: int
 ) -> None:
-    """SIM-359: flag claims whose cited span does not justify their
-    (entity, attribute, value) binding, via verify.audit_claim -- an independent
-    reader that only flags, never mutates a value/span/status. Routed claims run
-    concurrently, like the prose tiers; every verdict mode collapses onto the
-    existing `binding_unsupported` flag (mode + evidence in the FlagLog detail),
-    with the per-mode flag taxonomy deferred to GS-7.
+    """SIM-359/SIM-388: flag claims whose cited span does not justify their
+    (entity, attribute, value) binding, via verify.audit_claim -- an
+    independent reader that only flags, never mutates a value/span/status.
+    audit_claim always judges a claim against every verdict mode in one call;
+    what routing decides is WHICH claims reach that call, and at what model
+    tier, split by failure-mode family:
+
+      - scale_absurd: the original page_header-scaled gate, audited on
+        DEFAULT_MODEL (Opus) directly -- unchanged from SIM-359.
+      - bound_as_point: the regex prefilter above, audited on Opus directly
+        regardless of scale_source -- a claim that reaches this route on a
+        near-free regex match deserves the same top-tier read scale_absurd
+        gets, not the sampled/escalated one below.
+      - everything else: a bounded, deterministic sample of the remaining
+        ordinary claims, triaged on _SEMANTIC_AUDIT_MODEL. A non-"supported"
+        triage verdict is re-run once on DEFAULT_MODEL before it is trusted
+        enough to flag -- Opus spent only confirming a candidate the cheap
+        pass already found, never spent on the general population. Only the
+        escalated verdict is ever written.
+
+    Routed claims run concurrently, like the prose tiers; every verdict mode
+    collapses onto the existing `binding_unsupported` flag (mode + evidence in
+    the FlagLog detail), with the per-mode flag taxonomy deferred to GS-7.
     """
     page_text = {p.page: p.text for p in pages}
-    routed = [(c, span) for c in claims if _should_audit(c) and (span := _pdf_span(c)) is not None]
+    spans: dict[int, tuple[int, int, int]] = {}
+    for claim in claims:
+        span = _pdf_span(claim)
+        if span is not None:
+            spans[id(claim)] = span
+    if not spans:
+        return
+
+    def quote_of(claim: Claim) -> str:
+        page_no, start, end = spans[id(claim)]
+        return page_text.get(page_no, "")[start:end]
+
+    auditable = [c for c in claims if id(c) in spans]
+    scale_absurd_ids = {id(c) for c in auditable if _is_scale_absurd_candidate(c)}
+    bound_as_point_ids = {
+        id(c)
+        for c in auditable
+        if id(c) not in scale_absurd_ids and _is_bound_as_point_candidate(quote_of(c))
+    }
+    remaining = [
+        c for c in auditable if id(c) not in scale_absurd_ids and id(c) not in bound_as_point_ids
+    ]
+    semantic_sample = sorted(remaining, key=_semantic_sample_key)[:_SEMANTIC_SAMPLE_CAP]
+
+    routed: list[tuple[Claim, str]] = [
+        *((c, DEFAULT_MODEL) for c in auditable if id(c) in scale_absurd_ids),
+        *((c, DEFAULT_MODEL) for c in auditable if id(c) in bound_as_point_ids),
+        *((c, _SEMANTIC_AUDIT_MODEL) for c in semantic_sample),
+    ]
     if not routed:
         return
 
-    def run(item: tuple[Claim, tuple[int, int, int]]) -> tuple[Claim, AuditVerdict]:
-        claim, (page_no, start, end) = item
-        text = page_text.get(page_no, "")
-        return claim, audit_claim(
+    def run_one(claim: Claim, quote: str, context: str, page_no: int, model: str) -> AuditVerdict:
+        return audit_claim(
             entity=claim.entity,
             attribute=claim.attribute_raw or claim.attribute,
             value_raw=claim.value.raw,
             value_normalized=claim.value.normalized,
             unit=claim.value.unit,
-            quote=text[start:end],
-            context=text[max(0, start - _AUDIT_CONTEXT) : end + _AUDIT_CONTEXT],
+            quote=quote,
+            context=context,
             page=page_no,
+            model=model,
         )
 
+    def run(item: tuple[Claim, str]) -> tuple[Claim, AuditVerdict, bool]:
+        claim, model = item
+        page_no, start, end = spans[id(claim)]
+        text = page_text.get(page_no, "")
+        quote = text[start:end]
+        context = text[max(0, start - _AUDIT_CONTEXT) : end + _AUDIT_CONTEXT]
+        verdict = run_one(claim, quote, context, page_no, model)
+        escalated = False
+        if model != DEFAULT_MODEL and verdict.verdict != "supported":
+            verdict = run_one(claim, quote, context, page_no, DEFAULT_MODEL)
+            escalated = True
+        return claim, verdict, escalated
+
     flagged = 0
+    escalations = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(run, item) for item in routed]
         for future in as_completed(futures):
             try:
-                claim, verdict = future.result()
+                claim, verdict, escalated = future.result()
             except Exception as exc:  # noqa: BLE001 -- one bad audit must not lose the run
                 print(
                     f"tier binding_audit: a claim's audit failed and was skipped: "
@@ -481,6 +575,8 @@ def _audit_claims(
                     file=sys.stderr,
                 )
                 continue
+            if escalated:
+                escalations += 1
             if verdict.verdict == "supported":
                 continue
             if "binding_unsupported" not in claim.flags:
@@ -493,7 +589,9 @@ def _audit_claims(
             )
             flagged += 1
     print(
-        f"tier binding_audit: {len(routed)} claim(s) audited, "
+        f"tier binding_audit: {len(routed)} claim(s) audited "
+        f"({len(scale_absurd_ids)} scale_absurd, {len(bound_as_point_ids)} bound_as_point, "
+        f"{len(semantic_sample)} semantic sample, {escalations} escalated to Opus), "
         f"{flagged} flagged binding_unsupported",
         file=sys.stderr,
     )
