@@ -40,6 +40,7 @@ from .propose import (
     claims_from_prose,
     prose_text,
 )
+from .scale import document_declared_currency
 from .schemas import PageIndex
 from .table_extract import extract_tables, tables_on_page
 from .text_extract import blocks_on_page, extract_text_blocks
@@ -567,6 +568,11 @@ def extract_claims(
     tier_claims: list[tuple[str, list[Claim]]] = []
     skipped_pages: list[SkippedPage] = []
     table_claims: list[Claim] = []
+    # Scanned once for the whole document (SIM-386): a bare-$ page/column bind
+    # can adopt this when the document declares exactly one currency somewhere,
+    # rather than leaving unit ambiguous just because the value's OWN header
+    # phrase didn't carry a currency mark.
+    document_currency = document_declared_currency(result.pages)
     for page in result.pages:
         for table in tables_on_page(tables, page.page):
             try:
@@ -576,6 +582,7 @@ def extract_claims(
                     entity=entity,
                     file=file,
                     flag_log=flag_log,
+                    document_currency=document_currency,
                 )
             except Exception as exc:  # noqa: BLE001 -- one bad table must not abort the document
                 # Guarded per table, not per page: a page with several tables

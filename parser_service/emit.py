@@ -591,6 +591,8 @@ def emit_pdf_claim(
     document_id: str | None = None,
     document_name: str | None = None,
     page_header_ok: bool = True,
+    per_share: bool = False,
+    document_currency: str | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
     attribute_raw: str | None = None,
     claim_type: ClaimType = "unknown",
@@ -705,6 +707,8 @@ def emit_pdf_claim(
             table=table,
             cell=cell,
             page_header_ok=page_header_ok,
+            per_share=per_share,
+            document_currency=document_currency,
         )
         flags.extend(scale_result.flags)
         if (
@@ -789,6 +793,8 @@ def emit_pdf_table_cell_claim(
     document_id: str | None = None,
     document_name: str | None = None,
     page_header_ok: bool = True,
+    per_share: bool = False,
+    document_currency: str | None = None,
     period_year: int | None = None,
     period_kind: PeriodKind | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
@@ -846,6 +852,8 @@ def emit_pdf_table_cell_claim(
         document_id=document_id,
         document_name=document_name,
         page_header_ok=page_header_ok,
+        per_share=per_share,
+        document_currency=document_currency,
         period_year=period_year,
         period_kind=period_kind,
         stage=stage,

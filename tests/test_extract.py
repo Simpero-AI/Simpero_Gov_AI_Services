@@ -23,6 +23,7 @@ from parser_service.extract import (
     claims_from_table,
     infer_value_type_for,
     is_confident_currency,
+    is_per_share,
     resolve_period,
     section_banners,
 )
@@ -623,6 +624,15 @@ def test_is_confident_currency_positive_signals_and_default() -> None:
     # default and must not be allowed to bind a page banner.
     assert not is_confident_currency("1,309", "Property Summary | Stratosphere")
     assert not is_confident_currency("80,000", "Property Summary | Aquarius")
+
+
+def test_is_per_share_recognizes_the_label_variants() -> None:
+    assert is_per_share("Earnings Per Share | 2019F")
+    assert is_per_share("Dividend | Per-Share")
+    assert is_per_share("NAV | Per Shares")
+    assert is_per_share("EPS | 2019F")
+    assert not is_per_share("Revenue | 2019F")
+    assert not is_per_share("Shares Outstanding | 2019F")
 
 
 def test_a_two_row_header_stacks_into_the_column_label_and_types_the_count() -> None:

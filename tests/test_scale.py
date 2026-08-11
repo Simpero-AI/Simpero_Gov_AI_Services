@@ -16,6 +16,7 @@ import pytest
 from parser_service.scale import (
     ScaleResult,
     determine_scale,
+    document_declared_currency,
     has_parseable_magnitude,
     holds_one_number,
     normalize_financial_token,
@@ -1121,3 +1122,277 @@ def test_a_real_leading_decimal_still_parses(text: str) -> None:
 )
 def test_holds_one_number_says_whether_the_value_is_unambiguous(text: str, expected: bool) -> None:
     assert holds_one_number(text) is expected
+
+
+# --------------------------------------------------------------------------- #
+# SIM-386.1: per-share carve-out. A caption's own "except per share" exception
+# must be honored for a per-share row, never applied blanket to a per_share
+# value regardless of what the caption says.
+# --------------------------------------------------------------------------- #
+
+
+def test_per_share_declines_a_page_caption_that_exempts_it() -> None:
+    text = "(in thousands, except per share data)\nEPS $1.20 total"
+    page = _page(text)
+    result = determine_scale(
+        "$1.20",
+        page,
+        char_start=text.index("$1.20"),
+        origin="table",
+        value_type="currency",
+        per_share=True,
+    )
+    assert result.scale_source == "assumed_1x"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 1.20
+    assert result.scale_context == "(in thousands, except per share data)"
+    assert result.flags == ["scale_assumed"]
+
+
+def test_per_share_exception_does_not_reach_a_non_per_share_row_in_the_same_table() -> None:
+    # Same caption, same page -- but this row is revenue, not per-share, so the
+    # caption's own exception does not apply to it.
+    text = "(in thousands, except per share data)\nRevenue $15,295 total"
+    page = _page(text)
+    result = determine_scale(
+        "$15,295",
+        page,
+        char_start=text.index("$15,295"),
+        origin="table",
+        value_type="currency",
+        per_share=False,
+    )
+    assert result.scale_source == "page_header"
+    assert result.scale_multiplier == 1_000.0
+    assert result.normalized == 15_295_000.0
+
+
+def test_per_share_alone_does_not_exempt_a_caption_with_no_exception_clause() -> None:
+    # per_share is a positive signal combined WITH a caption that names the
+    # exception -- it is not inferred from per_share on its own. A plain
+    # "(in thousands)" still applies, even to a per-share row.
+    text = "(in thousands)\nEPS $1.20 total"
+    page = _page(text)
+    result = determine_scale(
+        "$1.20",
+        page,
+        char_start=text.index("$1.20"),
+        origin="table",
+        value_type="currency",
+        per_share=True,
+    )
+    assert result.scale_source == "page_header"
+    assert result.scale_multiplier == 1_000.0
+    assert result.normalized == 1_200.0
+
+
+def test_per_share_declines_a_column_header_exception_and_falls_to_page() -> None:
+    header = _cell(0, 1, "(in thousands, except per share data)")
+    value = _cell(1, 1, "$1.20")
+    table = _table([header, value], num_rows=2, num_cols=2)
+    text = "CAD (in Thousands)\nno per-share exception at page level $1.20"
+    page = _page(text)
+
+    result = determine_scale(
+        "$1.20",
+        page,
+        char_start=text.index("$1.20"),
+        origin="table",
+        value_type="currency",
+        table=table,
+        cell=value,
+        per_share=True,
+    )
+    # The column's own exception declines the column bind; the page banner
+    # applies next because IT carries no per-share exception of its own.
+    assert result.scale_source == "page_header"
+    assert result.scale_multiplier == 1_000.0
+
+
+def test_per_share_declines_a_column_header_exception_with_no_page_banner() -> None:
+    header = _cell(0, 1, "(in thousands, except per share data)")
+    value = _cell(1, 1, "$1.20")
+    table = _table([header, value], num_rows=2, num_cols=2)
+    page = _page("no page-level scale phrase here $1.20")
+
+    result = determine_scale(
+        "$1.20",
+        page,
+        char_start=page.text.index("$1.20"),
+        origin="table",
+        value_type="currency",
+        table=table,
+        cell=value,
+        per_share=True,
+    )
+    assert result.scale_source == "assumed_1x"
+    assert result.scale_multiplier == 1.0
+    # The declined column banner is still recorded, per the module's
+    # "assumed_1x records what it turned down" rule.
+    assert result.scale_context == "(in thousands, except per share data)"
+
+
+# --------------------------------------------------------------------------- #
+# SIM-386.2: caption currency tail -- "(in thousands of U.S. dollars)" names a
+# real currency in its trailing "of <currency>" clause, previously matched but
+# never read.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "currency"),
+    [
+        ("(in thousands of U.S. dollars)", "USD"),
+        ("(in millions of U.S. Dollars)", "USD"),
+        ("(in thousands of pounds)", "GBP"),
+        ("(in millions of euros)", "EUR"),
+        ("(in thousands of yen)", "JPY"),
+        ("(in thousands of EUR)", "EUR"),
+        ("(All amounts expressed in thousands of U.S. Dollars, except share data)", "USD"),
+    ],
+)
+def test_caption_tail_currency_is_read(text: str, currency: str) -> None:
+    found = scale_phrase_in_text(text)
+    assert found is not None
+    assert found[1] == currency
+
+
+def test_determine_scale_page_header_adopts_the_captions_own_tail_currency() -> None:
+    text = "(in thousands of U.S. dollars)\nRevenue $15,295 total"
+    page = _page(text)
+    result = determine_scale(
+        "$15,295", page, char_start=text.index("$15,295"), origin="table", value_type="currency"
+    )
+    assert result.scale_source == "page_header"
+    assert result.unit == "USD"
+
+
+# --------------------------------------------------------------------------- #
+# SIM-386.3: document-level currency pass -- a bare-$ bind adopts the one
+# currency the document declared elsewhere, never guesses when the document
+# shows none or more than one.
+# --------------------------------------------------------------------------- #
+
+
+def test_document_declared_currency_finds_the_one_resolved_currency() -> None:
+    pages = [_page("CAD (in Thousands)\nsome text", page_no=1), _page("($ in millions)", page_no=2)]
+    assert document_declared_currency(pages) == "CAD"
+
+
+def test_document_declared_currency_is_none_with_no_resolved_currency() -> None:
+    pages = [_page("($ in millions)", page_no=1), _page("(in thousands)", page_no=2)]
+    assert document_declared_currency(pages) is None
+
+
+def test_document_declared_currency_is_none_when_the_document_disagrees() -> None:
+    # A genuinely multi-currency document must not have either currency
+    # guessed onto a bare-$ value elsewhere in it.
+    pages = [_page("CAD (in Thousands)", page_no=1), _page("USD (in millions)", page_no=2)]
+    assert document_declared_currency(pages) is None
+
+
+def test_determine_scale_bare_dollar_page_header_adopts_the_document_currency() -> None:
+    text = "($ in millions)\nRevenue $15,295 total"
+    page = _page(text)
+    result = determine_scale(
+        "$15,295",
+        page,
+        char_start=text.index("$15,295"),
+        origin="table",
+        value_type="currency",
+        document_currency="CAD",
+    )
+    assert result.scale_source == "page_header"
+    assert result.unit == "CAD"
+    assert result.scale_multiplier == 1_000_000.0
+
+
+def test_determine_scale_without_a_document_currency_stays_ambiguous() -> None:
+    # No document_currency supplied (the default) -- behavior is unchanged from
+    # before this ticket.
+    text = "($ in millions)\nRevenue $15,295 total"
+    page = _page(text)
+    result = determine_scale(
+        "$15,295", page, char_start=text.index("$15,295"), origin="table", value_type="currency"
+    )
+    assert result.scale_source == "page_header"
+    assert result.unit is None
+
+
+def test_determine_scale_document_currency_never_overrides_a_resolved_one() -> None:
+    # A page banner that already names its own currency keeps it -- document
+    # currency only fills a gap, it never overrides a real read.
+    text = "CAD (in Thousands)\nRevenue $15,295 total"
+    page = _page(text)
+    result = determine_scale(
+        "$15,295",
+        page,
+        char_start=text.index("$15,295"),
+        origin="table",
+        value_type="currency",
+        document_currency="USD",
+    )
+    assert result.unit == "CAD"
+
+
+# --------------------------------------------------------------------------- #
+# SIM-386.4: abbreviated magnitude headers -- "$m", "£m", "USDm", "USD
+# millions" state a magnitude directly, with no "(in ...)" wrapper at all.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "multiplier", "currency"),
+    [
+        ("$m", 1_000_000.0, None),
+        ("£m", 1_000_000.0, "GBP"),
+        ("USDm", 1_000_000.0, "USD"),
+        ("USD millions", 1_000_000.0, "USD"),
+        ("$bn", 1_000_000_000.0, None),
+        ("£k", 1_000.0, "GBP"),
+        ("USD Millions", 1_000_000.0, "USD"),
+    ],
+)
+def test_abbreviated_magnitude_headers_are_recognized(
+    text: str, multiplier: float, currency: str | None
+) -> None:
+    found = scale_phrase_in_text(text)
+    assert found is not None, f"{text!r} declares a scale"
+    assert found[0] == multiplier
+    assert found[1] == currency
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # No currency mark at all -- a bare abbreviation is not a scale header,
+        # same guard as the "000" bare marker.
+        "5m",
+        "12,000",
+        "market",
+        "USD market share",
+    ],
+)
+def test_bare_letters_without_a_currency_mark_declare_no_scale(text: str) -> None:
+    assert scale_phrase_in_text(text) is None
+
+
+def test_determine_scale_abbreviated_column_header() -> None:
+    header = _cell(0, 1, "USDm")
+    value = _cell(1, 1, "15,295")
+    table = _table([header, value], num_rows=2, num_cols=2)
+    page = _page("no page-level scale phrase here 15,295")
+
+    result = determine_scale(
+        "15,295",
+        page,
+        char_start=page.text.index("15,295"),
+        origin="table",
+        value_type="currency",
+        table=table,
+        cell=value,
+    )
+    assert result.scale_source == "column_header"
+    assert result.scale_multiplier == 1_000_000.0
+    assert result.unit == "USD"
+    assert result.normalized == 15_295_000_000.0
