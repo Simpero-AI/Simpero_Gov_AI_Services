@@ -52,6 +52,20 @@ RUN pip install --no-cache-dir . \
 ENV OMP_NUM_THREADS=4
 ENV HF_HOME=/tmp/
 ENV TORCH_HOME=/tmp/
+# This image has no C++ compiler (deliberately -- see the libgl1/libglib2.0-0
+# comment above, kept minimal). transformers/docling's layout model wraps
+# itself with torch.compile internally by default; the first input shape
+# that isn't already cached triggers a real JIT compile of a CPU kernel,
+# which needs g++ and fails hard: torch._inductor.exc.InductorError:
+# InvalidCxxCompiler. Confirmed on staging 2026-08-12 -- one document
+# (Bar-Wash) never hit a new shape and succeeded, the next (American
+# Casino) did and failed deterministically, on every retry, cold or warm
+# process alike. Disabling dynamo/inductor outright (eager execution, no
+# compilation, no compiler dependency) is simpler and more robust than
+# installing build-essential: a compile-then-reuse cache buys nothing here
+# anyway, since a batch document-parsing worker rarely repeats the exact
+# same input shape often enough to amortize the compile cost.
+ENV TORCHDYNAMO_DISABLE=1
 
 # Non-root: this container is fed untrusted bytes by design (the whole point
 # of the service), so it should not run as root. /tmp is world-writable, so
