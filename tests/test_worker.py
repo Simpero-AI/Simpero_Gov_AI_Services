@@ -70,6 +70,37 @@ def test_queue_name_and_task_registration_are_pinned() -> None:
     assert worker.process_document.__name__ == "process_document"
 
 
+def test_after_process_hook_is_registered() -> None:
+    # Without this, the worker never recycles and accumulated torch/docling
+    # memory (confirmed 2026-08-12: never released between jobs) just keeps
+    # growing until something eventually fails under memory pressure.
+    assert worker.settings.get("after_process") == worker._recycle_worker
+
+
+async def test_recycle_worker_exits_once_the_threshold_is_reached(monkeypatch) -> None:
+    monkeypatch.setattr(worker, "_jobs_completed_this_process", 0)
+    monkeypatch.setattr(worker, "_RECYCLE_AFTER_N_JOBS", 1)
+    exit_calls: list[int] = []
+    monkeypatch.setattr(worker.os, "_exit", lambda code: exit_calls.append(code))
+
+    await worker._recycle_worker(_CTX)
+
+    assert exit_calls == [0]
+
+
+async def test_recycle_worker_waits_for_the_configured_count(monkeypatch) -> None:
+    monkeypatch.setattr(worker, "_jobs_completed_this_process", 0)
+    monkeypatch.setattr(worker, "_RECYCLE_AFTER_N_JOBS", 2)
+    exit_calls: list[int] = []
+    monkeypatch.setattr(worker.os, "_exit", lambda code: exit_calls.append(code))
+
+    await worker._recycle_worker(_CTX)  # job 1 of 2 -- must not exit yet
+    assert exit_calls == []
+
+    await worker._recycle_worker(_CTX)  # job 2 of 2 -- now it should
+    assert exit_calls == [0]
+
+
 async def test_parse_document_happy_path_writes_pointer_not_raw_data(monkeypatch) -> None:
     pdf_bytes = _minimal_pdf_bytes()
     stub = _StubS3({"some/key.pdf": pdf_bytes})

@@ -13,6 +13,7 @@ bucket+key pointer.
 import asyncio
 import json
 import logging
+import os
 from uuid import uuid4
 
 from botocore.exceptions import ClientError
@@ -238,9 +239,45 @@ async def _normalize_job_policy(ctx: Context) -> None:
     await job.update()
 
 
+# Neither docling nor the underlying torch/transformers stack release memory
+# back to the OS once allocated (torch's CPU caching allocator keeps freed
+# tensors pooled for reuse rather than returning them) -- confirmed on the
+# staging droplet 2026-08-12: memory climbed job over job (721Mi -> 867Mi
+# after one successful parse, -> 1.6Gi partway into a second, failed one)
+# and never dropped back down between jobs, even after the failed one.
+# There is no in-process way to force that allocator to shrink, so the
+# worker recycles its own process after every completed job instead --
+# `restart: unless-stopped` in docker-compose.prod.yml brings it back up
+# fresh, paying a model-reload cost per job in exchange for never carrying
+# accumulated memory into the next one. Revisit the threshold (currently 1,
+# i.e. every job) once real usage data says less-frequent recycling is safe.
+_RECYCLE_AFTER_N_JOBS = 1
+_jobs_completed_this_process = 0
+
+
+async def _recycle_worker(ctx: Context) -> None:
+    """SAQ after_process hook -- runs in a `finally` block, so it fires for
+    every job regardless of success, failure, or cancellation (see
+    saq.worker.Worker.process). Deliberately os._exit, not sys.exit: this
+    must be an immediate, unconditional process termination, not something
+    an enclosing `except Exception` (SAQ wraps this hook's own call in one)
+    could swallow or log as "Failed to run after process hook" instead of
+    actually exiting.
+    """
+    global _jobs_completed_this_process
+    _jobs_completed_this_process += 1
+    if _jobs_completed_this_process >= _RECYCLE_AFTER_N_JOBS:
+        logger.info(
+            "Recycling worker process after %d job(s) to release accumulated memory",
+            _jobs_completed_this_process,
+        )
+        os._exit(0)
+
+
 settings: SettingsDict = {
     "queue": queue,
     "functions": [parse_document, process_document],
     "before_process": _normalize_job_policy,
+    "after_process": _recycle_worker,
     "concurrency": 1,
 }
