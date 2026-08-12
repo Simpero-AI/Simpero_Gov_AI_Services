@@ -253,6 +253,7 @@ jobs:
             PARSER_SPACES_KEY_PREFIX=${{ secrets.PARSER_SPACES_KEY_PREFIX }}
             PARSER_VALKEY_URL=${{ secrets.VALKEY_URL }}
             PARSER_RESULTS_KEY_PREFIX=${{ secrets.PARSER_RESULTS_KEY_PREFIX }}
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             SIMPERO_ENV_EOF
             chmod 600 /opt/simpero/.env
 

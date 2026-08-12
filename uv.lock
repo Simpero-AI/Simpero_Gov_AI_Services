@@ -2808,6 +2808,7 @@ dependencies = [
     { name = "openpyxl" },
     { name = "pydantic-settings" },
     { name = "pypdf" },
+    { name = "python-dotenv" },
     { name = "saq", extra = ["redis"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -2835,6 +2836,7 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pypdf", specifier = ">=6.4.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "saq", extras = ["redis"], specifier = ">=0.26.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
 ]
