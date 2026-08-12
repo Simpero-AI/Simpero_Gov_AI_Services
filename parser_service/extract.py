@@ -273,8 +273,9 @@ _DIMENSION_NOUNS = frozenset(
 # $109.4M cash outflow would be recorded as a negative year.
 _DATE_WORDS = frozenset(
     """
-    date dated acquired opened opening completion completed expires expiration expiry
-    commenced commencement founded established incorporated renovated renovation
+    date dated dates acquired opened opening openings completion completions completed
+    expires expiration expirations expiry commenced commencement founded established
+    incorporated renovated renovation renovations
     """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
 )
 

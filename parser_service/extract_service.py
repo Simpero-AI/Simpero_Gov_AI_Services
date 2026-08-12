@@ -224,6 +224,17 @@ _STAGE_ATTRIBUTE_MAPPING = "attribute_mapping"
 # availability") that do not fit a financial-core-or-operating_metric enum.
 _CANONICALIZABLE_TIERS = frozenset({"table", "prose", "complete"})
 
+# SIM-384: value_types that are never a financial-statement or sector metric,
+# so routing their label through the attribute-mapping prompt only pollutes
+# core_unmapped/operating_metric with things that were never candidates for
+# either. "text" is a claim the magnitude guard already gave up on (no
+# parseable number -- includes a bare section-header row like "Current
+# assets:" recovered by claims_from_prose with nothing beside it) and "date"
+# is a real value, just not a metric ("Opening Date: March 2024"). Both keep
+# their document-supplied label as `attribute`, uncanonicalized, rather than
+# being forced into a vocabulary that was never meant to name them.
+_NOT_CANONICALIZABLE_VALUE_TYPES = frozenset({"text", "date"})
+
 
 def _canonicalize_quantitative_claims(
     tier_claims: list[tuple[str, list[Claim]]], flag_log: FlagLog
@@ -244,6 +255,7 @@ def _canonicalize_quantitative_claims(
         for tier, claims in tier_claims
         if tier in _CANONICALIZABLE_TIERS
         for claim in claims
+        if claim.value.value_type not in _NOT_CANONICALIZABLE_VALUE_TYPES
     ]
     if not raw_labels:
         return
@@ -252,6 +264,8 @@ def _canonicalize_quantitative_claims(
         if tier not in _CANONICALIZABLE_TIERS:
             continue
         for claim in claims:
+            if claim.value.value_type in _NOT_CANONICALIZABLE_VALUE_TYPES:
+                continue
             raw = claim.attribute
             canonical, extra_flags = mapping[raw]
             claim.attribute_raw = raw
