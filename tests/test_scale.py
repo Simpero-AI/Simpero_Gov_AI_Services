@@ -116,6 +116,22 @@ def test_inline_negative_percent() -> None:
     assert normalize_financial_token("(45%)") == (-45.0, 1.0, "%")
 
 
+def test_percent_face_value_is_the_cross_repo_units_contract() -> None:
+    """SIM-402: pinned because a CONSUMER across the repo boundary depends on
+    it, not just this repo's own emit path.
+
+    A percent is read at face value ("62%" -> 62.0, unit "%"), never as a 0-1
+    fraction. Alpha stores customer_concentration this way and its screening
+    thresholds are fractions (0.50/0.70), so its evaluator divides by 100 on
+    the way in (app/services/screening/claims_lookup.py::share_as_fraction).
+    Flip this convention and that conversion double-counts: a healthy 30%
+    customer concentration reads as 0.003, and -- worse, in the other
+    direction -- an unconverted 30.0 reads as >0.70 and AUTO-DECLINES the
+    deal. Nothing spanning the two repos can catch that, so fail here."""
+    assert normalize_financial_token("62%") == (62.0, 1.0, "%")
+    assert normalize_financial_token("30%") == (30.0, 1.0, "%")
+
+
 def test_inline_comma_formatted_number_with_suffix() -> None:
     assert normalize_financial_token("$1,200K") == (1200.0, 1_000.0, None)
 

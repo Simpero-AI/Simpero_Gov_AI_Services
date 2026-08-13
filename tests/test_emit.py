@@ -717,6 +717,31 @@ def test_attribute_unmapped_is_a_real_flag_type() -> None:
     assert "attribute_unmapped" in FLAG_TYPES
 
 
+# --- SIM-402 / Screening #3: the two screening attributes ------------------- #
+
+
+def test_gate_accepts_the_screening_attributes_as_core() -> None:
+    """customer_concentration and monthly_burn earn their EXACT names (no
+    attribute_unmapped flag) rather than falling to OPERATING_METRIC. The
+    Alpha screener's gs_04/db_07/db_02 look these names up literally, so a
+    claim landing in the catch-all bucket is invisible to them."""
+    for name in ("customer_concentration", "monthly_burn"):
+        canonical, flags = gate_canonical_attribute(name)
+        assert canonical == name
+        assert flags == []
+
+
+def test_screening_attributes_are_published_in_the_contract() -> None:
+    """The parity test in contracts/ already asserts the whole enum matches;
+    this names the two explicitly so a future trim of the core vocabulary
+    fails HERE, pointing at the screener that depends on them, rather than
+    only as an opaque set-difference."""
+    import json
+
+    published = set(json.loads(SCHEMA_PATH.read_text())["$defs"]["canonicalAttribute"]["enum"])
+    assert {"customer_concentration", "monthly_burn"} <= published
+
+
 # --------------------------------------------------------------------------- #
 # SIM-344: Claim.attribute_raw -- optional, and only present in the emitted
 # JSON when actually set.

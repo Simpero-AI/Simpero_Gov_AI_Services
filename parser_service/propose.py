@@ -690,6 +690,18 @@ generic "margin" -- pick the one the label actually names (gross profit margin, 
 net income margin, EBITDA margin); if the label just says "margin" with no \
 qualifier telling you which, that is the ambiguous case in (3), core_unmapped.
 
+Two names in the list are disclosed characteristics rather than statement line \
+items, so they are easy to mistake for case (2) -- they are NOT operating \
+metrics, use the core name:
+- customer_concentration: the LARGEST SINGLE customer's share of revenue \
+("top customer % of revenue", "largest client concentration", "customer #1 as \
+% of sales"). A plain customer COUNT is still operating_metric, and a share \
+belonging to the top N customers combined (e.g. "top 5 = 80%") is NOT this \
+name -- that is the ambiguous case (3), core_unmapped.
+- monthly_burn: net cash consumed per month ("monthly burn", "net burn rate", \
+"cash burn per month"). An annual or quarterly burn figure is NOT this name \
+without a monthly basis stated -- that is case (3), core_unmapped.
+
 A label may carry a period, section banner or column header appended to it \
 ("Revenue | 2019F", "TURNOVER | Coffee Shop | YEAR 1") -- classify what the label \
 NAMES, ignoring the period/section/column qualifiers riding along with it.
