@@ -456,10 +456,18 @@ def is_per_share(attribute: str) -> bool:
     tokens = _label_tokens(attribute)
     if "eps" in tokens:
         return True
-    return any(
-        left == "per" and right in ("share", "shares")
-        for left, right in zip(tokens, tokens[1:], strict=False)
-    )
+    # Review ③: "per" adjacent to "share" was required, so "Net income per
+    # COMMON share" / "per DILUTED share" -- both standard captions -- were
+    # not recognised as per-share rows, and the caption's own carve-out then
+    # never applied to them (a 1000x-overstated EPS). Mirrors the same {0,2}
+    # intervening-word allowance as scale._PER_SHARE_EXCEPTION_RE; keep the
+    # two in step.
+    for index, token in enumerate(tokens):
+        if token != "per":
+            continue
+        if any(later in ("share", "shares") for later in tokens[index + 1 : index + 4]):
+            return True
+    return False
 
 
 def section_banners(table: TableRecord) -> dict[int, str]:

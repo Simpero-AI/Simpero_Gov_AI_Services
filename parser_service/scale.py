@@ -377,10 +377,31 @@ _TAIL_CURRENCY: dict[str, str] = {
 }
 
 
-def _tail_currency(word: str | None) -> str | None:
+# Spellings that name a currency UNIT but not which country's -- the same
+# ambiguity a bare "$" carries. "pounds"/"euros"/"yen" are not here: each names
+# exactly one currency in practice.
+_AMBIGUOUS_TAIL_WORDS = frozenset({"dollar", "dollars"})
+
+
+def _tail_currency(word: str | None, *, us_qualified: bool = False) -> str | None:
+    """The currency a caption's trailing "of <word>" tail names, or None when it
+    names one that cannot be trusted.
+
+    Review ④: a bare "of dollars" returns None. It genuinely says the figures
+    are in dollars, but not WHICH dollar -- a Canadian or Australian CIM
+    captioned "(in thousands of dollars)" is as common as a US one, and reading
+    it as USD turns a known unknown into a silent, confident error. This is the
+    same call _mark_currency already makes for a bare "$"; the two must agree,
+    or the same ambiguity resolves differently depending on which spelling the
+    document happened to use. "U.S. dollars" and the explicit ISO codes are
+    unaffected.
+    """
     if not word:
         return None
-    return _TAIL_CURRENCY.get(word.lower())
+    lowered = word.lower()
+    if lowered in _AMBIGUOUS_TAIL_WORDS and not us_qualified:
+        return None
+    return _TAIL_CURRENCY.get(lowered)
 
 
 # "CAD (in Thousands)", "(in millions)", "($ in millions)", "(US$ in millions)".
@@ -429,7 +450,13 @@ _SCALE_PHRASE_RE = re.compile(
     r"(?i:(?P<word>thousands?|millions?|billions?))"
     r"\b"
     r"(?:\s*,?\s*(?i:except|unless|excluding)\b[^()]*"
-    r"|\s+of\s+(?:U\.?\s*S\.?\s*)?"
+    # Review ④: the U.S. qualifier is now CAPTURED (usqual) instead of being an
+    # anonymous optional group. It was optional and outside the capture, so
+    # "(in thousands of dollars)" resolved to USD identically to "(in thousands
+    # of U.S. dollars)" -- a CAD/AUD/NZD CIM using the bare spelling was
+    # confidently mislabelled USD with no ambiguous_unit flag. See
+    # _tail_currency, which now refuses a bare "dollars".
+    r"|\s+of\s+(?P<usqual>U\.?\s*S\.?\s*)?"
     r"(?i:(?P<tailcur>dollars?|pounds?|euros?|yen|USD|GBP|EUR|CAD|AUD|NZD|HKD))\b[^()]*)?"
     r"\s*\)"
 )
@@ -476,13 +503,44 @@ _MAGNITUDE_ABBREV_MULTIPLIERS: dict[str, float] = {
     "k": 1_000.0,
     "m": 1_000_000.0,
     "mm": 1_000_000.0,
+    # Review ⑤: "mn" is the mirror of "bn" and just as common in CIM column
+    # headers ("USD mn", "£mn"). Without it those fell to assumed_1x -- flagged,
+    # so a recall gap rather than a wrong value, but a needless one.
+    "mn": 1_000_000.0,
     "b": 1_000_000_000.0,
     "bn": 1_000_000_000.0,
 }
 
+# Review ① (SIM-386): this pattern must NOT reuse _CURRENCY_MARK. That
+# alternation ends in an unbounded [A-Z]{3}, which here sits directly against a
+# one-letter magnitude, so any all-caps English word whose last four letters are
+# three-plus-{k,m,b} was read as "currency + magnitude":
+#
+#   "TERM LOAN"      -> sym="TER", word="M" -> x1e6, unit "TER"
+#   "LONG-TERM DEBT" / "RISK FACTORS" / "COMMON STOCK" / "BANK" / "FORM" /
+#   "WORK" / "TEAM", and mid-word ("PLATFORM" -> "FOR"+"M")
+#
+# and because `unit` then came back non-None, ambiguous_unit AND scale_assumed
+# were both suppressed while scale_invariant_holds still passed (450 x 1e6 ==
+# 450e6) -- a silent 10^6 overstatement with no flag anywhere. A GBP document
+# containing "LONG TERM DEBT" even had "TER" stamped on every bare-$ value as
+# its document-declared currency.
+#
+# So the mark here is a CLOSED set: real symbols, plus ISO codes we actually
+# know, and never a bare three-letter word. (?<![A-Za-z]) stops a match
+# starting mid-word; the trailing \b after the magnitude already stops the
+# other end.
+_ISO_CURRENCY_CODES = sorted(
+    set(_SYMBOL_CURRENCIES.values()) | set(_TAIL_CURRENCY.values()) | {"CHF", "SEK", "NOK", "DKK"},
+    reverse=True,
+)
+_STRICT_CURRENCY_MARK = "|".join(
+    [r"US\$", r"C\$", r"A\$", r"NZ\$", r"HK\$", r"\$", "£", "€", "¥", *_ISO_CURRENCY_CODES]
+)
+
 _BARE_MAGNITUDE_RE = re.compile(
-    rf"(?<![\d,.'])(?P<sym>{_CURRENCY_MARK})\s?"
-    r"(?i:(?P<word>k|mm|bn|b|m|thousands?|millions?|billions?))\b"
+    rf"(?<![\d,.'])(?<![A-Za-z])(?P<sym>{_STRICT_CURRENCY_MARK})\s?"
+    r"(?i:(?P<word>k|mm|mn|bn|b|m|thousands?|millions?|billions?))\b"
 )
 
 
@@ -522,7 +580,9 @@ def _phrase_currency(match: re.Match[str]) -> str | None:
     inside = _mark_currency(match.group("insym"))
     if inside:
         return inside
-    return _tail_currency(match.group("tailcur"))
+    return _tail_currency(
+        match.group("tailcur"), us_qualified=bool(match.groupdict().get("usqual"))
+    )
 
 
 _ScalePhraseMatch = tuple[int, int, float, str | None]
@@ -648,7 +708,23 @@ def document_declared_currency(pages: list[PageIndex]) -> str | None:
 # the phrase's own scale_context, not inferred from the value: a bare "(in
 # thousands)" caption does not exempt a per-share row just because the row
 # happens to be one (see determine_scale's per_share parameter).
-_PER_SHARE_EXCEPTION_RE = re.compile(r"(?i:except|unless|excluding)\b[^()]*?\bper[- ]share\b")
+#
+# Reviews ② and ③, both of which made the carve-out silently miss and leave a
+# 1000x-overstated EPS behind:
+#   ② the old (?i:...) scoped case-insensitivity to except|unless|excluding
+#      only, leaving `per[- ]share` case-SENSITIVE -- so it matched the
+#      lowercase rendering but not "(In Thousands, Except Per Share Data)",
+#      which is the standard EDGAR title-case form. re.IGNORECASE now covers
+#      the whole pattern; there is no [A-Z]{3} currency slot here to protect,
+#      which is the reason the narrow (?i:...) scoping exists elsewhere.
+#   ③ `per` had to sit adjacent to `share`, so the equally standard "except
+#      per common share data" / "per diluted share data" were refused. Up to
+#      two intervening words are now allowed -- enough for the real captions,
+#      still short enough that "per" and "share" stay one phrase.
+_PER_SHARE_EXCEPTION_RE = re.compile(
+    r"(?:except|unless|excluding)\b[^()]*?\bper(?:[- ]\w+){0,2}[- ]shares?\b",
+    re.IGNORECASE,
+)
 
 
 def _declares_per_share_exception(context: str) -> bool:

@@ -635,6 +635,21 @@ def test_is_per_share_recognizes_the_label_variants() -> None:
     assert not is_per_share("Shares Outstanding | 2019F")
 
 
+def test_is_per_share_allows_a_qualifier_between_per_and_share() -> None:
+    """Review ③: "per" had to sit directly beside "share", so the standard
+    "per common share" / "per diluted share" captions were not recognised as
+    per-share rows -- and a caption's own per-share carve-out therefore never
+    applied to them, leaving EPS 1000x overstated. Mirrors the {0,2}
+    intervening-word allowance in scale._PER_SHARE_EXCEPTION_RE."""
+    assert is_per_share("Net income per common share")
+    assert is_per_share("Net income per diluted share")
+    assert is_per_share("Earnings per basic common share")
+    assert is_per_share("Loss per weighted average share")
+    # Still bounded: "per" and "share" must remain one phrase, not merely
+    # co-occur somewhere in a long label.
+    assert not is_per_share("Revenue per region reported by share of total market")
+
+
 def test_a_two_row_header_stacks_into_the_column_label_and_types_the_count() -> None:
     # "Hotel" and "Rooms" wrap across two header rows; folded, the column label is
     # "Hotel Rooms", whose count noun types the column count rather than currency.

@@ -1149,6 +1149,42 @@ def test_per_share_declines_a_page_caption_that_exempts_it() -> None:
     assert result.flags == ["scale_assumed"]
 
 
+@pytest.mark.parametrize(
+    "caption",
+    [
+        # Review ②: (?i:...) scoped case-insensitivity to except|unless|excluding
+        # only, so `per[- ]share` stayed case-SENSITIVE and the carve-out worked
+        # for exactly one rendering. Title case is the standard EDGAR form.
+        "(In Thousands, Except Per Share Data)",
+        "(IN THOUSANDS, EXCEPT PER SHARE DATA)",
+        # Review ③: "per" had to be adjacent to "share".
+        "(in thousands, except per common share data)",
+        "(In Thousands, Except Per Diluted Share Data)",
+        "(in thousands, except per basic common share data)",
+        "(in millions, unless otherwise noted, except per share amounts)",
+    ],
+)
+def test_per_share_carve_out_covers_the_real_caption_renderings(caption: str) -> None:
+    """Every one of these left EPS multiplied by 1000 with no flag: the caption
+    declares the exception, the code did not see it, so `scale_source` came back
+    page_header and the value was silently 1000x."""
+    text = f"{caption}\nEPS $1.20 total"
+    page = _page(text)
+
+    result = determine_scale(
+        "$1.20",
+        page,
+        char_start=text.index("$1.20"),
+        origin="table",
+        value_type="currency",
+        per_share=True,
+    )
+
+    assert result.normalized == 1.20
+    assert result.scale_multiplier == 1.0
+    assert result.scale_source == "assumed_1x"
+
+
 def test_per_share_exception_does_not_reach_a_non_per_share_row_in_the_same_table() -> None:
     # Same caption, same page -- but this row is revenue, not per-share, so the
     # caption's own exception does not apply to it.
@@ -1371,10 +1407,106 @@ def test_abbreviated_magnitude_headers_are_recognized(
         "12,000",
         "market",
         "USD market share",
+        # Review ①: ordinary all-caps English. _BARE_MAGNITUDE_RE reused
+        # _CURRENCY_MARK, whose unbounded [A-Z]{3} branch read the last three
+        # letters before a k/m/b as an ISO code -- "TERM" -> "TER" + "M" ->
+        # x1e6 with unit "TER". Worse than a miss: `unit` came back non-None,
+        # which SUPPRESSED both ambiguous_unit and scale_assumed, and
+        # scale_invariant_holds still passed, so nothing flagged the 10^6
+        # overstatement.
+        "TERM LOAN",
+        "LONG-TERM DEBT",
+        "LONG TERM DEBT",
+        "RISK FACTORS",
+        "COMMON STOCK",
+        "BANK",
+        "FORM",
+        "WORK",
+        "TEAM",
+        # Mid-word: "PLATFORM" contains "FOR" + "M".
+        "PLATFORM",
+        "FORM 10-K",
     ],
 )
 def test_bare_letters_without_a_currency_mark_declare_no_scale(text: str) -> None:
     assert scale_phrase_in_text(text) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "currency"),
+    [
+        # Review ④: the U.S. qualifier was optional AND outside the capture, so
+        # a bare "of dollars" resolved to USD exactly like "of U.S. dollars".
+        # A CAD/AUD/NZD CIM using the bare spelling -- which is the common one
+        # in those markets -- was confidently mislabelled USD, with no
+        # ambiguous_unit flag, contradicting _mark_currency's treatment of a
+        # bare "$" for the identical ambiguity.
+        ("(in thousands of dollars)", None),
+        ("(in millions of dollars)", None),
+        # Qualified or explicitly coded: unchanged.
+        ("(in thousands of U.S. dollars)", "USD"),
+        ("(in thousands of US dollars)", "USD"),
+        ("(in millions of USD)", "USD"),
+        ("(in thousands of CAD)", "CAD"),
+        # Unambiguous spellings keep resolving -- each names one currency.
+        ("(in thousands of pounds)", "GBP"),
+        ("(in millions of euros)", "EUR"),
+        ("(in thousands of yen)", "JPY"),
+    ],
+)
+def test_a_bare_dollars_tail_stays_ambiguous(text: str, currency: str | None) -> None:
+    found = scale_phrase_in_text(text)
+    assert found is not None, f"{text!r} still declares a magnitude"
+    assert found[1] == currency
+
+
+def test_mn_is_recognized_as_millions() -> None:
+    """Review ⑤: "mm" and "bn" were in the alternation, "mn" was not, so
+    "USD mn" fell to assumed_1x. Flagged, so a recall gap rather than a wrong
+    value -- but a needless one."""
+    text = "USD mn\nRevenue 450 total"
+    page = _page(text)
+
+    result = determine_scale(
+        "450",
+        page,
+        char_start=text.index("450 total"),
+        origin="table",
+        value_type="currency",
+    )
+
+    assert result.scale_multiplier == 1_000_000.0
+    assert result.normalized == 450_000_000.0
+    assert result.unit == "USD"
+
+
+def test_all_caps_prose_does_not_stamp_a_fake_currency_on_a_value() -> None:
+    """Review ① end-to-end: the failure mode was not just a wrong multiplier
+    but a fabricated unit that silenced every guard. Asserted on determine_scale
+    rather than the regex, because that is where the flags are decided."""
+    text = "TERM LOAN\nRevenue $450 total"
+    page = _page(text)
+
+    result = determine_scale(
+        "$450",
+        page,
+        char_start=text.index("$450"),
+        origin="table",
+        value_type="currency",
+    )
+
+    assert result.normalized == 450.0
+    assert result.unit is None
+    assert result.scale_source == "assumed_1x"
+    assert "scale_assumed" in result.flags
+
+
+def test_a_real_currency_document_is_not_relabelled_by_all_caps_prose() -> None:
+    """Review ①: a GBP document containing "LONG TERM DEBT" reported its
+    document-declared currency as "TER", which was then stamped on every
+    bare-$ value in it."""
+    pages = [_page("£'000\nLONG TERM DEBT 5,000")]
+    assert document_declared_currency(pages) == "GBP"
 
 
 def test_determine_scale_abbreviated_column_header() -> None:
