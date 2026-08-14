@@ -444,7 +444,43 @@ _SEMANTIC_SAMPLE_CAP = 40
 # text, so a match routes to audit regardless of scale_source (SIM-388): the
 # model call is spent only on a genuine bound_as_point candidate, never
 # fished for across the general population the way the semantic sample is.
-_BOUND_PATTERN_RE = re.compile(r"\b(?:greater than|at least|up to)\b|[<>]", re.IGNORECASE)
+#
+# Review ①: the original alternation carried only the UPPER-bound phrasings
+# plus bare <>, so every mirror form was under-routed -- "Adjusted revenue was
+# less than $5.0M" was extracted as a point value, never entered
+# bound_as_point_ids, fell into the capped semantic sample, and if sampled was
+# judged by Haiku, whose false `supported` is final (escalation fires only on a
+# NON-supported verdict). That is precisely the mode this route exists to
+# guarantee-audit, so the recall hole mattered more than its size.
+_BOUND_WORDS = (
+    # upper
+    r"up to|at most|no more than|not more than|less than|fewer than|below|under",
+    # lower
+    r"greater than|at least|no less than|not less than|more than|in excess of|above|over",
+    # verb forms
+    r"exceeds?|exceeding",
+)
+_BOUND_TOKEN = rf"(?:\b(?:{'|'.join(_BOUND_WORDS)})\b|[<>]|≤|≥)"
+
+# Review ③: the bound token must sit next to a NUMBER, not merely appear
+# anywhere in the span. quote_of() returns a whole sentence for prose, so
+# "periods up to five years, generating $12M annually" -- a point value --
+# matched "up to" and was routed to Opus. Requiring an adjacent numeric/currency
+# token keeps the genuine bounds ("up to $2M", "< 5%") and drops the prose.
+# Cost-only in effect (Opus stays authoritative either way), but it is the
+# difference between a targeted route and a broad one.
+_NUMBER_TOKEN = r"(?:[$£€¥]\s?)?\d"
+_BOUND_PATTERN_RE = re.compile(
+    rf"{_BOUND_TOKEN}\W{{0,3}}{_NUMBER_TOKEN}|{_NUMBER_TOKEN}[\d,.]*\s*{_BOUND_TOKEN}",
+    re.IGNORECASE,
+)
+
+# Review ②: the bound route was uncapped -- every regex match went to Opus,
+# while the semantic sample was capped at 40. One pathological page of bound
+# prose could therefore dominate a run's cost and latency. Capped on the same
+# deterministic key the semantic sample uses, so which claims survive the cap
+# is reproducible rather than input-order dependent.
+_BOUND_ROUTE_CAP = 40
 
 
 def _is_scale_absurd_candidate(claim: Claim) -> bool:
@@ -464,15 +500,31 @@ def _is_bound_as_point_candidate(quote: str) -> bool:
     return bool(_BOUND_PATTERN_RE.search(quote))
 
 
-def _semantic_sample_key(claim: Claim) -> bytes:
-    """Deterministic sort key for the bounded semantic sample. Hashes
-    element_id_for(claim) rather than claim_ref: claim_ref is not assigned
-    until _reduce_same_fact, which runs after _audit_claims, so it is still
-    None here. element_id_for is already stable within a run (SIM-341), which
-    is enough to make the sample reproducible for the same document rather
-    than depending on incidental list ordering.
+def _sample_identity(claim: Claim) -> str:
+    """A claim's identity for sampling: its LOCATION only, never its attribute.
+
+    Review ④: this used element_id_for(claim), which embeds `claim.attribute`.
+    `_canonicalize_quantitative_claims` rewrites `attribute` in place from a
+    non-deterministic model call -- and is skipped entirely when that call
+    raises -- and it runs BEFORE _audit_claims. So the "deterministic" sample
+    was only deterministic within a single run: re-parsing the same document
+    could sample, and therefore flag, a different set of claims. claim_ref_base's
+    own docstring warns against an attribute-derived id for exactly this reason.
+
+    A location is fixed by the document, not by any model call, so it is stable
+    across re-parses. claim_ref is not an option here -- it is not assigned
+    until _reduce_same_fact, which runs after this.
     """
-    return hashlib.sha256(element_id_for(claim).encode()).digest()
+    location = claim.location
+    if isinstance(location, PdfLocation):
+        return f"pdf:{location.file}:p{location.page}:c{location.char_start}-{location.char_end}"
+    return f"xlsx:{location.file}:{location.sheet}!{location.cell_ref}"
+
+
+def _semantic_sample_key(claim: Claim) -> bytes:
+    """Deterministic sort key for the bounded semantic sample -- and, since
+    review ②, for the bound route's cap as well."""
+    return hashlib.sha256(_sample_identity(claim).encode()).digest()
 
 
 def _audit_claims(
@@ -517,11 +569,18 @@ def _audit_claims(
 
     auditable = [c for c in claims if id(c) in spans]
     scale_absurd_ids = {id(c) for c in auditable if _is_scale_absurd_candidate(c)}
-    bound_as_point_ids = {
-        id(c)
-        for c in auditable
-        if id(c) not in scale_absurd_ids and _is_bound_as_point_candidate(quote_of(c))
-    }
+    # Review ②: capped, and capped on the same deterministic key the semantic
+    # sample sorts by -- so when a run does exceed the cap, WHICH bounds are
+    # audited is reproducible rather than a function of extraction order.
+    bound_candidates = sorted(
+        (
+            c
+            for c in auditable
+            if id(c) not in scale_absurd_ids and _is_bound_as_point_candidate(quote_of(c))
+        ),
+        key=_semantic_sample_key,
+    )
+    bound_as_point_ids = {id(c) for c in bound_candidates[:_BOUND_ROUTE_CAP]}
     remaining = [
         c for c in auditable if id(c) not in scale_absurd_ids and id(c) not in bound_as_point_ids
     ]
