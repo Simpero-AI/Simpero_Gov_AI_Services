@@ -186,6 +186,23 @@ CoreAttribute = Literal[
     "inventory",
     "operating_cash_flow",
     "free_cash_flow",
+    # Screening #3 (SIM-402): the two figures the Alpha screener's
+    # deterministic rules need and no existing core name covers. Unlike the
+    # names above these are not income-statement/balance-sheet LINE ITEMS,
+    # they are disclosed financial characteristics -- but they belong in the
+    # core rather than OPERATING_METRIC for the reason the core exists at
+    # all: a consumer keys on the exact name. gs_04/db_07 read
+    # customer_concentration and db_02 computes runway from monthly_burn, so
+    # both must have stable canonical names, not raw labels in a catch-all
+    # bucket. See propose.py's mapping prompt, which calls both out by name
+    # so they are not classified as operating metrics.
+    #
+    # customer_concentration is the LARGEST single customer's share of
+    # revenue. It is emitted as a percent read at face value ("62%" ->
+    # normalized 62.0, unit "%"), same as every other percent here -- the
+    # consumer converts to a fraction, this module does not special-case it.
+    "customer_concentration",
+    "monthly_burn",
 ]
 
 CORE_ATTRIBUTES: frozenset[str] = frozenset(get_args(CoreAttribute))
