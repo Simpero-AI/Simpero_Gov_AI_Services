@@ -22,6 +22,7 @@ from parser_service.propose import (
     PageProposals,
     ProposedAssertion,
     ProposedClaim,
+    _normalize_attribute_label,
     assertions_from_prose,
     canonicalize_attributes,
     claims_from_completeness,
@@ -1182,3 +1183,44 @@ def test_canonicalize_attributes_dedupes_before_calling_the_model() -> None:
     )
     assert len(client.calls) == 1
     assert client.calls[0]["messages"][0]["content"].count("Revenue | 2019F") == 1
+
+
+def test_normalize_attribute_label_strips_period_basis_and_scale_only() -> None:
+    n = _normalize_attribute_label
+    # period / scale variants of one metric fold to one key
+    assert n("EBITDA 2001") == n("EBITDA") == n("EBITDA ($ in millions)") == "ebitda"
+    assert n("% Margin (2001)") == n("2001 % Margin") == "% margin"
+    assert n("projected net revenue 2006E PF") == n("projected net revenue 2007E")
+    # semantic content is untouched, so distinct metrics keep distinct keys
+    assert n("Gross margin") != n("Net margin")
+    # the structural "|" is NOT split: an entity's two metrics stay separate
+    assert n("Aquarius (1) | Slots") != n("Aquarius (1) | Hotel Rooms")
+
+
+def test_canonicalize_maps_a_metric_once_across_period_and_scale_variants() -> None:
+    # EBITDA / EBITDA 2001 / EBITDA ($ in millions) name one metric across a
+    # period and a scale tag -- classified ONCE, the verdict fanned back to every
+    # variant, so a metric cannot land on two different canonicals per period.
+    client = _StubAttributeClient([AttributeMapping(index=1, canonical="ebitda")])
+    labels = ["EBITDA", "EBITDA 2001", "EBITDA ($ in millions)"]
+    result = canonicalize_attributes(labels, client=client)
+    assert result == {lbl: ("ebitda", []) for lbl in labels}
+    assert len(client.calls) == 1  # one metric, one classification
+    assert client.calls[0]["messages"][0]["content"].count("EBITDA") == 1
+
+
+def test_canonicalize_does_not_merge_distinct_metrics_sharing_an_entity_prefix() -> None:
+    # The "|" here separates entity from metric ("Aquarius (1) | Slots"), not
+    # metric from period, so normalization must NOT split it and fuse "Slots"
+    # with "Casino Square Footage" -- each is classified in its own right.
+    client = _StubAttributeClient(
+        [
+            AttributeMapping(index=1, canonical="operating_metric"),
+            AttributeMapping(index=2, canonical="operating_metric"),
+        ]
+    )
+    labels = ["Aquarius (1) | Casino Square Footage", "Aquarius (1) | Slots"]
+    result = canonicalize_attributes(labels, client=client)
+    assert set(result) == set(labels)
+    sent = client.calls[0]["messages"][0]["content"]
+    assert "Casino Square Footage" in sent and "Slots" in sent

@@ -178,6 +178,8 @@ CoreAttribute = Literal[
     "cash_and_equivalents",
     "total_debt",
     "net_debt",
+    "current_assets",
+    "current_liabilities",
     "working_capital",
     "accounts_receivable",
     "accounts_payable",
