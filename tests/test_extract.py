@@ -246,6 +246,12 @@ def test_vocabularies_do_not_contain_words_they_document_as_excluded() -> None:
         ("March '07", "Completion Date of Recent Renovation", "date"),
         # A bare year with an unhelpful label is still a year, not $2bn.
         ("2006", "Aquarius", "date"),
+        # SIM-384: the plural forms are as much a date label as the singular --
+        # a table's row/column header often reads "Key Dates" or "Renovations",
+        # not "Date"/"Renovation".
+        ("March 2024", "Key Dates | Opening", "date"),
+        ("2021", "Renovations Completed", "date"),
+        ("2019", "Expirations | Lease 1", "date"),
         # No magnitude to scale: emit.py gives these a null normalized rather
         # than inventing a number from whatever digits parse first.
         ("four", "propertyCount", "text"),

@@ -26,6 +26,7 @@ from parser_service.elements import ChartElement, TableElement
 from parser_service.emit import (
     CANONICAL_ATTRIBUTES,
     CORE_ATTRIBUTES,
+    CORE_UNMAPPED,
     EDGE_TYPES,
     FLAG_TYPES,
     OPERATING_METRIC,
@@ -696,15 +697,20 @@ def test_gate_flags_a_near_miss_rather_than_trusting_it() -> None:
     assert flags == ["attribute_unmapped"]
 
 
-def test_gate_flags_the_explicit_core_unmapped_sentinel() -> None:
+def test_gate_gives_the_explicit_core_unmapped_sentinel_its_own_bucket() -> None:
+    # SIM-384: core_unmapped ("financial but unplaceable") used to collapse
+    # into OPERATING_METRIC ("real sector metric") -- a different population
+    # with a different reconciliation story. It now earns its own value,
+    # still flagged since it is still an honest "couldn't place it" signal.
     canonical, flags = gate_canonical_attribute("core_unmapped")
-    assert canonical == OPERATING_METRIC
+    assert canonical == CORE_UNMAPPED
     assert flags == ["attribute_unmapped"]
 
 
 def test_core_attributes_and_operating_metric_are_disjoint() -> None:
     assert OPERATING_METRIC not in CORE_ATTRIBUTES
-    assert CORE_ATTRIBUTES | {OPERATING_METRIC} == CANONICAL_ATTRIBUTES
+    assert CORE_UNMAPPED not in CORE_ATTRIBUTES
+    assert CORE_ATTRIBUTES | {OPERATING_METRIC, CORE_UNMAPPED} == CANONICAL_ATTRIBUTES
 
 
 def test_attribute_unmapped_is_a_real_flag_type() -> None:

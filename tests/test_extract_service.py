@@ -14,6 +14,7 @@ import pytest
 
 from parser_service import extract_service
 from parser_service.emit import ClaimValue, PdfLocation
+from parser_service.scale import ValueType
 from scripts import emit_claims
 
 
@@ -32,11 +33,13 @@ class _Page:
         self.page = page
 
 
-def _table_claim(page: int, attribute: str = "revenue") -> extract_service.Claim:
+def _table_claim(
+    page: int, attribute: str = "revenue", value_type: ValueType = "currency"
+) -> extract_service.Claim:
     return extract_service.Claim(
         entity="ACME",
         attribute=attribute,
-        value=ClaimValue(raw="$1", normalized=1.0, unit="$", value_type="currency"),
+        value=ClaimValue(raw="$1", normalized=1.0, unit="$", value_type=value_type),
         location=PdfLocation(file="cim.pdf", page=page, char_start=0, char_end=2),
         status="proposed",
     )
@@ -247,6 +250,57 @@ def test_canonicalize_attributes_maps_table_claims_end_to_end(monkeypatch) -> No
     claim = payload["claims"][0]
     assert claim["attribute"] == "revenue"
     assert claim["attribute_raw"] == "Revenue | 2019F"
+
+
+def test_canonicalize_attributes_skips_text_and_date_claims(monkeypatch) -> None:
+    # SIM-384: a date ("Opening Date: March 2024") or a magnitude-guard-downgraded
+    # text claim (a bare section-header row like "Current assets:", which carries
+    # no parseable number) is not a financial-statement or sector metric, so its
+    # label must never reach the attribute-mapping prompt -- doing so is what
+    # flooded core_unmapped/operating_metric with dates and section headers on a
+    # real CIM. Only the currency claim's label should be sent to the model; the
+    # other two keep their document-supplied label untouched.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class _OnePageResult:
+        document = _Doc()
+        pages = [_Page(1)]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _OnePageResult())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda *_a, **_k: ["t1"])
+    monkeypatch.setattr(
+        extract_service,
+        "claims_from_table",
+        lambda table, page, *, entity, file, flag_log: [
+            _table_claim(page.page, attribute="Revenue | 2019F", value_type="currency"),
+            _table_claim(page.page, attribute="Opening Date | 2019F", value_type="date"),
+            _table_claim(page.page, attribute="Current assets:", value_type="text"),
+        ],
+    )
+
+    def _fake_canonicalize(labels):
+        assert labels == ["Revenue | 2019F"], "only the currency claim's label may be mapped"
+        return {"Revenue | 2019F": ("revenue", [])}
+
+    monkeypatch.setattr(extract_service, "canonicalize_attributes", _fake_canonicalize)
+
+    payload = extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+        canonicalize_attributes=True,
+    )
+
+    by_attribute = {c.get("attribute_raw", c["attribute"]): c for c in payload["claims"]}
+    assert by_attribute["Revenue | 2019F"]["attribute"] == "revenue"
+    assert by_attribute["Opening Date | 2019F"]["attribute"] == "Opening Date | 2019F"
+    assert "attribute_raw" not in by_attribute["Opening Date | 2019F"]
+    assert by_attribute["Current assets:"]["attribute"] == "Current assets:"
+    assert "attribute_raw" not in by_attribute["Current assets:"]
 
 
 def test_canonicalize_attributes_failure_does_not_abort_the_document(monkeypatch) -> None:
