@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .coverage import NumberMiss, document_coverage
 from .docling_parser import parse_pdf_bytes
 from .emit import (
+    CORE_UNMAPPED,
     OPERATING_METRIC,
     Claim,
     Edge,
@@ -224,6 +225,17 @@ _STAGE_ATTRIBUTE_MAPPING = "attribute_mapping"
 # availability") that do not fit a financial-core-or-operating_metric enum.
 _CANONICALIZABLE_TIERS = frozenset({"table", "prose", "complete"})
 
+# SIM-384: value_types that are never a financial-statement or sector metric,
+# so routing their label through the attribute-mapping prompt only pollutes
+# core_unmapped/operating_metric with things that were never candidates for
+# either. "text" is a claim the magnitude guard already gave up on (no
+# parseable number -- includes a bare section-header row like "Current
+# assets:" recovered by claims_from_prose with nothing beside it) and "date"
+# is a real value, just not a metric ("Opening Date: March 2024"). Both keep
+# their document-supplied label as `attribute`, uncanonicalized, rather than
+# being forced into a vocabulary that was never meant to name them.
+_NOT_CANONICALIZABLE_VALUE_TYPES = frozenset({"text", "date"})
+
 
 def _canonicalize_quantitative_claims(
     tier_claims: list[tuple[str, list[Claim]]], flag_log: FlagLog
@@ -244,6 +256,7 @@ def _canonicalize_quantitative_claims(
         for tier, claims in tier_claims
         if tier in _CANONICALIZABLE_TIERS
         for claim in claims
+        if claim.value.value_type not in _NOT_CANONICALIZABLE_VALUE_TYPES
     ]
     if not raw_labels:
         return
@@ -252,6 +265,8 @@ def _canonicalize_quantitative_claims(
         if tier not in _CANONICALIZABLE_TIERS:
             continue
         for claim in claims:
+            if claim.value.value_type in _NOT_CANONICALIZABLE_VALUE_TYPES:
+                continue
             raw = claim.attribute
             canonical, extra_flags = mapping[raw]
             claim.attribute_raw = raw
@@ -324,12 +339,14 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
     "Revenue | 2019F" and "Revenue | 2020F" both -> "revenue"), so without it a
     2019 figure and a 2020 figure of the same metric would fuse into a false
     `contradicts` edge -- E3 (SIM-345) is what makes the period the structured
-    field this keys on. OPERATING_METRIC claims are excluded from this pass
-    entirely -- it is SIM-344's catch-all bucket for every sector/operating
-    metric the core enum does not cover, so two claims landing there share
-    nothing but the bucket, not a fact-slot (occupancy vs ARPU would otherwise
-    fuse into a false `contradicts` edge). That disagreement is signal, not
-    noise, so it is flagged and neither claim is preferred.
+    field this keys on. OPERATING_METRIC and CORE_UNMAPPED claims are both
+    excluded from this pass entirely -- SIM-344/SIM-384's two catch-all
+    buckets (a sector/operating metric the core enum does not cover, and a
+    label that canonicalizes to nothing at all), so two claims landing in
+    either share nothing but the bucket, not a fact-slot (occupancy vs ARPU,
+    or two unrelated unmapped subtotals, would otherwise fuse into a false
+    `contradicts` edge). That disagreement is signal, not noise, so it is
+    flagged and neither claim is preferred.
     """
     # SIM-365: stamp every claim (all tiers, not only numeric) with its stable
     # claim_ref first. The edges below name their endpoints by claim_ref, and the
@@ -379,7 +396,7 @@ def _reduce_same_fact(tiers: list[tuple[str, list[Claim]]]) -> list[Edge]:
         defaultdict(list)
     )
     for claim in numeric_claims:
-        if claim.attribute == OPERATING_METRIC:
+        if claim.attribute in (OPERATING_METRIC, CORE_UNMAPPED):
             continue
         attribute_groups[
             (

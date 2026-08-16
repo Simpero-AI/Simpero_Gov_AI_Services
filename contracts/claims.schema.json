@@ -6,7 +6,7 @@
   "$defs": {
     "canonicalAttribute": {
       "type": "string",
-      "description": "SIM-344: the closed canonical attribute vocabulary -- the parser's CoreAttribute enum plus the operating_metric escape valve. E2 maps a document's raw label onto one of these and stores the result in `attribute` (the raw label is kept in `attribute_raw`). Published here so both repos and every cross-claim consumer -- 3b consistency rules, scoring, cross-source matching -- key on the SAME names; a contract test keeps this enum identical to the parser's CoreAttribute so the two cannot drift.",
+      "description": "SIM-344: the closed canonical attribute vocabulary -- the parser's CoreAttribute enum plus two catch-alls: `operating_metric` (a real sector metric outside the core financial vocabulary) and `core_unmapped` (SIM-384; financial but unplaceable -- distinct from operating_metric so the two don't collapse into one ungroupable bucket). E2 maps a document's raw label onto one of these and stores the result in `attribute` (the raw label is kept in `attribute_raw`). Published here so both repos and every cross-claim consumer -- 3b consistency rules, scoring, cross-source matching -- key on the SAME names; a contract test keeps this enum identical to the parser's CoreAttribute so the two cannot drift.",
       "enum": [
         "revenue",
         "cogs",
@@ -36,7 +36,8 @@
         "inventory",
         "operating_cash_flow",
         "free_cash_flow",
-        "operating_metric"
+        "operating_metric",
+        "core_unmapped"
       ]
     },
     "edge": {

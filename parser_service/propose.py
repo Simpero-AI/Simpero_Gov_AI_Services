@@ -848,7 +848,12 @@ def canonicalize_attributes(
 
     A label the model's response omitted entirely is treated exactly like an
     out-of-enum answer -- gated to OPERATING_METRIC with attribute_unmapped --
-    rather than silently left unmapped with no record of the gap.
+    rather than silently left unmapped with no record of the gap. The default
+    below is deliberately NOT the literal string "core_unmapped": since SIM-384
+    gate_canonical_attribute gives that string its own bucket, using it as the
+    omitted-label sentinel would make a model's silence indistinguishable from
+    its explicit "financial but unplaceable" answer -- two different signals
+    that must not collapse into one.
     """
     groups: dict[str, list[str]] = {}
     for raw in sorted(set(raw_labels)):
@@ -857,7 +862,10 @@ def canonicalize_attributes(
     proposed = propose_attribute_mappings(representatives, model=model, client=client)
     canonical: dict[str, tuple[str, list[str]]] = {}
     for members in groups.values():
-        gated = gate_canonical_attribute(proposed.get(members[0], "core_unmapped"))
+        # "__omitted__" (SIM-384's sentinel), not "core_unmapped": a label the
+        # model left out gates to OPERATING_METRIC + attribute_unmapped, kept
+        # distinct from an explicit core_unmapped answer -- see the docstring.
+        gated = gate_canonical_attribute(proposed.get(members[0], "__omitted__"))
         for raw in members:
             canonical[raw] = gated
     return canonical

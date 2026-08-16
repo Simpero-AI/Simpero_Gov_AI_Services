@@ -1,10 +1,23 @@
 from functools import lru_cache
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # This service is deployed independently of the main app (its own Dockerfile,
 # its own process/port) so it gets its own small settings module rather than
 # importing app.config — the two are not meant to share a runtime.
+
+# pydantic-settings' own `env_file=".env"` support (below) only ever
+# populates THIS class's own declared, PARSER_-prefixed fields -- it never
+# touches the real process environment. ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN
+# are deliberately NOT fields here (verify.py/propose.py's api_key_present()
+# reads them straight from os.environ, matching the Anthropic SDK's own
+# convention) -- so without this explicit load, dropping them in .env is a
+# silent no-op: the worker/API still see them as unset. load_dotenv() with no
+# args walks up from the CWD to find .env and injects everything it finds
+# into os.environ; called once here, at import time, before any entrypoint
+# (worker.py, main.py) reads either kind of variable.
+load_dotenv()
 
 
 class ParserSettings(BaseSettings):

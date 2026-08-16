@@ -194,22 +194,32 @@ CORE_ATTRIBUTES: frozenset[str] = frozenset(get_args(CoreAttribute))
 # an operating KPI, or any label the core enum was never meant to cover.
 OPERATING_METRIC = "operating_metric"
 
-CANONICAL_ATTRIBUTES: frozenset[str] = CORE_ATTRIBUTES | {OPERATING_METRIC}
+# SIM-384: the OTHER escape valve -- "financial but unplaceable" (an ambiguous
+# subtotal, a nonstandard label the proposer cannot confidently name) as
+# distinct from OPERATING_METRIC's "real sector metric". The two used to
+# collapse onto one value, which destroyed the distinction 3a needs to
+# reconcile core_unmapped claims among themselves rather than against
+# unrelated sector metrics. See propose.py's mapping prompt, case 3.
+CORE_UNMAPPED = "core_unmapped"
+
+CANONICAL_ATTRIBUTES: frozenset[str] = CORE_ATTRIBUTES | {OPERATING_METRIC, CORE_UNMAPPED}
 
 
 def gate_canonical_attribute(proposed: str) -> tuple[str, list[str]]:
     """The code half of SIM-344's proposer-with-code-gate: a proposed canonical
     string earns that exact value only by literal membership in CORE_ATTRIBUTES,
-    or by being the OPERATING_METRIC escape valve. Anything else -- a
-    hallucinated near-miss, a paraphrase, the proposer's own "this looks
-    core-adjacent but I can't place it" signal -- falls to OPERATING_METRIC and
-    is flagged attribute_unmapped rather than trusted. Nothing calling this
-    function can end up with a canonical attribute outside CANONICAL_ATTRIBUTES.
+    or by being the OPERATING_METRIC or CORE_UNMAPPED escape valves. Anything
+    else -- a hallucinated near-miss, a paraphrase outside all three answers --
+    falls to OPERATING_METRIC and is flagged attribute_unmapped rather than
+    trusted. Nothing calling this function can end up with a canonical
+    attribute outside CANONICAL_ATTRIBUTES.
     """
     if proposed in CORE_ATTRIBUTES:
         return proposed, []
     if proposed == OPERATING_METRIC:
         return OPERATING_METRIC, []
+    if proposed == CORE_UNMAPPED:
+        return CORE_UNMAPPED, ["attribute_unmapped"]
     return OPERATING_METRIC, ["attribute_unmapped"]
 
 

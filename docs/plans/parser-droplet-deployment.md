@@ -396,7 +396,7 @@ is the entire point of a plan step. Do not collapse this to two.
 |---|---|---|
 | `staging-plan` | No | `TF_VAR_ssh_public_key`, `SPACES_ACCESS_KEY_ID`, `SPACES_SECRET_ACCESS_KEY` |
 | `production-plan` | No | same three, production values |
-| `staging` | Yes (Vansh) | the three above, **plus** `DROPLET_HOST`, `DROPLET_SSH_PRIVATE_KEY`, `PARSER_API_KEY`, `PARSER_HOSTNAME`, `PARSER_SPACES_BUCKET`, `PARSER_SPACES_REGION`, `PARSER_SPACES_ENDPOINT_URL`, `PARSER_SPACES_ACCESS_KEY_ID`, `PARSER_SPACES_SECRET_ACCESS_KEY`, `PARSER_SPACES_KEY_PREFIX` |
+| `staging` | Yes (Vansh) | the three above, **plus** `DROPLET_HOST`, `DROPLET_SSH_PRIVATE_KEY`, `PARSER_API_KEY`, `PARSER_HOSTNAME`, `PARSER_SPACES_BUCKET`, `PARSER_SPACES_REGION`, `PARSER_SPACES_ENDPOINT_URL`, `PARSER_SPACES_ACCESS_KEY_ID`, `PARSER_SPACES_SECRET_ACCESS_KEY`, `PARSER_SPACES_KEY_PREFIX`, `ANTHROPIC_API_KEY` (2026-08-12: `process_document`'s audit=True call is unconditional, so the worker fails closed with `ProseCredentialMissing` without this) |
 | `production` | Yes (Vansh) | same shape, production values |
 
 **Repo-level secret:**
@@ -464,7 +464,7 @@ job deploy (needs: [docker-publish, terraform-apply];
        keys: PARSER_API_KEY, PARSER_HOSTNAME, PARSER_SPACES_BUCKET,
              PARSER_SPACES_REGION, PARSER_SPACES_ENDPOINT_URL,
              PARSER_SPACES_ACCESS_KEY_ID, PARSER_SPACES_SECRET_ACCESS_KEY,
-             PARSER_SPACES_KEY_PREFIX
+             PARSER_SPACES_KEY_PREFIX, ANTHROPIC_API_KEY
   ssh: docker login ghcr.io (GITHUB_TOKEN)
        IMAGE_TAG=${{ github.sha }} docker compose -f docker-compose.prod.yml pull
        IMAGE_TAG=${{ github.sha }} docker compose -f docker-compose.prod.yml up -d
