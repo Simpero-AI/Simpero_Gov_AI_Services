@@ -148,6 +148,23 @@ def test_contradicts_excludes_the_operating_metric_catch_all_bucket() -> None:
     assert edges == []
 
 
+def test_contradicts_excludes_the_core_unmapped_catch_all_bucket() -> None:
+    # SIM-384 split core_unmapped out of operating_metric as its own catch-all
+    # bucket. Like operating_metric, two unrelated figures that both land in
+    # core_unmapped (a label the core enum maps to nothing) share only the
+    # bucket, not a fact-slot -- they must not fuse into a false `contradicts`.
+    # Two currency subtotals, same page/entity/value_type, different tiers and
+    # values: without the exclusion this would be a `contradicts` edge.
+    table_subtotal = _claim(attribute="core_unmapped", raw="$1,000", normalized=1000.0, page=7)
+    prose_subtotal = _claim(
+        attribute="core_unmapped", raw="$2,000", normalized=2000.0, page=7, char_start=30
+    )
+
+    edges = _reduce_same_fact([("table", [table_subtotal]), ("prose", [prose_subtotal])])
+
+    assert edges == []
+
+
 def test_contradicts_requires_matching_value_type() -> None:
     # A core attribute stated once as a percent and once as a currency (e.g. a
     # mis-canonicalized label) is not the same fact-slot disagreeing with
