@@ -127,6 +127,11 @@ async def process_document(
     `{bucket, key}` pointer returned -- never the payload inline, same reason as
     `parse_document` (SAQ/Valkey are not for large bodies).
 
+    Runs the FULL extraction (prose tier + attribute canonicalization), not
+    table-only: the deal flow's downstream edge, reconciliation, and consistency
+    stages need the second tier, canonical attributes, and claim_type, none of
+    which a table-only run produces (see the extract_claims call below).
+
     Function name and kwargs must match Alpha's enqueue_process_document_job
     exactly -- SAQ dispatches by this name, with no validation across the repos.
 
@@ -176,6 +181,21 @@ async def process_document(
             correlation_id=correlation_id,
             source_file=spaces_key,
             audit=audit,
+            # The deal flow needs the full claim graph, not just table claims.
+            # `prose` adds the second extraction tier: the E1 reducer only emits
+            # same_fact/contradicts edges when a fact is seen by >=2 tiers
+            # (extract_service.py:376,415), so a table-only run yields zero edges
+            # by construction -- and claim_type="computational" is set only on
+            # prose-tier claims (emit.py:950), which the backend consistency pass
+            # (SIM-372) routes on. `canonicalize_attributes` maps attributes onto
+            # the canonical vocabulary that both the consistency rules and the
+            # reconciliation grouping (SIM-371) key off. Both call the Anthropic
+            # API -- already a precondition here since `audit` is on -- and both
+            # fail soft (prose_failed / the canonicalize try-except in
+            # extract_service.py), so they cannot regress the table claims that
+            # already ingest today.
+            prose=True,
+            canonicalize_attributes=True,
         )
     except ProseCredentialMissing:
         # A deployment/config problem, not a bad document: fail the SAQ job
