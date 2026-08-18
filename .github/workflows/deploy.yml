@@ -269,7 +269,13 @@ jobs:
             cd /opt/simpero
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             IMAGE_TAG=${{ github.sha }} docker compose -f docker-compose.prod.yml pull
-            IMAGE_TAG=${{ github.sha }} docker compose -f docker-compose.prod.yml up -d
+            # --force-recreate: env_file (/opt/simpero/.env, rewritten just above from
+            # GitHub secrets) is read only at container CREATION. Without this, `up -d`
+            # skips recreation whenever the image tag is unchanged -- e.g. redeploying
+            # the same commit to apply a rotated secret -- so the running worker keeps
+            # its stale environment and the new key never takes effect. Force the
+            # recreate so a secret rotation + redeploy always reaches the process.
+            IMAGE_TAG=${{ github.sha }} docker compose -f docker-compose.prod.yml up -d --force-recreate
 
       # From the runner, not over SSH. Caddy matches purely on Host header /
       # TLS SNI, so a plain request to the bare DROPLET_HOST IP gets a 404
