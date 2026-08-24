@@ -107,6 +107,7 @@ async def extract(
     x_qualitative: bool = Header(default=False),
     x_canonicalize_attributes: bool = Header(default=False),
     x_audit: bool = Header(default=False),
+    x_deal_profile: bool = Header(default=False),
 ) -> dict:
     """Parse a PDF and emit its claims -- the callable form of scripts/emit_claims.py.
 
@@ -133,6 +134,7 @@ async def extract(
             qualitative=x_qualitative,
             canonicalize_attributes=x_canonicalize_attributes,
             audit=x_audit,
+            deal_profile=x_deal_profile,
         )
     except ProseCredentialMissing as exc:
         logger.warning("extract rejected: run_id=%s missing prose credential", x_run_id)

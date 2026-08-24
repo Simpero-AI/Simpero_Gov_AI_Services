@@ -22,6 +22,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .coverage import NumberMiss, document_coverage
+from .deal_profile import DealProfile, classify_deal_profile
 from .docling_parser import parse_pdf_bytes
 from .emit import (
     CORE_UNMAPPED,
@@ -537,6 +538,9 @@ def extract_claims(
     qualitative: bool = False,
     canonicalize_attributes: bool = False,
     audit: bool = False,
+    deal_profile: bool = False,
+    sector_options: list[str] | None = None,
+    geo_options: list[str] | None = None,
     workers: int = _DEFAULT_WORKERS,
 ) -> dict:
     """Parse `data` and emit its claims as the payload that crosses the C3 seam.
@@ -562,7 +566,7 @@ def extract_claims(
     "the filename was an empty string".
     """
     want_prose = prose or complete or qualitative
-    if (want_prose or canonicalize_attributes or audit) and not api_key_present():
+    if (want_prose or canonicalize_attributes or audit or deal_profile) and not api_key_present():
         raise ProseCredentialMissing(
             "the prose tiers, attribute canonicalization, and the binding audit call "
             "the Anthropic API and need ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) in "
@@ -704,6 +708,23 @@ def extract_claims(
         _audit_claims(claims, result.pages, flag_log, workers=workers)
     _mark("audit")
 
+    profile: DealProfile | None = None
+    if deal_profile:
+        try:
+            profile = classify_deal_profile(
+                [p.text for p in result.pages],
+                entity=entity,
+                sector_options=sector_options,
+                geo_options=geo_options,
+            )
+        except Exception as exc:  # noqa: BLE001 -- best-effort; never abort the doc
+            print(
+                f"tier deal_profile: classification failed and was skipped: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+        _mark("deal_profile")
+
     edges = _reduce_same_fact(tier_claims)
     _mark("reduce")
     same_fact_count = sum(1 for e in edges if e.type == "same_fact")
@@ -717,6 +738,7 @@ def extract_claims(
         "run_id": flag_log.run_id,
         "sha256": result.sha256,
         "source_file": source_file,
+        "deal_profile": profile.model_dump() if profile is not None else None,
         "claims": [c.to_json() for c in claims],
         "edges": [e.to_json() for e in edges],
         "flag_log": flag_log.to_json(),
