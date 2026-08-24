@@ -15,7 +15,9 @@ means the content hash elsewhere in this codebase (emit_chunks sets
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -47,6 +49,13 @@ from .text_extract import blocks_on_page, extract_text_blocks
 from .verify import AuditVerdict, audit_claim
 
 logger = logging.getLogger(__name__)
+
+# Thread-pool fan-out for the per-page/per-claim Anthropic tiers (prose,
+# completeness, qualitative, binding audit). Env-tunable so ops can dial it to
+# the Anthropic rate-limit headroom without a code change; the deal flow runs on
+# a concurrency-1 worker, so this is the only within-document parallelism the
+# extraction has. Bumped from 8 -> 16 (SIM perf: CIM-02 was ~13 min).
+_DEFAULT_WORKERS = int(os.getenv("EXTRACT_WORKERS", "16") or "16")
 
 
 class ProseCredentialMissing(RuntimeError):
@@ -528,7 +537,7 @@ def extract_claims(
     qualitative: bool = False,
     canonicalize_attributes: bool = False,
     audit: bool = False,
-    workers: int = 8,
+    workers: int = _DEFAULT_WORKERS,
 ) -> dict:
     """Parse `data` and emit its claims as the payload that crosses the C3 seam.
 
@@ -574,9 +583,19 @@ def extract_claims(
         audit,
     )
 
+    timings: dict[str, float] = {}
+    _last = time.perf_counter()
+
+    def _mark(stage: str) -> None:
+        nonlocal _last
+        now = time.perf_counter()
+        timings[stage] = timings.get(stage, 0.0) + (now - _last)
+        _last = now
+
     result = parse_pdf_bytes(data)
     assert result.document is not None, "a successful parse always carries the DoclingDocument"
     tables = extract_tables(result.document, result.pages)
+    _mark("parse")
     flag_log = FlagLog(run_id=run_id)
     file = source_file or ""
 
@@ -613,6 +632,7 @@ def extract_claims(
                 )
     claims += table_claims
     tier_claims.append(("table", table_claims))
+    _mark("table")
     print(f"tier tables: {len(claims)} claims", file=sys.stderr)
 
     if want_prose:
@@ -655,6 +675,8 @@ def extract_claims(
             skipped_pages.extend(qualitative_failed)
             tier_claims.append(("qualitative", qualitative_claims))
 
+    _mark("prose")
+
     if canonicalize_attributes:
         try:
             _canonicalize_quantitative_claims(tier_claims, flag_log)
@@ -677,10 +699,13 @@ def extract_claims(
                 file=sys.stderr,
             )
 
+    _mark("canonicalize")
     if audit:
         _audit_claims(claims, result.pages, flag_log, workers=workers)
+    _mark("audit")
 
     edges = _reduce_same_fact(tier_claims)
+    _mark("reduce")
     same_fact_count = sum(1 for e in edges if e.type == "same_fact")
     contradicts_count = sum(1 for e in edges if e.type == "contradicts")
     print(
@@ -705,5 +730,11 @@ def extract_claims(
         f"{sum(1 for c in claims if c.status == 'missing')} missing), "
         f"{len(edges)} edges, {len(flag_log.entries)} flags, {len(skipped_pages)} skip(s)",
         file=sys.stderr,
+    )
+    logger.info(
+        "extract_claims timings (s): %s total=%.1f (workers=%d)",
+        ", ".join(f"{stage}={secs:.1f}" for stage, secs in timings.items()),
+        sum(timings.values()),
+        workers,
     )
     return payload
