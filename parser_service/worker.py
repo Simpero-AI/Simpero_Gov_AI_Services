@@ -115,6 +115,9 @@ async def process_document(
     correlation_id: str | None = None,
     known_sha256s: list[str] | None = None,
     audit: bool = True,
+    sector_options: list[str] | None = None,
+    geo_options: list[str] | None = None,
+    screen_criteria: list[dict] | None = None,
 ) -> dict:
     """Combined parse + claim-extraction + binding-audit job for the deal flow.
 
@@ -196,6 +199,23 @@ async def process_document(
             # already ingest today.
             prose=True,
             canonicalize_attributes=True,
+            # Path B (mandate-fit screening): classify the target's sector + HQ
+            # from the parsed prose so the backend can map them onto the org's
+            # mandate and screen gs_07/gs_08. Hard-forced on for the deal flow like
+            # prose/canonicalize above -- the deal flow always needs it; it reuses
+            # the same Anthropic credential and fails soft (deal_profile is None on
+            # any classification error), so it cannot regress the claims that
+            # already ingest today. The org's approved options (when Alpha sends
+            # them) let the classifier judge mandate fit against the same expanded
+            # lists gs_07/gs_08 check; None -> raw sector/HQ only, no fit.
+            deal_profile=True,
+            sector_options=sector_options,
+            geo_options=geo_options,
+            # Path B "search just in case": grounded document search for the
+            # selected qualitative rules (founder full-time, IP ownership, ...)
+            # that have no deterministic evaluator. Forwarded from Alpha's enqueue;
+            # None/empty skips the pass. Best-effort, same credential as audit.
+            screen_criteria=screen_criteria,
         )
     except ProseCredentialMissing:
         # A deployment/config problem, not a bad document: fail the SAQ job
