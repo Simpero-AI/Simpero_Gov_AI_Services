@@ -45,6 +45,7 @@ from .propose import (
     prose_text,
 )
 from .schemas import PageIndex
+from .screen_criteria import assess_criteria
 from .table_extract import extract_tables, tables_on_page
 from .text_extract import blocks_on_page, extract_text_blocks
 from .verify import AuditVerdict, audit_claim
@@ -541,6 +542,7 @@ def extract_claims(
     deal_profile: bool = False,
     sector_options: list[str] | None = None,
     geo_options: list[str] | None = None,
+    screen_criteria: list[dict] | None = None,
     workers: int = _DEFAULT_WORKERS,
 ) -> dict:
     """Parse `data` and emit its claims as the payload that crosses the C3 seam.
@@ -566,7 +568,9 @@ def extract_claims(
     "the filename was an empty string".
     """
     want_prose = prose or complete or qualitative
-    if (want_prose or canonicalize_attributes or audit or deal_profile) and not api_key_present():
+    if (
+        want_prose or canonicalize_attributes or audit or deal_profile or screen_criteria
+    ) and not api_key_present():
         raise ProseCredentialMissing(
             "the prose tiers, attribute canonicalization, and the binding audit call "
             "the Anthropic API and need ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) in "
@@ -725,6 +729,20 @@ def extract_claims(
             )
         _mark("deal_profile")
 
+    findings: dict[str, dict] = {}
+    if screen_criteria:
+        try:
+            findings = assess_criteria(
+                [p.text for p in result.pages], entity=entity, criteria=screen_criteria
+            )
+        except Exception as exc:  # noqa: BLE001 -- best-effort; never abort the doc
+            print(
+                f"tier screen_criteria: assessment failed and was skipped: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+        _mark("screen_criteria")
+
     edges = _reduce_same_fact(tier_claims)
     _mark("reduce")
     same_fact_count = sum(1 for e in edges if e.type == "same_fact")
@@ -739,6 +757,7 @@ def extract_claims(
         "sha256": result.sha256,
         "source_file": source_file,
         "deal_profile": profile.model_dump() if profile is not None else None,
+        "qualitative_findings": findings,
         "claims": [c.to_json() for c in claims],
         "edges": [e.to_json() for e in edges],
         "flag_log": flag_log.to_json(),

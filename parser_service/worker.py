@@ -117,6 +117,7 @@ async def process_document(
     audit: bool = True,
     sector_options: list[str] | None = None,
     geo_options: list[str] | None = None,
+    screen_criteria: list[dict] | None = None,
 ) -> dict:
     """Combined parse + claim-extraction + binding-audit job for the deal flow.
 
@@ -210,6 +211,11 @@ async def process_document(
             deal_profile=True,
             sector_options=sector_options,
             geo_options=geo_options,
+            # Path B "search just in case": grounded document search for the
+            # selected qualitative rules (founder full-time, IP ownership, ...)
+            # that have no deterministic evaluator. Forwarded from Alpha's enqueue;
+            # None/empty skips the pass. Best-effort, same credential as audit.
+            screen_criteria=screen_criteria,
         )
     except ProseCredentialMissing:
         # A deployment/config problem, not a bad document: fail the SAQ job
