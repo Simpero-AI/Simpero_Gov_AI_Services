@@ -128,3 +128,39 @@ def test_retries_once_on_an_unparseable_body() -> None:
     out = organize_claims(_ENTITIES, _METRICS, company="Acme", client=client)
     assert client.n == 2
     assert out.subjects[0].name == "Consolidated"
+
+
+def test_a_shared_entity_is_filed_under_exactly_one_subject() -> None:
+    # The model lists "Acme Corp" under both the consolidated total and a segment.
+    # The whole-company total must keep it; the segment must not also carry it.
+    client = _StubClient(
+        DashboardStructure(
+            subjects=[
+                Subject(name="North", kind="segment", entities=["Acme Corp", "North Region"]),
+                Subject(name="Consolidated", kind="consolidated", entities=["Acme Corp"]),
+            ],
+            metric_order=["revenue"],
+        )
+    )
+    out = organize_claims(_ENTITIES, _METRICS, company="Acme", client=client)
+    consolidated = next(s for s in out.subjects if s.kind == "consolidated")
+    assert consolidated.entities == ["Acme Corp"]
+    north = next(s for s in out.subjects if s.name == "North")
+    assert north.entities == ["North Region"]  # the shared entity was not double-filed
+    # every entity appears under at most one subject
+    seen: list[str] = []
+    for s in out.subjects:
+        seen += s.entities
+    assert len(seen) == len(set(seen))
+
+
+def test_never_raises_on_a_non_validation_error() -> None:
+    class _BoomClient:
+        def __init__(self) -> None:
+            self.messages = SimpleNamespace(parse=self._parse)
+
+        def _parse(self, **kwargs):
+            raise RuntimeError("api exploded")
+
+    out = organize_claims(_ENTITIES, _METRICS, company="Acme", client=_BoomClient())
+    assert out.subjects == []  # degrades to empty, does not propagate

@@ -76,20 +76,27 @@ class DashboardStructure(BaseModel):
 def _validate(
     structure: DashboardStructure, entities: set[str], metrics: set[str]
 ) -> DashboardStructure:
-    """Trust boundary: keep only supplied entities/metrics, drop empty subjects,
-    and guarantee exactly one consolidated subject."""
+    """Trust boundary: keep only supplied entities/metrics, guarantee exactly one
+    consolidated subject, and file each entity under exactly ONE subject -- a
+    whole-company entity the model also lists under a segment stays consolidated,
+    never silently demoted, so the dashboard's headline numbers can't land in the
+    wrong bucket."""
     subjects: list[Subject] = []
     consolidated_seen = False
-    for s in structure.subjects:
-        kept = [e for e in s.entities if e in entities]
-        if not kept and s.kind != "consolidated":
-            continue
+    assigned: set[str] = set()
+    # Consolidated first, so a shared entity is claimed by the whole-company total
+    # before any segment can take it. sorted() is stable, so segments keep their
+    # model order. This also makes the consolidated subject lead the display.
+    for s in sorted(structure.subjects, key=lambda sub: 0 if sub.kind == "consolidated" else 1):
+        kept = [e for e in s.entities if e in entities and e not in assigned]
         kind = s.kind
+        if kind == "consolidated" and consolidated_seen:
+            kind = "segment"  # the model can only crown one whole company
+        if not kept and kind != "consolidated":
+            continue
         if kind == "consolidated":
-            if consolidated_seen:
-                kind = "segment"  # the model can only crown one whole company
-            else:
-                consolidated_seen = True
+            consolidated_seen = True
+        assigned.update(kept)
         subjects.append(Subject(name=s.name.strip() or "Consolidated", kind=kind, entities=kept))
     if subjects and not consolidated_seen:
         subjects[0].kind = "consolidated"  # promote the first so grouping has an anchor
@@ -141,10 +148,16 @@ def organize_claims(
         )
 
     try:
-        response = call()
-    except ValidationError:
-        logger.warning("dashboard: unparseable body for %s; retrying once", company)
-        response = call()
+        try:
+            response = call()
+        except ValidationError:
+            logger.warning("dashboard: unparseable body for %s; retrying once", company)
+            response = call()
+    except Exception:  # noqa: BLE001 -- never raise; the caller falls back to frequency grouping
+        logger.warning(
+            "dashboard: organization failed for %s; returning empty", company, exc_info=True
+        )
+        return DashboardStructure()
 
     parsed = response.parsed_output
     if parsed is None:
