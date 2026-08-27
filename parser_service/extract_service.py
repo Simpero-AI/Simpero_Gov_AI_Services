@@ -22,6 +22,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .coverage import NumberMiss, document_coverage
+from .dashboard import DashboardStructure, organize_claims
 from .deal_profile import DealProfile, classify_deal_profile
 from .docling_parser import parse_pdf_bytes
 from .emit import (
@@ -543,6 +544,7 @@ def extract_claims(
     sector_options: list[str] | None = None,
     geo_options: list[str] | None = None,
     screen_criteria: list[dict] | None = None,
+    dashboard: bool = False,
     workers: int = _DEFAULT_WORKERS,
 ) -> dict:
     """Parse `data` and emit its claims as the payload that crosses the C3 seam.
@@ -569,7 +571,12 @@ def extract_claims(
     """
     want_prose = prose or complete or qualitative
     if (
-        want_prose or canonicalize_attributes or audit or deal_profile or screen_criteria
+        want_prose
+        or canonicalize_attributes
+        or audit
+        or deal_profile
+        or screen_criteria
+        or dashboard
     ) and not api_key_present():
         raise ProseCredentialMissing(
             "the prose tiers, attribute canonicalization, and the binding audit call "
@@ -743,6 +750,28 @@ def extract_claims(
             )
         _mark("screen_criteria")
 
+    structure: DashboardStructure | None = None
+    if dashboard:
+        try:
+            entity_counts: dict[str, int] = {}
+            for c in claims:
+                if c.entity:
+                    entity_counts[c.entity] = entity_counts.get(c.entity, 0) + 1
+            metrics_present = sorted(
+                {
+                    c.attribute
+                    for c in claims
+                    if c.attribute and c.attribute not in (OPERATING_METRIC, CORE_UNMAPPED)
+                }
+            )
+            structure = organize_claims(entity_counts, metrics_present, company=entity)
+        except Exception as exc:  # noqa: BLE001 -- best-effort; the dashboard degrades gracefully
+            print(
+                f"tier dashboard: organization failed and was skipped: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+        _mark("dashboard")
+
     edges = _reduce_same_fact(tier_claims)
     _mark("reduce")
     same_fact_count = sum(1 for e in edges if e.type == "same_fact")
@@ -758,6 +787,7 @@ def extract_claims(
         "source_file": source_file,
         "deal_profile": profile.model_dump() if profile is not None else None,
         "qualitative_findings": findings,
+        "dashboard_structure": structure.model_dump() if structure is not None else None,
         "claims": [c.to_json() for c in claims],
         "edges": [e.to_json() for e in edges],
         "flag_log": flag_log.to_json(),
