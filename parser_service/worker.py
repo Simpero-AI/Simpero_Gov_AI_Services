@@ -216,6 +216,11 @@ async def process_document(
             # that have no deterministic evaluator. Forwarded from Alpha's enqueue;
             # None/empty skips the pass. Best-effort, same credential as audit.
             screen_criteria=screen_criteria,
+            # Pipeline Inspector: organize this document's entities + metrics into a
+            # per-document dashboard structure so the Inspector generalizes across
+            # sectors instead of hardcoding. Best-effort, same credential; grounded
+            # (arranges only, never invents a value).
+            dashboard=True,
         )
     except ProseCredentialMissing:
         # A deployment/config problem, not a bad document: fail the SAQ job
