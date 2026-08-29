@@ -31,5 +31,13 @@ def make_client():
     """A configured anthropic.Anthropic. `anthropic` is imported lazily (kept out
     of module import cost) exactly as the call sites this replaces did."""
     import anthropic
+    import httpx
 
-    return anthropic.Anthropic(max_retries=_MAX_RETRIES, timeout=_TIMEOUT_S)
+    # httpx.Timeout, not a bare float: a float sets every phase (connect/read/
+    # write/pool) to _TIMEOUT_S, collapsing the SDK's 5s connect timeout to the
+    # full read budget -- a hard-down endpoint would then hang ~10 min per attempt
+    # before the retry/backoff could react. Widen only the read; keep connect fast.
+    return anthropic.Anthropic(
+        max_retries=_MAX_RETRIES,
+        timeout=httpx.Timeout(_TIMEOUT_S, connect=5.0),
+    )

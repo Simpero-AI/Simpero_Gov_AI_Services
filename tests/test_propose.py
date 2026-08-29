@@ -1303,8 +1303,39 @@ def test_parse_with_retry_still_narrows_a_malformed_body_once() -> None:
 
 
 def test_parse_with_retry_reraises_a_body_malformed_twice() -> None:
+    calls = {"n": 0}
+
     def call():
+        calls["n"] += 1
         _RetryModel.model_validate({})
 
     with pytest.raises(ValidationError):
         _parse_with_retry(call, page_no=1, what="numeric proposal")
+    assert calls["n"] == 2  # exactly one retry, then the caller sees it
+
+
+def test_parse_with_retry_budgets_grammar_and_validation_independently(monkeypatch) -> None:
+    # The two transients interleave: a grammar timeout, then a malformed body, then
+    # another grammar timeout, then success. Each has its own budget (1 validation
+    # retry, _GRAMMAR_RETRIES grammar retries), so the combined path still resolves
+    # rather than exhausting one budget on the other's failures.
+    monkeypatch.setattr("parser_service.propose.time.sleep", lambda _s: None)
+    scripted = [
+        _Grammar400("Grammar compilation timed out"),
+        None,  # placeholder -- replaced by a ValidationError below
+        _Grammar400("Grammar compilation timed out"),
+    ]
+    calls = {"n": 0}
+
+    def call():
+        i = calls["n"]
+        calls["n"] += 1
+        if i == 1:
+            _RetryModel.model_validate({})  # ValidationError on the 2nd attempt
+        if i < len(scripted) and isinstance(scripted[i], Exception):
+            raise scripted[i]
+        return "ok"
+
+    assert _parse_with_retry(call, page_no=1, what="numeric proposal") == "ok"
+    # grammar(0) -> validation(1) -> grammar(2) -> ok(3): 4 attempts, both budgets spent.
+    assert calls["n"] == 4

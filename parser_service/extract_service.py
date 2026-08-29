@@ -804,14 +804,18 @@ def extract_claims(
             source_file,
             workers,
         )
-        prose_skips = sum(n for tier, n in by_tier.items() if tier in _PROSE_TIERS)
+        # Distinct pages, not skip events: the prose-family tiers run over the same
+        # prose-page set, so one page failing in both the prose and qualitative
+        # tiers is two events but one lost page -- counting events would fire the
+        # threshold early and could print "lost N of M" with N > M.
+        prose_skip_pages = {s.page for s in skipped_pages if s.tier in _PROSE_TIERS}
         total_pages = len(result.pages) or 1
-        if prose_skips >= max(3, total_pages // 5):
+        if len(prose_skip_pages) >= max(3, total_pages // 5):
             logger.error(
                 "extract_claims lost %d of %d page(s) of prose claims (run_id=%s workers=%d) -- "
                 "this looks systemic, not a one-off (transient rate-limit/timeout under the "
                 "fan-out). Lower EXTRACT_WORKERS or raise ANTHROPIC_MAX_RETRIES and re-run.",
-                prose_skips,
+                len(prose_skip_pages),
                 total_pages,
                 flag_log.run_id,
                 workers,
