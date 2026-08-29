@@ -26,6 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from .llm_client import make_client
 from .propose import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -116,9 +117,7 @@ def assess_criteria(
         return {rule_id: _unknown() for rule_id in wanted}
 
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     rendered = "\n".join(f"- rule_id={rid}: {question}" for rid, question in wanted.items())
     user = (

@@ -42,6 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -54,6 +55,7 @@ from .emit import (
     emit_pdf_claim,
     gate_canonical_attribute,
 )
+from .llm_client import make_client
 from .resolver import contains_flexible, find_exact_span
 from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
@@ -318,30 +320,69 @@ class PageAssertions(BaseModel):
     assertions: list[ProposedAssertion] = Field(default_factory=list)
 
 
+# A transient grammar-compilation timeout is retried in place, with linear
+# backoff, before the caller sees a failure. Mirrors the sibling agent layer.
+_GRAMMAR_RETRIES = 2
+_GRAMMAR_BACKOFF_S = 2.0
+
+
+def _is_grammar_timeout(exc: Exception) -> bool:
+    """Whether `exc` is a transient server-side grammar-compilation timeout.
+
+    The structured-output path (`messages.parse`) compiles the JSON schema into a
+    grammar server-side; under load the API occasionally returns a 400 naming a
+    grammar-compilation timeout for a request that succeeds when re-run. A 400 is
+    non-retryable, so the client's own max_retries backoff never fires on it --
+    this is the one 4xx worth narrowing here. Every such message carries the word
+    "grammar", so a substring match is enough (and matches the sibling repo)."""
+    return "grammar" in str(exc).lower()
+
+
 def _parse_with_retry(call, *, page_no: int, what: str):
-    """Run a structured-output call, retrying once on a malformed response.
+    """Run a structured-output call, narrowing two transient failures.
 
-    Measured across four full-document runs: a page occasionally comes back with
-    an empty or truncated body, and the ValidationError raised while parsing it
-    escapes and destroys that page's entire extraction. It is transient -- every
-    observed instance succeeded when the same page was re-run (ACEP p20 failed
-    once and passed on the next run with identical inputs).
+    A malformed/truncated body (ValidationError) is retried once: measured across
+    full-document runs, a page occasionally comes back with an empty or truncated
+    body whose parse fails but succeeds on an identical re-run (ACEP p20 did
+    exactly this), and left unhandled it destroys that page's whole extraction.
+    One retry, not a loop -- malformed twice is a real failure the caller should
+    see.
 
-    One retry, not a loop: a response malformed twice is a real failure and the
-    caller should see it rather than have it retried into a timeout. The raise
-    is deliberately still reachable -- this narrows a transient, it does not
-    pretend the page succeeded.
+    A transient grammar-compilation timeout (see _is_grammar_timeout) is retried
+    up to _GRAMMAR_RETRIES times with linear backoff. 429/5xx/timeout are NOT
+    handled here -- the client's own max_retries backoff covers those (see
+    llm_client.make_client), which is the fix for the fan-out page-loss.
+
+    Every raise stays reachable: this narrows known transients, it never pretends
+    a page succeeded.
     """
-    try:
-        return call()
-    except ValidationError as exc:
-        logger.warning(
-            "page %s: %s returned an unparseable body (%s); retrying once",
-            page_no,
-            what,
-            type(exc).__name__,
-        )
-        return call()
+    validation_retried = False
+    grammar_attempts = 0
+    while True:
+        try:
+            return call()
+        except ValidationError as exc:
+            if validation_retried:
+                raise
+            validation_retried = True
+            logger.warning(
+                "page %s: %s returned an unparseable body (%s); retrying once",
+                page_no,
+                what,
+                type(exc).__name__,
+            )
+        except Exception as exc:  # noqa: BLE001 -- re-raised unless it is a known transient
+            if not _is_grammar_timeout(exc) or grammar_attempts >= _GRAMMAR_RETRIES:
+                raise
+            grammar_attempts += 1
+            logger.warning(
+                "page %s: %s hit a transient grammar-compilation timeout; retry %d/%d",
+                page_no,
+                what,
+                grammar_attempts,
+                _GRAMMAR_RETRIES,
+            )
+            time.sleep(_GRAMMAR_BACKOFF_S * grammar_attempts)
 
 
 def _is_boilerplate_block(block: TextBlockRecord, page: PageIndex) -> bool:
@@ -419,9 +460,7 @@ def propose_for_page(
         return []
 
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     response = _parse_with_retry(
         lambda: client.messages.parse(
@@ -573,9 +612,7 @@ def propose_completion_for_page(
     if not missed:
         return []
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     listing = "\n".join(f'- {number}   printed in: "...{context}..."' for number, context in missed)
     user = (
@@ -763,9 +800,7 @@ def propose_attribute_mappings(
     if not raw_labels:
         return {}
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     mapped: dict[str, str] = {}
     for offset in range(0, len(raw_labels), _ATTRIBUTE_BATCH):
@@ -907,9 +942,7 @@ def propose_assertions_for_page(
         return []
 
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     response = _parse_with_retry(
         lambda: client.messages.parse(

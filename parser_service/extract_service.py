@@ -59,6 +59,11 @@ logger = logging.getLogger(__name__)
 # extraction has. Bumped from 8 -> 16 (SIM perf: CIM-02 was ~13 min).
 _DEFAULT_WORKERS = int(os.getenv("EXTRACT_WORKERS", "16") or "16")
 
+# Prose-family tiers: one per-page model call each, so these are what fail under
+# fan-out rate-limit/timeout pressure. A heavy share of these skipped is the
+# systemic-loss signal extract_claims escalates to ERROR (vs. a one-off skip).
+_PROSE_TIERS = frozenset({"prose", "qualitative", "complete"})
+
 
 class ProseCredentialMissing(RuntimeError):
     """The prose/qualitative tiers were requested without an Anthropic
@@ -778,4 +783,38 @@ def extract_claims(
         sum(timings.values()),
         workers,
     )
+
+    # A dropped page-unit is silent partial extraction -- real claims missing
+    # from this run with a clean 200. The per-tier failure lines above go to
+    # stderr per page; this is the one deal-level signal, at WARNING, so the loss
+    # is never invisible to whoever reads the run. When the prose family loses a
+    # large share of the document it is systemic (rate-limit/timeout under the
+    # fan-out) rather than a one-off, so it escalates to ERROR with the fix.
+    if skipped_pages:
+        by_tier: dict[str, int] = defaultdict(int)
+        for s in skipped_pages:
+            by_tier[s.tier] += 1
+        breakdown = ", ".join(f"{tier}={n}" for tier, n in sorted(by_tier.items()))
+        logger.warning(
+            "extract_claims dropped %d page-unit(s) to failures [%s] "
+            "(run_id=%s file=%s workers=%d); their claims are missing from this extraction",
+            len(skipped_pages),
+            breakdown,
+            flag_log.run_id,
+            source_file,
+            workers,
+        )
+        prose_skips = sum(n for tier, n in by_tier.items() if tier in _PROSE_TIERS)
+        total_pages = len(result.pages) or 1
+        if prose_skips >= max(3, total_pages // 5):
+            logger.error(
+                "extract_claims lost %d of %d page(s) of prose claims (run_id=%s workers=%d) -- "
+                "this looks systemic, not a one-off (transient rate-limit/timeout under the "
+                "fan-out). Lower EXTRACT_WORKERS or raise ANTHROPIC_MAX_RETRIES and re-run.",
+                prose_skips,
+                total_pages,
+                flag_log.run_id,
+                workers,
+            )
+
     return payload

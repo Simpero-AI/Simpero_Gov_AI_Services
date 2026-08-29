@@ -31,6 +31,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from .llm_client import make_client
 from .propose import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -159,9 +160,7 @@ def classify_deal_profile(
         return DealProfile(sector=None, hq_geography=None)
 
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     def _render(options: list[str] | None) -> str:
         if not options:

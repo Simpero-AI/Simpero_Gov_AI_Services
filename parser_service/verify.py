@@ -41,6 +41,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from .llm_client import make_client
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-opus-4-8"
@@ -141,9 +143,7 @@ def audit_claim(
     must be grounded in the span, not in whether the binding sounds plausible.
     """
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     shown_value = (
         value_raw
