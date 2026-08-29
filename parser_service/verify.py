@@ -39,9 +39,9 @@ import logging
 import os
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
-from .llm_client import make_client
+from .llm_client import make_client, parse_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -103,26 +103,6 @@ the span, the verdict is `supported` -- you do not invent a fault you cannot poi
 """
 
 
-def _parse_once(client, *, model, system, user, page_no, what):
-    """One structured call, retried once on a malformed body (same as propose.py)."""
-
-    def call():
-        return client.messages.parse(
-            model=model,
-            max_tokens=4000,
-            thinking={"type": "adaptive"},
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user}],
-            output_format=AuditVerdict,
-        )
-
-    try:
-        return call()
-    except ValidationError:
-        logger.warning("audit of %s (%s): unparseable body; retrying once", page_no, what)
-        return call()
-
-
 def audit_claim(
     *,
     entity: str,
@@ -158,8 +138,17 @@ def audit_claim(
         f"  attribute: {attribute}\n"
         f"  value:     {shown_value}\n"
     )
-    response = _parse_once(
-        client, model=model, system=_SYSTEM, user=user, page_no=page, what=attribute
+    response = parse_with_retry(
+        lambda: client.messages.parse(
+            model=model,
+            max_tokens=4000,
+            thinking={"type": "adaptive"},
+            system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user}],
+            output_format=AuditVerdict,
+        ),
+        page_no=page,
+        what=attribute,
     )
     parsed = response.parsed_output
     if parsed is None:

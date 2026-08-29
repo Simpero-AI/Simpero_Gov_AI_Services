@@ -42,10 +42,9 @@ from __future__ import annotations
 import logging
 import os
 import re
-import time
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from .emit import (
     CORE_ATTRIBUTES,
@@ -55,7 +54,7 @@ from .emit import (
     emit_pdf_claim,
     gate_canonical_attribute,
 )
-from .llm_client import make_client
+from .llm_client import make_client, parse_with_retry
 from .resolver import contains_flexible, find_exact_span
 from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
@@ -320,71 +319,6 @@ class PageAssertions(BaseModel):
     assertions: list[ProposedAssertion] = Field(default_factory=list)
 
 
-# A transient grammar-compilation timeout is retried in place, with linear
-# backoff, before the caller sees a failure. Mirrors the sibling agent layer.
-_GRAMMAR_RETRIES = 2
-_GRAMMAR_BACKOFF_S = 2.0
-
-
-def _is_grammar_timeout(exc: Exception) -> bool:
-    """Whether `exc` is a transient server-side grammar-compilation timeout.
-
-    The structured-output path (`messages.parse`) compiles the JSON schema into a
-    grammar server-side; under load the API occasionally returns a 400 naming a
-    grammar-compilation timeout for a request that succeeds when re-run. A 400 is
-    non-retryable, so the client's own max_retries backoff never fires on it --
-    this is the one 4xx worth narrowing here. Every such message carries the word
-    "grammar", so a substring match is enough (and matches the sibling repo)."""
-    return "grammar" in str(exc).lower()
-
-
-def _parse_with_retry(call, *, page_no: int, what: str):
-    """Run a structured-output call, narrowing two transient failures.
-
-    A malformed/truncated body (ValidationError) is retried once: measured across
-    full-document runs, a page occasionally comes back with an empty or truncated
-    body whose parse fails but succeeds on an identical re-run (ACEP p20 did
-    exactly this), and left unhandled it destroys that page's whole extraction.
-    One retry, not a loop -- malformed twice is a real failure the caller should
-    see.
-
-    A transient grammar-compilation timeout (see _is_grammar_timeout) is retried
-    up to _GRAMMAR_RETRIES times with linear backoff. 429/5xx/timeout are NOT
-    handled here -- the client's own max_retries backoff covers those (see
-    llm_client.make_client), which is the fix for the fan-out page-loss.
-
-    Every raise stays reachable: this narrows known transients, it never pretends
-    a page succeeded.
-    """
-    validation_retried = False
-    grammar_attempts = 0
-    while True:
-        try:
-            return call()
-        except ValidationError as exc:
-            if validation_retried:
-                raise
-            validation_retried = True
-            logger.warning(
-                "page %s: %s returned an unparseable body (%s); retrying once",
-                page_no,
-                what,
-                type(exc).__name__,
-            )
-        except Exception as exc:  # noqa: BLE001 -- re-raised unless it is a known transient
-            if not _is_grammar_timeout(exc) or grammar_attempts >= _GRAMMAR_RETRIES:
-                raise
-            grammar_attempts += 1
-            logger.warning(
-                "page %s: %s hit a transient grammar-compilation timeout; retry %d/%d",
-                page_no,
-                what,
-                grammar_attempts,
-                _GRAMMAR_RETRIES,
-            )
-            time.sleep(_GRAMMAR_BACKOFF_S * grammar_attempts)
-
-
 def _is_boilerplate_block(block: TextBlockRecord, page: PageIndex) -> bool:
     """True when a block resolves to a span that is ENTIRELY running furniture.
 
@@ -462,7 +396,7 @@ def propose_for_page(
     if client is None:
         client = make_client()
 
-    response = _parse_with_retry(
+    response = parse_with_retry(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
@@ -629,7 +563,7 @@ def propose_completion_for_page(
         f"Full page text (copy every quote VERBATIM from here; it must appear once):\n"
         f"{page.text}"
     )
-    response = _parse_with_retry(
+    response = parse_with_retry(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
@@ -807,7 +741,7 @@ def propose_attribute_mappings(
         chunk = raw_labels[offset : offset + _ATTRIBUTE_BATCH]
         listing = "\n".join(f"{i}. {label}" for i, label in enumerate(chunk, start=1))
         try:
-            response = _parse_with_retry(
+            response = parse_with_retry(
                 lambda listing=listing: client.messages.parse(
                     model=model,
                     max_tokens=8000,
@@ -824,13 +758,16 @@ def propose_attribute_mappings(
                 page_no=0,
                 what="attribute mapping",
             )
-        except ValidationError:
-            # A batch malformed twice: skip it. Its labels are absent from the
-            # result, so canonicalize_attributes defaults them to core_unmapped
-            # rather than one bad batch sinking the whole document's mapping.
+        except Exception as exc:  # noqa: BLE001 -- one bad batch must not sink the rest
+            # A batch that fails (malformed body twice, or a transient the retry
+            # exhausted) is skipped, not raised: its labels are simply absent from
+            # the result, so canonicalize_attributes defaults them to core_unmapped
+            # -- one bad batch loses only its own labels, not every batch's
+            # already-computed mappings.
             logger.warning(
-                "attribute mapping: a batch of %d labels failed twice; skipping it",
+                "attribute mapping: a batch of %d labels failed (%s); skipping it",
                 len(chunk),
+                type(exc).__name__,
             )
             continue
         parsed = response.parsed_output
@@ -944,7 +881,7 @@ def propose_assertions_for_page(
     if client is None:
         client = make_client()
 
-    response = _parse_with_retry(
+    response = parse_with_retry(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,

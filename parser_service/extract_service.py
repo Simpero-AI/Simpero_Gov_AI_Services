@@ -36,6 +36,7 @@ from .emit import (
     element_id_for,
 )
 from .extract import claims_from_table
+from .llm_client import make_client
 from .propose import (
     api_key_present,
     assertions_from_prose,
@@ -92,6 +93,10 @@ def _prose_claims(
     stderr to read at all (see extract_claims' `skipped_pages`).
     """
     extractor = claims_from_prose if kind == "prose" else assertions_from_prose
+    # One client shared across the fan-out, not one per page: a 16-wide burst
+    # otherwise spins up 16 connection pools instead of reusing keep-alive
+    # connections. The client is thread-safe.
+    client = make_client()
 
     def run(page: PageIndex) -> tuple[int, list[Claim]]:
         return page.page, extractor(
@@ -100,6 +105,7 @@ def _prose_claims(
             entity_hint=entity,
             file=file,
             flag_log=flag_log,
+            client=client,
         )
 
     with_prose = [p for p in pages if prose_text(blocks_on_page(blocks, p.page), p).strip()]
@@ -181,12 +187,13 @@ def _completeness_claims(
     for miss in coverage.gate1_misses:
         misses_by_page[miss.page].append(miss)
     pages_by_no = {p.page: p for p in pages}
+    client = make_client()  # shared across the fan-out; see _prose_claims
 
     def run(page_no: int) -> tuple[int, list[Claim]]:
         page = pages_by_no[page_no]
         missed = [(m.text, m.context) for m in misses_by_page[page_no]]
         return page_no, claims_from_completeness(
-            page, missed, entity_hint=entity, file=file, flag_log=flag_log
+            page, missed, entity_hint=entity, file=file, flag_log=flag_log, client=client
         )
 
     claims: list[Claim] = []
@@ -487,6 +494,8 @@ def _audit_claims(
     if not routed:
         return
 
+    client = make_client()  # shared across the fan-out; see _prose_claims
+
     def run(item: tuple[Claim, tuple[int, int, int]]) -> tuple[Claim, AuditVerdict]:
         claim, (page_no, start, end) = item
         text = page_text.get(page_no, "")
@@ -499,15 +508,18 @@ def _audit_claims(
             quote=text[start:end],
             context=text[max(0, start - _AUDIT_CONTEXT) : end + _AUDIT_CONTEXT],
             page=page_no,
+            client=client,
         )
 
     flagged = 0
+    failed = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(run, item) for item in routed]
         for future in as_completed(futures):
             try:
                 claim, verdict = future.result()
             except Exception as exc:  # noqa: BLE001 -- one bad audit must not lose the run
+                failed += 1
                 print(
                     f"tier binding_audit: a claim's audit failed and was skipped: "
                     f"{type(exc).__name__}: {exc}",
@@ -530,6 +542,18 @@ def _audit_claims(
         f"{flagged} flagged binding_unsupported",
         file=sys.stderr,
     )
+    if failed:
+        # Audit failures don't lose claims (the audit only flags), but they leave
+        # a claim's binding unchecked -- surface them at WARNING so a run where the
+        # audit tier silently degraded under fan-out load is visible, not buried
+        # in per-claim stderr lines. run_id is the caller's (flag_log).
+        logger.warning(
+            "binding_audit: %d of %d claim audit(s) failed and were skipped (run_id=%s); "
+            "their bindings went unchecked",
+            failed,
+            len(routed),
+            flag_log.run_id,
+        )
 
 
 def extract_claims(
@@ -648,8 +672,12 @@ def extract_claims(
     _mark("table")
     print(f"tier tables: {len(claims)} claims", file=sys.stderr)
 
+    prose_page_count = 0  # pages that carry prose -- the denominator for the skip escalation
     if want_prose:
         blocks = extract_text_blocks(result.document, result.pages)
+        prose_page_count = sum(
+            1 for p in result.pages if prose_text(blocks_on_page(blocks, p.page), p).strip()
+        )
         prose_claims, prose_failed = _prose_claims(
             "prose",
             result.pages,
@@ -807,16 +835,19 @@ def extract_claims(
         # Distinct pages, not skip events: the prose-family tiers run over the same
         # prose-page set, so one page failing in both the prose and qualitative
         # tiers is two events but one lost page -- counting events would fire the
-        # threshold early and could print "lost N of M" with N > M.
+        # threshold early and could print "lost N of M" with N > M. The denominator
+        # is pages WITH prose, not total pages: on a table-dense CIM (100 pages, 10
+        # with prose) losing all 10 is total prose loss and must escalate, which a
+        # total-page denominator would mask.
         prose_skip_pages = {s.page for s in skipped_pages if s.tier in _PROSE_TIERS}
-        total_pages = len(result.pages) or 1
-        if len(prose_skip_pages) >= max(3, total_pages // 5):
+        prose_pages = prose_page_count or 1
+        if len(prose_skip_pages) >= max(3, prose_pages // 5):
             logger.error(
-                "extract_claims lost %d of %d page(s) of prose claims (run_id=%s workers=%d) -- "
+                "extract_claims lost %d of %d prose page(s) (run_id=%s workers=%d) -- "
                 "this looks systemic, not a one-off (transient rate-limit/timeout under the "
                 "fan-out). Lower EXTRACT_WORKERS or raise ANTHROPIC_MAX_RETRIES and re-run.",
                 len(prose_skip_pages),
-                total_pages,
+                prose_pages,
                 flag_log.run_id,
                 workers,
             )

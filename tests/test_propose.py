@@ -11,11 +11,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from parser_service.emit import CORE_ATTRIBUTES, OPERATING_METRIC, FlagLog, PdfLocation
 from parser_service.propose import (
-    _GRAMMAR_RETRIES,
     MAX_ASSERTIONS_PER_PAGE,
     AttributeMapping,
     AttributeMappings,
@@ -23,9 +22,7 @@ from parser_service.propose import (
     PageProposals,
     ProposedAssertion,
     ProposedClaim,
-    _is_grammar_timeout,
     _normalize_attribute_label,
-    _parse_with_retry,
     assertions_from_prose,
     canonicalize_attributes,
     claims_from_completeness,
@@ -1227,115 +1224,3 @@ def test_canonicalize_does_not_merge_distinct_metrics_sharing_an_entity_prefix()
     assert set(result) == set(labels)
     sent = client.calls[0]["messages"][0]["content"]
     assert "Casino Square Footage" in sent and "Slots" in sent
-
-
-class _RetryModel(BaseModel):
-    required_field: int
-
-
-class _Grammar400(Exception):
-    """Stand-in for the SDK's BadRequestError. _is_grammar_timeout matches on the
-    message substring, not the exception type, so a plain exception carrying the
-    text is a faithful stub for the transient the API raises under load."""
-
-
-def test_is_grammar_timeout_matches_on_the_message() -> None:
-    assert _is_grammar_timeout(_Grammar400("Grammar compilation timed out"))
-    assert _is_grammar_timeout(Exception("error code: 400 - the grammar took too long"))
-    assert not _is_grammar_timeout(Exception("rate limit exceeded"))
-
-
-def test_parse_with_retry_narrows_a_transient_grammar_timeout(monkeypatch) -> None:
-    # A 400 the SDK will not retry (400s are non-retryable) is retried in place.
-    monkeypatch.setattr("parser_service.propose.time.sleep", lambda _s: None)
-    calls = {"n": 0}
-
-    def call():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise _Grammar400("Grammar compilation timed out")
-        return "ok"
-
-    assert _parse_with_retry(call, page_no=1, what="numeric proposal") == "ok"
-    assert calls["n"] == 2
-
-
-def test_parse_with_retry_gives_up_after_the_grammar_budget(monkeypatch) -> None:
-    monkeypatch.setattr("parser_service.propose.time.sleep", lambda _s: None)
-    calls = {"n": 0}
-
-    def call():
-        calls["n"] += 1
-        raise _Grammar400("Grammar compilation timed out")
-
-    with pytest.raises(_Grammar400):
-        _parse_with_retry(call, page_no=1, what="numeric proposal")
-    # one initial attempt plus _GRAMMAR_RETRIES retries, then the caller sees it.
-    assert calls["n"] == _GRAMMAR_RETRIES + 1
-
-
-def test_parse_with_retry_reraises_a_non_transient_error(monkeypatch) -> None:
-    # 429/5xx/timeout are the SDK's job (via make_client's max_retries); by the
-    # time one reaches here its budget is spent, so it must propagate, not loop.
-    monkeypatch.setattr("parser_service.propose.time.sleep", lambda _s: None)
-    calls = {"n": 0}
-
-    def call():
-        calls["n"] += 1
-        raise RuntimeError("rate limit exceeded")
-
-    with pytest.raises(RuntimeError):
-        _parse_with_retry(call, page_no=1, what="numeric proposal")
-    assert calls["n"] == 1
-
-
-def test_parse_with_retry_still_narrows_a_malformed_body_once() -> None:
-    calls = {"n": 0}
-
-    def call():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            _RetryModel.model_validate({})  # raises ValidationError (missing field)
-        return "ok"
-
-    assert _parse_with_retry(call, page_no=1, what="numeric proposal") == "ok"
-    assert calls["n"] == 2
-
-
-def test_parse_with_retry_reraises_a_body_malformed_twice() -> None:
-    calls = {"n": 0}
-
-    def call():
-        calls["n"] += 1
-        _RetryModel.model_validate({})
-
-    with pytest.raises(ValidationError):
-        _parse_with_retry(call, page_no=1, what="numeric proposal")
-    assert calls["n"] == 2  # exactly one retry, then the caller sees it
-
-
-def test_parse_with_retry_budgets_grammar_and_validation_independently(monkeypatch) -> None:
-    # The two transients interleave: a grammar timeout, then a malformed body, then
-    # another grammar timeout, then success. Each has its own budget (1 validation
-    # retry, _GRAMMAR_RETRIES grammar retries), so the combined path still resolves
-    # rather than exhausting one budget on the other's failures.
-    monkeypatch.setattr("parser_service.propose.time.sleep", lambda _s: None)
-    scripted = [
-        _Grammar400("Grammar compilation timed out"),
-        None,  # placeholder -- replaced by a ValidationError below
-        _Grammar400("Grammar compilation timed out"),
-    ]
-    calls = {"n": 0}
-
-    def call():
-        i = calls["n"]
-        calls["n"] += 1
-        if i == 1:
-            _RetryModel.model_validate({})  # ValidationError on the 2nd attempt
-        if i < len(scripted) and isinstance(scripted[i], Exception):
-            raise scripted[i]
-        return "ok"
-
-    assert _parse_with_retry(call, page_no=1, what="numeric proposal") == "ok"
-    # grammar(0) -> validation(1) -> grammar(2) -> ok(3): 4 attempts, both budgets spent.
-    assert calls["n"] == 4

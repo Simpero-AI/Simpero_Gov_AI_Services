@@ -14,10 +14,18 @@ the transient pressure (self-throttling to whatever the rate limit allows)
 instead of losing pages.
 
 Grammar-compilation 400s are a separate transient the SDK will NOT retry (400s
-are non-retryable); those are narrowed in propose._parse_with_retry, not here.
+are non-retryable); parse_with_retry (below) narrows those in place. Both the
+prose proposal path and the binding-audit path call it, so neither drops a page
+to a transient the other already handles.
 """
 
+import logging
 import os
+import time
+
+from pydantic import ValidationError
+
+logger = logging.getLogger(__name__)
 
 # The SDK already retries 429/500/overloaded/timeout/connection with exponential
 # backoff; these only widen the budget so a fan-out burst is absorbed rather than
@@ -25,6 +33,11 @@ import os
 # a redeploy, same posture as EXTRACT_WORKERS.
 _MAX_RETRIES = int(os.getenv("ANTHROPIC_MAX_RETRIES", "8") or "8")
 _TIMEOUT_S = float(os.getenv("ANTHROPIC_TIMEOUT_S", "600") or "600")
+
+# A transient grammar-compilation timeout is retried in place, with linear
+# backoff, before the caller sees a failure. Mirrors the sibling agent layer.
+_GRAMMAR_RETRIES = 2
+_GRAMMAR_BACKOFF_S = 2.0
 
 
 def make_client():
@@ -41,3 +54,61 @@ def make_client():
         max_retries=_MAX_RETRIES,
         timeout=httpx.Timeout(_TIMEOUT_S, connect=5.0),
     )
+
+
+def is_grammar_timeout(exc: Exception) -> bool:
+    """Whether `exc` is a transient server-side grammar-compilation timeout.
+
+    The structured-output path (`messages.parse`) compiles the JSON schema into a
+    grammar server-side; under load the API occasionally returns a 400 naming a
+    grammar-compilation timeout for a request that succeeds when re-run. A 400 is
+    non-retryable, so the client's own max_retries backoff never fires on it --
+    this is the one 4xx worth narrowing. Every such message carries the word
+    "grammar", so a substring match is enough (and matches the sibling repo)."""
+    return "grammar" in str(exc).lower()
+
+
+def parse_with_retry(call, *, page_no: int, what: str):
+    """Run a structured-output call, narrowing two transient failures.
+
+    A malformed/truncated body (ValidationError) is retried once: measured across
+    full-document runs, a page occasionally comes back with an empty or truncated
+    body whose parse fails but succeeds on an identical re-run, and left unhandled
+    it destroys that page's whole extraction. One retry, not a loop -- malformed
+    twice is a real failure the caller should see.
+
+    A transient grammar-compilation timeout (see is_grammar_timeout) is retried
+    up to _GRAMMAR_RETRIES times with linear backoff. 429/5xx/timeout are NOT
+    handled here -- the client's own max_retries backoff covers those (see
+    make_client), which is the fix for the fan-out page-loss.
+
+    Every raise stays reachable: this narrows known transients, it never pretends
+    a call succeeded.
+    """
+    validation_retried = False
+    grammar_attempts = 0
+    while True:
+        try:
+            return call()
+        except ValidationError as exc:
+            if validation_retried:
+                raise
+            validation_retried = True
+            logger.warning(
+                "page %s: %s returned an unparseable body (%s); retrying once",
+                page_no,
+                what,
+                type(exc).__name__,
+            )
+        except Exception as exc:  # noqa: BLE001 -- re-raised unless it is a known transient
+            if not is_grammar_timeout(exc) or grammar_attempts >= _GRAMMAR_RETRIES:
+                raise
+            grammar_attempts += 1
+            logger.warning(
+                "page %s: %s hit a transient grammar-compilation timeout; retry %d/%d",
+                page_no,
+                what,
+                grammar_attempts,
+                _GRAMMAR_RETRIES,
+            )
+            time.sleep(_GRAMMAR_BACKOFF_S * grammar_attempts)
