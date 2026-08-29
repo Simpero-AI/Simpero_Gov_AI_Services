@@ -198,6 +198,13 @@ async def process_document(
             # extract_service.py), so they cannot regress the table claims that
             # already ingest today.
             prose=True,
+            # The qualitative assertion tier: grounded, cited claims the numeric
+            # tiers can't carry -- market_definition, competitive_position,
+            # related_party, risk_or_dependency, ... (assertion_class). It feeds
+            # the Market tab and other qualitative surfaces. One Anthropic call
+            # per prose page (same credential/fan-out as prose) and fails soft
+            # per page, so it cannot regress the claims that already ingest.
+            qualitative=True,
             canonicalize_attributes=True,
             # Path B (mandate-fit screening): classify the target's sector + HQ
             # from the parsed prose so the backend can map them onto the org's

@@ -196,6 +196,9 @@ async def test_process_document_writes_pointer_and_supplies_run_id(monkeypatch) 
     # attributes, and claim_type to work with -- a table-only run emits zero
     # edges by construction (extract_service.py:376,415).
     assert call["prose"] is True
+    # The qualitative assertion tier is on in the deal flow (market_definition,
+    # competitive_position, ... -> the Market tab and other qualitative surfaces).
+    assert call["qualitative"] is True
     assert call["canonicalize_attributes"] is True
     # extract_claims requires run_id/correlation_id; process_document supplies
     # both (fallback here, since _CTX carries no job to take a key from).
