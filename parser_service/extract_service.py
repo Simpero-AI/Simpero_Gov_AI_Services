@@ -60,10 +60,31 @@ logger = logging.getLogger(__name__)
 # extraction has. Bumped from 8 -> 16 (SIM perf: CIM-02 was ~13 min).
 _DEFAULT_WORKERS = int(os.getenv("EXTRACT_WORKERS", "16") or "16")
 
-# Prose-family tiers: one per-page model call each, so these are what fail under
-# fan-out rate-limit/timeout pressure. A heavy share of these skipped is the
-# systemic-loss signal extract_claims escalates to ERROR (vs. a one-off skip).
-_PROSE_TIERS = frozenset({"prose", "qualitative", "complete"})
+# The tiers whose skips are counted against the prose-page denominator for the
+# systemic-loss escalation. ONLY the tiers that fan out over the prose-page set
+# (`with_prose`) belong here -- "complete" is deliberately excluded: it fans out
+# over pages carrying a gate-1 number miss (misses_by_page), a set that includes
+# table-only pages with no prose, so its skips are not a subset of prose_pages
+# and would let the ERROR print "lost N of M" with N > M. Completeness skips
+# still surface in the per-tier WARNING breakdown, just not the prose escalation.
+_PROSE_TIERS = frozenset({"prose", "qualitative"})
+
+
+def _is_systemic_prose_loss(lost_prose_pages: int, prose_pages: int) -> bool:
+    """True when prose-page loss looks systemic (rate-limit/timeout under the
+    fan-out) rather than a one-off, and so warrants an ERROR.
+
+    `prose_pages` is how many pages carried prose (the denominator); `lost` is how
+    many of them were skipped. Escalates on a large share (>= 20%, floored at 3)
+    OR on total prose loss -- the floor alone would mask a 2-prose-page doc that
+    lost both, which is still 100% loss. `lost` is a distinct-page count and is a
+    subset of `prose_pages` by construction (see _PROSE_TIERS), so it never
+    exceeds the denominator."""
+    if prose_pages <= 0 or lost_prose_pages <= 0:
+        return False
+    if lost_prose_pages >= prose_pages:  # total prose loss, even on a tiny set
+        return True
+    return lost_prose_pages >= max(3, prose_pages // 5)
 
 
 class ProseCredentialMissing(RuntimeError):
@@ -832,22 +853,21 @@ def extract_claims(
             source_file,
             workers,
         )
-        # Distinct pages, not skip events: the prose-family tiers run over the same
-        # prose-page set, so one page failing in both the prose and qualitative
-        # tiers is two events but one lost page -- counting events would fire the
-        # threshold early and could print "lost N of M" with N > M. The denominator
-        # is pages WITH prose, not total pages: on a table-dense CIM (100 pages, 10
-        # with prose) losing all 10 is total prose loss and must escalate, which a
-        # total-page denominator would mask.
+        # Distinct pages, not skip events: the prose-family tiers (_PROSE_TIERS)
+        # fan out over the same prose-page set, so one page failing in both the
+        # prose and qualitative tiers is two events but one lost page -- counting
+        # events would fire early and could print "lost N of M" with N > M. The
+        # denominator is pages WITH prose (prose_page_count), so a table-dense CIM
+        # that loses all its prose escalates rather than being diluted by table
+        # pages. The systemic threshold itself lives in a pure, tested helper.
         prose_skip_pages = {s.page for s in skipped_pages if s.tier in _PROSE_TIERS}
-        prose_pages = prose_page_count or 1
-        if len(prose_skip_pages) >= max(3, prose_pages // 5):
+        if _is_systemic_prose_loss(len(prose_skip_pages), prose_page_count):
             logger.error(
                 "extract_claims lost %d of %d prose page(s) (run_id=%s workers=%d) -- "
                 "this looks systemic, not a one-off (transient rate-limit/timeout under the "
                 "fan-out). Lower EXTRACT_WORKERS or raise ANTHROPIC_MAX_RETRIES and re-run.",
                 len(prose_skip_pages),
-                prose_pages,
+                prose_page_count,
                 flag_log.run_id,
                 workers,
             )

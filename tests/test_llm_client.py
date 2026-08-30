@@ -54,14 +54,21 @@ class _RetryModel(BaseModel):
 
 
 class _Grammar400(Exception):
-    """Stand-in for the SDK's BadRequestError. is_grammar_timeout matches on the
-    message substring, not the exception type, so a plain exception carrying the
-    text is a faithful stub for the transient the API raises under load."""
+    """Stand-in for the SDK's BadRequestError: a 400 (status_code=400) whose
+    message names a grammar-compilation timeout. is_grammar_timeout gates on both
+    the 400 status and the "grammar" substring, so the stub carries both."""
+
+    status_code = 400
 
 
-def test_is_grammar_timeout_matches_on_the_message() -> None:
+def test_is_grammar_timeout_gates_on_both_the_400_status_and_the_message() -> None:
+    # A transient grammar-compilation 400 -> ours.
     assert is_grammar_timeout(_Grammar400("Grammar compilation timed out"))
-    assert is_grammar_timeout(Exception("error code: 400 - the grammar took too long"))
+    # "grammar" without a 400 status is NOT a retryable grammar timeout -- a
+    # non-400 error that merely mentions grammar must not be retried.
+    assert not is_grammar_timeout(Exception("something went wrong with the grammar"))
+    # A 400 that is not about grammar (a real bad request) is not ours either.
+    assert not is_grammar_timeout(_Grammar400("invalid request: unknown field"))
     assert not is_grammar_timeout(Exception("rate limit exceeded"))
 
 

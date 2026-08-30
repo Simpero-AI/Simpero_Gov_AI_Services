@@ -57,15 +57,27 @@ def make_client():
 
 
 def is_grammar_timeout(exc: Exception) -> bool:
-    """Whether `exc` is a transient server-side grammar-compilation timeout.
+    """Whether `exc` is a *transient* server-side grammar-compilation timeout.
 
     The structured-output path (`messages.parse`) compiles the JSON schema into a
     grammar server-side; under load the API occasionally returns a 400 naming a
     grammar-compilation timeout for a request that succeeds when re-run. A 400 is
     non-retryable, so the client's own max_retries backoff never fires on it --
-    this is the one 4xx worth narrowing. Every such message carries the word
-    "grammar", so a substring match is enough (and matches the sibling repo)."""
-    return "grammar" in str(exc).lower()
+    this is the one 4xx worth narrowing.
+
+    Gated on the 400 status, not just the word "grammar": a PERMANENT
+    grammar-compilation 400 (a genuinely invalid schema, e.g. after an
+    output_format change) also carries "grammar", and matching on the substring
+    alone would retry that deploy bug 3x per page across a 16-wide fan-out --
+    turning a fail-fast into a slow burn. The status check keeps the narrow
+    transient intent; a non-400 that merely mentions grammar is not ours."""
+    if "grammar" not in str(exc).lower():
+        return False
+    if getattr(exc, "status_code", None) == 400:
+        return True
+    import anthropic
+
+    return isinstance(exc, anthropic.BadRequestError)
 
 
 def parse_with_retry(call, *, page_no: int, what: str):
