@@ -249,6 +249,23 @@ _CANONICALIZABLE_TIERS = frozenset({"table", "prose", "complete"})
 _NOT_CANONICALIZABLE_VALUE_TYPES = frozenset({"text", "date"})
 
 
+def _dashboard_metrics_present(claims: list[Claim]) -> list[str]:
+    """Distinct metric attributes for the dashboard's metric_order. Excludes the
+    catch-all buckets AND qualitative claims: a qualitative assertion's attribute
+    is an open noun phrase that is never canonicalized (see _CANONICALIZABLE_TIERS)
+    and would otherwise leak verbatim into metric_order and the inspector's
+    metrics_present."""
+    return sorted(
+        {
+            c.attribute
+            for c in claims
+            if c.attribute
+            and c.attribute not in (OPERATING_METRIC, CORE_UNMAPPED)
+            and c.claim_kind != "qualitative"
+        }
+    )
+
+
 def _canonicalize_quantitative_claims(
     tier_claims: list[tuple[str, list[Claim]]], flag_log: FlagLog
 ) -> None:
@@ -757,13 +774,7 @@ def extract_claims(
             for c in claims:
                 if c.entity:
                     entity_counts[c.entity] = entity_counts.get(c.entity, 0) + 1
-            metrics_present = sorted(
-                {
-                    c.attribute
-                    for c in claims
-                    if c.attribute and c.attribute not in (OPERATING_METRIC, CORE_UNMAPPED)
-                }
-            )
+            metrics_present = _dashboard_metrics_present(claims)
             structure = organize_claims(entity_counts, metrics_present, company=entity)
         except Exception as exc:  # noqa: BLE001 -- best-effort; the dashboard degrades gracefully
             print(
