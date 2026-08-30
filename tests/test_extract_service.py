@@ -9,6 +9,7 @@ identical to what the CLI would print for the same input.
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import pytest
 
@@ -399,7 +400,7 @@ def test_cli_and_direct_call_produce_an_identical_payload_for_the_same_input(
 def _dashboard_claim(
     attribute: str,
     *,
-    claim_kind: str | None = None,
+    claim_kind: Literal["quantitative", "qualitative"] | None = None,
     value_type: ValueType = "currency",
 ) -> extract_service.Claim:
     return extract_service.Claim(
