@@ -250,7 +250,7 @@ async def test_normalize_job_policy_gives_process_document_its_own_numbers() -> 
     job = _StubJob()
     await worker._normalize_job_policy(ctx=cast(Context, {"job": job}))
 
-    assert job.timeout == 3600
+    assert job.timeout == 7200  # 2h: qualitative adds a second per-prose-page pass
     assert job.retries == 1  # bounded: extract_claims hits the paid Anthropic API
     assert job.ttl == 86400
     assert job.updated is True

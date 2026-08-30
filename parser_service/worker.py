@@ -281,7 +281,13 @@ async def _normalize_job_policy(ctx: Context) -> None:
         # points, not measured -- revisit with real latency data. retries=1 (not
         # 2): extract_claims hits the paid, non-deterministic Anthropic API, so
         # bound whole-job re-runs.
-        job.timeout = 3600
+        #
+        # 7200s (2h), up from 3600: the qualitative tier adds a second per-prose-
+        # page pass that runs AFTER the numeric prose pass (extract_service), so
+        # a large CIM/S-1's Anthropic-bound wall-clock roughly doubles. With
+        # retries=1 a timeout kill re-runs the whole extraction, so the ceiling
+        # is set with headroom rather than risking that on a big document.
+        job.timeout = 7200
         job.retries = 1
     else:
         # parse_document: docling only, CPU-bound.
