@@ -337,5 +337,13 @@ settings: SettingsDict = {
     "functions": [parse_document, process_document],
     "before_process": _normalize_job_policy,
     "after_process": _recycle_worker,
+    # One document at a time per worker: process_document already fans out
+    # EXTRACT_WORKERS-wide Anthropic calls internally, so a second concurrent
+    # document would multiply the in-flight burst past the account's rate-limit
+    # headroom. The tradeoff is queue serialization -- a long parse (now longer
+    # with the qualitative tier's added per-prose-page pass) holds the slot and
+    # delays queued jobs; scale that out by running more worker processes, not by
+    # raising this. The raised process_document timeout (_normalize_job_policy)
+    # bounds how long any one document can hold it.
     "concurrency": 1,
 }

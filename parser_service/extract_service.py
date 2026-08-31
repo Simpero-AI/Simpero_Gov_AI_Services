@@ -708,6 +708,20 @@ def extract_claims(
             skipped_pages.extend(complete_failed)
             tier_claims.append(("complete", complete_claims))
         if qualitative:
+            # Runs AFTER the prose pass, not concurrently with it, even though the
+            # qualitative extractor depends only on `blocks` (never on the prose
+            # claims, unlike `complete`). The tiers each fan out `workers`-wide;
+            # running two pools at once would put 2*workers Anthropic calls in
+            # flight, past the rate-limit headroom EXTRACT_WORKERS is calibrated to
+            # (the same headroom llm_client's widened retry budget exists to
+            # protect) -- on a concurrency:1 worker that trades wall-clock for 429
+            # churn, not real throughput. The added per-prose-page pass is bounded
+            # and absorbed by the raised job.timeout (worker._normalize_job_policy).
+            # A single pool covering both extractors would cut the wall-clock
+            # without raising peak concurrency, but it entangles the per-tier
+            # failure accounting each tier keeps here (its own skipped_pages tier,
+            # and prose alone driving the systemic-loss escalation denominator), so
+            # it's left as a separate optimization rather than folded in here.
             qualitative_claims, qualitative_failed = _prose_claims(
                 "qualitative",
                 result.pages,
