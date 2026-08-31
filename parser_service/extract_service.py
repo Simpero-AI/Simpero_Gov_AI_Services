@@ -94,9 +94,18 @@ class ProseCredentialMissing(RuntimeError):
     argparse SystemExit, the HTTP endpoint maps it to a 503."""
 
 
+def _prose_pages(pages: list[PageIndex], blocks) -> list[PageIndex]:
+    """The pages that carry extractable prose -- the shared input to every prose
+    tier and the denominator for the skip escalation. Computed once per document
+    in extract_claims and threaded through, so the per-page block scan is not
+    repeated for the numeric pass, the qualitative pass, and the escalation count.
+    """
+    return [p for p in pages if prose_text(blocks_on_page(blocks, p.page), p).strip()]
+
+
 def _prose_claims(
     kind: str,
-    pages: list[PageIndex],
+    with_prose: list[PageIndex],
     blocks,
     *,
     entity: str,
@@ -104,14 +113,16 @@ def _prose_claims(
     flag_log: FlagLog,
     workers: int,
 ) -> tuple[list[Claim], list[SkippedPage]]:
-    """Run one prose tier over every page that has prose, concurrently.
+    """Run one prose tier over the given prose pages, concurrently.
 
-    `kind` selects the extractor: "prose" for the numeric pass, "qualitative"
-    for the assertion pass. A page whose model call fails is reported on
-    stderr AND returned as a SkippedPage(page, tier, reason) -- a partial
-    result that names its gaps is more useful than none, and both entry points
-    need that name: the CLI caller can re-run it, and an HTTP caller has no
-    stderr to read at all (see extract_claims' `skipped_pages`).
+    `with_prose` is the already-filtered list of prose-bearing pages (see
+    _prose_pages), so the block scan that selects them happens once per document
+    rather than once per tier. `kind` selects the extractor: "prose" for the
+    numeric pass, "qualitative" for the assertion pass. A page whose model call
+    fails is reported on stderr AND returned as a SkippedPage(page, tier, reason)
+    -- a partial result that names its gaps is more useful than none, and both
+    entry points need that name: the CLI caller can re-run it, and an HTTP caller
+    has no stderr to read at all (see extract_claims' `skipped_pages`).
     """
     extractor = claims_from_prose if kind == "prose" else assertions_from_prose
     # One client shared across the fan-out, not one per page: a 16-wide burst
@@ -129,7 +140,6 @@ def _prose_claims(
             client=client,
         )
 
-    with_prose = [p for p in pages if prose_text(blocks_on_page(blocks, p.page), p).strip()]
     claims: list[Claim] = []
     failed: list[tuple[int, str]] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -696,12 +706,13 @@ def extract_claims(
     prose_page_count = 0  # pages that carry prose -- the denominator for the skip escalation
     if want_prose:
         blocks = extract_text_blocks(result.document, result.pages)
-        prose_page_count = sum(
-            1 for p in result.pages if prose_text(blocks_on_page(blocks, p.page), p).strip()
-        )
+        # Select the prose-bearing pages once; every prose tier below and the
+        # escalation denominator reuse this instead of re-scanning the blocks.
+        prose_pages = _prose_pages(result.pages, blocks)
+        prose_page_count = len(prose_pages)
         prose_claims, prose_failed = _prose_claims(
             "prose",
-            result.pages,
+            prose_pages,
             blocks,
             entity=entity,
             file=file,
@@ -726,7 +737,7 @@ def extract_claims(
         if qualitative:
             qualitative_claims, qualitative_failed = _prose_claims(
                 "qualitative",
-                result.pages,
+                prose_pages,
                 blocks,
                 entity=entity,
                 file=file,
