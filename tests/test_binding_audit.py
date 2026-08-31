@@ -54,7 +54,7 @@ def test_audit_flags_binding_unsupported_and_carries_the_mode(monkeypatch) -> No
     claim = _claim(scale_source="page_header")
     page = PageIndex(page=1, text="x" * 50, char_map=[])
     flag_log = FlagLog(run_id="t")
-    extract_service._audit_claims([claim], [page], flag_log, workers=1)
+    extract_service._audit_claims([claim], [page], flag_log, workers=1, client=None)
 
     assert "binding_unsupported" in claim.flags
     assert len(flag_log.entries) == 1
@@ -74,7 +74,7 @@ def test_audit_leaves_supported_and_unrouted_claims_untouched(monkeypatch) -> No
     unrouted = _claim(scale_source="column_header")  # never routed
     page = PageIndex(page=1, text="x" * 50, char_map=[])
     flag_log = FlagLog(run_id="t")
-    extract_service._audit_claims([routed, unrouted], [page], flag_log, workers=1)
+    extract_service._audit_claims([routed, unrouted], [page], flag_log, workers=1, client=None)
 
     assert routed.flags == []
     assert unrouted.flags == []

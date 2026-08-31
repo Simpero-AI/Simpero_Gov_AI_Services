@@ -113,25 +113,25 @@ def _prose_claims(
     file: str,
     flag_log: FlagLog,
     workers: int,
+    client,
 ) -> tuple[list[Claim], list[SkippedPage]]:
     """Run one prose tier over the given prose pages, concurrently.
 
     `with_prose` is the already-filtered list of prose-bearing pages (see
     _prose_pages), so the block scan that selects them happens once per document
-    rather than once per tier. `kind` selects the extractor: "prose" for the
-    numeric pass, "qualitative" for the assertion pass. A page whose model call
-    fails is reported on stderr AND returned as a SkippedPage(page, tier, reason)
-    -- a partial result that names its gaps is more useful than none, and both
-    entry points need that name: the CLI caller can re-run it, and an HTTP caller
-    has no stderr to read at all (see extract_claims' `skipped_pages`).
+    rather than once per tier. `client` is the document's single shared Anthropic
+    client (threaded from extract_claims) so every tier reuses one warm connection
+    pool rather than each spinning up its own. `kind` selects the extractor:
+    "prose" for the numeric pass, "qualitative" for the assertion pass. A page
+    whose model call fails is reported on stderr AND returned as a
+    SkippedPage(page, tier, reason) -- a partial result that names its gaps is more
+    useful than none, and both entry points need that name: the CLI caller can
+    re-run it, and an HTTP caller has no stderr to read at all (see extract_claims'
+    `skipped_pages`).
     """
     if not with_prose:
-        return [], []  # prose-less document -- nothing to fan out, no client needed
+        return [], []  # prose-less document -- nothing to fan out
     extractor = claims_from_prose if kind == "prose" else assertions_from_prose
-    # One client shared across the fan-out, not one per page: a 16-wide burst
-    # otherwise spins up 16 connection pools instead of reusing keep-alive
-    # connections. The client is thread-safe.
-    client = make_client()
 
     def run(page: PageIndex) -> tuple[int, list[Claim]]:
         return page.page, extractor(
@@ -193,6 +193,7 @@ def _completeness_claims(
     file: str,
     flag_log: FlagLog,
     workers: int,
+    client,
 ) -> tuple[list[Claim], list[SkippedPage]]:
     """Recover Gate-1 coverage misses: numbers a page printed that no claim
     gathered so far covers, but that resolve to a unique span (parser_service/
@@ -221,9 +222,8 @@ def _completeness_claims(
     for miss in coverage.gate1_misses:
         misses_by_page[miss.page].append(miss)
     if not misses_by_page:
-        return [], []  # every number already covered -- no recovery calls, no client needed
+        return [], []  # every number already covered -- no recovery calls to fan out
     pages_by_no = {p.page: p for p in pages}
-    client = make_client()  # shared across the fan-out; see _prose_claims
 
     def run(page_no: int) -> tuple[int, list[Claim]]:
         page = pages_by_no[page_no]
@@ -553,7 +553,7 @@ def _should_audit(claim: Claim) -> bool:
 
 
 def _audit_claims(
-    claims: list[Claim], pages: list[PageIndex], flag_log: FlagLog, *, workers: int
+    claims: list[Claim], pages: list[PageIndex], flag_log: FlagLog, *, workers: int, client
 ) -> None:
     """SIM-359: flag claims whose cited span does not justify their
     (entity, attribute, value) binding, via verify.audit_claim -- an independent
@@ -566,8 +566,6 @@ def _audit_claims(
     routed = [(c, span) for c in claims if _should_audit(c) and (span := _pdf_span(c)) is not None]
     if not routed:
         return
-
-    client = make_client()  # shared across the fan-out; see _prose_claims
 
     def run(item: tuple[Claim, tuple[int, int, int]]) -> tuple[Claim, AuditVerdict]:
         claim, (page_no, start, end) = item
@@ -751,6 +749,14 @@ def extract_claims(
     _mark("table")
     print(f"tier tables: {len(claims)} claims", file=sys.stderr)
 
+    # One Anthropic client per document, shared across every LLM fan-out tier
+    # (prose, completeness, qualitative, binding audit) so a later tier reuses the
+    # earlier tier's warm keep-alive connections instead of re-paying the TLS
+    # handshake on a fresh, cold pool. The httpx pool is lazy (no sockets until the
+    # first request), so this costs nothing on a tier that ends up empty; a
+    # table-only, audit-off run builds none at all.
+    shared_client = make_client() if (want_prose or audit) else None
+
     prose_page_count = 0  # pages that carry prose -- the denominator for the skip escalation
     if want_prose:
         blocks = extract_text_blocks(result.document, result.pages)
@@ -766,6 +772,7 @@ def extract_claims(
             file=file,
             flag_log=flag_log,
             workers=workers,
+            client=shared_client,
         )
         claims += prose_claims
         skipped_pages.extend(prose_failed)
@@ -778,6 +785,7 @@ def extract_claims(
                 file=file,
                 flag_log=flag_log,
                 workers=workers,
+                client=shared_client,
             )
             claims += complete_claims
             skipped_pages.extend(complete_failed)
@@ -803,6 +811,7 @@ def extract_claims(
                 file=file,
                 flag_log=flag_log,
                 workers=workers,
+                client=shared_client,
             )
             claims += qualitative_claims
             skipped_pages.extend(qualitative_failed)
@@ -834,7 +843,7 @@ def extract_claims(
 
     _mark("canonicalize")
     if audit:
-        _audit_claims(claims, result.pages, flag_log, workers=workers)
+        _audit_claims(claims, result.pages, flag_log, workers=workers, client=shared_client)
     _mark("audit")
 
     profile: DealProfile | None = None

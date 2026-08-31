@@ -738,7 +738,10 @@ def propose_attribute_mappings(
         client = make_client()
 
     mapped: dict[str, str] = {}
+    batch_count = 0
+    failed_batches = 0
     for offset in range(0, len(raw_labels), _ATTRIBUTE_BATCH):
+        batch_count += 1
         chunk = raw_labels[offset : offset + _ATTRIBUTE_BATCH]
         listing = "\n".join(f"{i}. {label}" for i, label in enumerate(chunk, start=1))
         try:
@@ -776,6 +779,7 @@ def propose_attribute_mappings(
                 and not is_grammar_timeout(exc)
             ):
                 raise
+            failed_batches += 1
             # A genuine transient the retry could not clear -- a malformed body
             # (ValidationError), an exhausted grammar-400, a 429, a 5xx, or a
             # connection/timeout -- skips only this batch: its labels are simply
@@ -801,6 +805,19 @@ def propose_attribute_mappings(
         for mapping in parsed.mappings:
             if 1 <= mapping.index <= len(chunk):
                 mapped[chunk[mapping.index - 1]] = mapping.canonical
+    # A flaky single batch is tolerable (its labels just fall back to
+    # attribute_unmapped), but EVERY batch failing the same "transient" way is not
+    # per-batch loss -- it is systemic: a PERMANENT grammar-compile 400 that
+    # is_grammar_timeout cannot tell from a transient one (a real schema /
+    # output_format regression), or a sustained outage. Silently defaulting 100% of
+    # the document's labels to the catch-all is exactly the failure this PR surfaces,
+    # so raise -- it lands as one document-level attribute_mapping SkippedPage
+    # (_canonicalize_quantitative_claims), not N buried per-batch WARNINGs.
+    if batch_count and failed_batches == batch_count:
+        raise RuntimeError(
+            f"attribute mapping failed for all {batch_count} batch(es) "
+            f"({len(raw_labels)} labels); every label would default to attribute_unmapped"
+        )
     return mapped
 
 
