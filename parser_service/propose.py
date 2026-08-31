@@ -44,6 +44,7 @@ import os
 import re
 from typing import Literal
 
+import anthropic
 from pydantic import BaseModel, Field, ValidationError
 
 from .emit import (
@@ -54,6 +55,7 @@ from .emit import (
     emit_pdf_claim,
     gate_canonical_attribute,
 )
+from .llm_client import is_grammar_timeout, make_client, parse_with_retry
 from .resolver import contains_flexible, find_exact_span
 from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
@@ -318,32 +320,6 @@ class PageAssertions(BaseModel):
     assertions: list[ProposedAssertion] = Field(default_factory=list)
 
 
-def _parse_with_retry(call, *, page_no: int, what: str):
-    """Run a structured-output call, retrying once on a malformed response.
-
-    Measured across four full-document runs: a page occasionally comes back with
-    an empty or truncated body, and the ValidationError raised while parsing it
-    escapes and destroys that page's entire extraction. It is transient -- every
-    observed instance succeeded when the same page was re-run (ACEP p20 failed
-    once and passed on the next run with identical inputs).
-
-    One retry, not a loop: a response malformed twice is a real failure and the
-    caller should see it rather than have it retried into a timeout. The raise
-    is deliberately still reachable -- this narrows a transient, it does not
-    pretend the page succeeded.
-    """
-    try:
-        return call()
-    except ValidationError as exc:
-        logger.warning(
-            "page %s: %s returned an unparseable body (%s); retrying once",
-            page_no,
-            what,
-            type(exc).__name__,
-        )
-        return call()
-
-
 def _is_boilerplate_block(block: TextBlockRecord, page: PageIndex) -> bool:
     """True when a block resolves to a span that is ENTIRELY running furniture.
 
@@ -419,11 +395,9 @@ def propose_for_page(
         return []
 
     if client is None:
-        import anthropic
+        client = make_client()
 
-        client = anthropic.Anthropic()
-
-    response = _parse_with_retry(
+    response = parse_with_retry(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
@@ -573,9 +547,7 @@ def propose_completion_for_page(
     if not missed:
         return []
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     listing = "\n".join(f'- {number}   printed in: "...{context}..."' for number, context in missed)
     user = (
@@ -592,7 +564,7 @@ def propose_completion_for_page(
         f"Full page text (copy every quote VERBATIM from here; it must appear once):\n"
         f"{page.text}"
     )
-    response = _parse_with_retry(
+    response = parse_with_retry(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
@@ -763,16 +735,17 @@ def propose_attribute_mappings(
     if not raw_labels:
         return {}
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     mapped: dict[str, str] = {}
+    batch_count = 0
+    failed_batches = 0
     for offset in range(0, len(raw_labels), _ATTRIBUTE_BATCH):
+        batch_count += 1
         chunk = raw_labels[offset : offset + _ATTRIBUTE_BATCH]
         listing = "\n".join(f"{i}. {label}" for i, label in enumerate(chunk, start=1))
         try:
-            response = _parse_with_retry(
+            response = parse_with_retry(
                 lambda listing=listing: client.messages.parse(
                     model=model,
                     max_tokens=8000,
@@ -789,13 +762,38 @@ def propose_attribute_mappings(
                 page_no=0,
                 what="attribute mapping",
             )
-        except ValidationError:
-            # A batch malformed twice: skip it. Its labels are absent from the
-            # result, so canonicalize_attributes defaults them to core_unmapped
-            # rather than one bad batch sinking the whole document's mapping.
+        except (ValidationError, anthropic.APIError) as exc:
+            # A client/config error is NOT per-batch transient loss and must not be
+            # silently defaulted to the catch-all: a bad or revoked credential
+            # (401/403) or a genuinely invalid request (a non-grammar 4xx -- a real
+            # schema bug, not the grammar-compilation 400 parse_with_retry already
+            # retries) fails EVERY batch identically. Let it propagate; it then
+            # surfaces as one document-level attribute_mapping SkippedPage (see
+            # _canonicalize_quantitative_claims) instead of N indistinguishable
+            # per-batch WARNINGs -- exactly the silent partial-extraction failure
+            # this PR is otherwise making loud.
+            if (
+                isinstance(exc, anthropic.APIStatusError)
+                and exc.status_code < 500
+                and exc.status_code != 429
+                and not is_grammar_timeout(exc)
+            ):
+                raise
+            failed_batches += 1
+            # A genuine transient the retry could not clear -- a malformed body
+            # (ValidationError), an exhausted grammar-400, a 429, a 5xx, or a
+            # connection/timeout -- skips only this batch: its labels are simply
+            # absent from the result, so canonicalize_attributes gates each to
+            # OPERATING_METRIC with attribute_unmapped set (an OMITTED label -- kept
+            # distinct on purpose from the model's explicit "financial but
+            # unplaceable" core_unmapped answer, SIM-384), and one bad batch loses
+            # only its own labels, not every batch's already-computed mappings. A
+            # programming bug (TypeError, bad kwarg) is not in that set and still
+            # propagates loudly.
             logger.warning(
-                "attribute mapping: a batch of %d labels failed twice; skipping it",
+                "attribute mapping: a batch of %d labels failed (%s); skipping it",
                 len(chunk),
+                type(exc).__name__,
             )
             continue
         parsed = response.parsed_output
@@ -807,6 +805,19 @@ def propose_attribute_mappings(
         for mapping in parsed.mappings:
             if 1 <= mapping.index <= len(chunk):
                 mapped[chunk[mapping.index - 1]] = mapping.canonical
+    # A flaky single batch is tolerable (its labels just fall back to
+    # attribute_unmapped), but EVERY batch failing the same "transient" way is not
+    # per-batch loss -- it is systemic: a PERMANENT grammar-compile 400 that
+    # is_grammar_timeout cannot tell from a transient one (a real schema /
+    # output_format regression), or a sustained outage. Silently defaulting 100% of
+    # the document's labels to the catch-all is exactly the failure this PR surfaces,
+    # so raise -- it lands as one document-level attribute_mapping SkippedPage
+    # (_canonicalize_quantitative_claims), not N buried per-batch WARNINGs.
+    if batch_count and failed_batches == batch_count:
+        raise RuntimeError(
+            f"attribute mapping failed for all {batch_count} batch(es) "
+            f"({len(raw_labels)} labels); every label would default to attribute_unmapped"
+        )
     return mapped
 
 
@@ -907,11 +918,9 @@ def propose_assertions_for_page(
         return []
 
     if client is None:
-        import anthropic
+        client = make_client()
 
-        client = anthropic.Anthropic()
-
-    response = _parse_with_retry(
+    response = parse_with_retry(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,

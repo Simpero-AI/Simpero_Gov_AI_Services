@@ -24,8 +24,9 @@ import logging
 import unicodedata
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
+from .llm_client import make_client, parse_with_retry
 from .propose import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -116,9 +117,7 @@ def assess_criteria(
         return {rule_id: _unknown() for rule_id in wanted}
 
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     rendered = "\n".join(f"- rule_id={rid}: {question}" for rid, question in wanted.items())
     user = (
@@ -136,11 +135,11 @@ def assess_criteria(
             output_format=CriteriaAssessment,
         )
 
-    try:
-        response = call()
-    except ValidationError:
-        logger.warning("screen_criteria: unparseable body for %s; retrying once", entity)
-        response = call()
+    # Route through the shared retry so a transient grammar-compilation 400 is
+    # retried here too (same structured-output path as the prose tiers), instead
+    # of propagating and silently dropping this stage. page_no=0 is the sentinel
+    # for a whole-document (non per-page) call.
+    response = parse_with_retry(call, page_no=0, what="screen_criteria")
 
     parsed = response.parsed_output
     results = {rule_id: _unknown() for rule_id in wanted}

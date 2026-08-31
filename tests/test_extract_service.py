@@ -397,6 +397,21 @@ def test_cli_and_direct_call_produce_an_identical_payload_for_the_same_input(
     assert cli_payload == direct_payload
 
 
+def test_is_systemic_prose_loss_large_share_and_total_loss():
+    fn = extract_service._is_systemic_prose_loss
+    # A large share of a big prose set escalates; a one-off does not.
+    assert fn(20, 100) is True  # 20% of 100
+    assert fn(1, 10) is False  # one-off (1 < max(3, 2))
+    assert fn(3, 10) is True  # hits the floor of 3
+    # Total prose loss escalates even on a set too small to clear the floor.
+    assert fn(2, 2) is True  # 100% of 2 prose pages, though 2 < max(3, 0)
+    # Nothing lost, or no prose pages -> never systemic.
+    assert fn(0, 100) is False
+    assert fn(0, 0) is False
+    # lost is a subset of prose_pages by construction; be defensive anyway.
+    assert fn(5, 5) is True
+
+
 def _dashboard_claim(
     attribute: str,
     *,

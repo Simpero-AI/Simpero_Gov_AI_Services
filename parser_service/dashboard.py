@@ -19,8 +19,9 @@ is empty and the Inspector falls back to deterministic frequency grouping.
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
+from .llm_client import make_client, parse_with_retry
 from .propose import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -126,9 +127,7 @@ def organize_claims(
     metric_set = set(metrics)
 
     if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
+        client = make_client()
 
     rendered_entities = "\n".join(f"- {e} ({n} facts)" for e, n in top)
     rendered_metrics = "\n".join(f"- {m}" for m in metrics)
@@ -147,12 +146,13 @@ def organize_claims(
             output_format=DashboardStructure,
         )
 
+    # page_no=0 is the whole-document sentinel (this is one batched call, not
+    # per-page). parse_with_retry narrows an unparseable body and a transient
+    # grammar-compilation 400; the outer guard still swallows an exhausted or
+    # otherwise-failed call, because organize_claims must never raise -- the
+    # Inspector falls back to deterministic frequency grouping on an empty result.
     try:
-        try:
-            response = call()
-        except ValidationError:
-            logger.warning("dashboard: unparseable body for %s; retrying once", company)
-            response = call()
+        response = parse_with_retry(call, page_no=0, what="dashboard")
     except Exception:  # noqa: BLE001 -- never raise; the caller falls back to frequency grouping
         logger.warning(
             "dashboard: organization failed for %s; returning empty", company, exc_info=True

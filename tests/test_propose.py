@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import anthropic
+import httpx
 import pytest
 from pydantic import ValidationError
 
 from parser_service.emit import CORE_ATTRIBUTES, OPERATING_METRIC, FlagLog, PdfLocation
 from parser_service.propose import (
+    _ATTRIBUTE_BATCH,
     MAX_ASSERTIONS_PER_PAGE,
     AttributeMapping,
     AttributeMappings,
@@ -1151,6 +1154,95 @@ def test_propose_attribute_mappings_drops_an_out_of_range_index() -> None:
     )
     result = propose_attribute_mappings(["Revenue | 2019F"], client=client)
     assert result == {}
+
+
+def test_a_transient_on_one_of_several_batches_is_skipped_others_still_map() -> None:
+    # A genuine transient the retries couldn't clear (here a connection error; 429s
+    # and 5xx behave the same) skips only its own batch: that batch's labels are
+    # absent, the other batches' mappings survive, and -- because not EVERY batch
+    # failed -- no systemic escalation fires.
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    labels = [f"Label {i}" for i in range(_ATTRIBUTE_BATCH + 1)]  # two batches
+    calls = {"n": 0}
+
+    def _parse(**_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise anthropic.APIConnectionError(request=request)  # first batch fails
+        return SimpleNamespace(
+            parsed_output=AttributeMappings(
+                mappings=[AttributeMapping(index=1, canonical="revenue")]
+            )
+        )
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_parse))
+    result = propose_attribute_mappings(labels, client=client)
+    # First batch's labels dropped; the second batch's first label still mapped.
+    assert result == {labels[_ATTRIBUTE_BATCH]: "revenue"}
+
+
+def test_all_batches_failing_escalates_instead_of_silently_unmapping_everything() -> None:
+    # EVERY batch failing the same "transient" way is not per-batch loss -- it is
+    # systemic (a sustained outage, or the permanent grammar-400 below). Defaulting
+    # 100% of the document's labels to the catch-all silently is the failure this
+    # PR surfaces, so it raises (landing as a document-level SkippedPage upstream).
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+    def _always_fail(**_k):
+        raise anthropic.APIConnectionError(request=request)
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_always_fail))
+    with pytest.raises(RuntimeError, match="attribute mapping failed for all"):
+        propose_attribute_mappings(["Revenue | 2019F"], client=client)
+
+
+def test_a_permanent_grammar_400_escalates_rather_than_swallowing_every_batch(monkeypatch) -> None:
+    # The reviewer's bug: is_grammar_timeout cannot tell a PERMANENT grammar-compile
+    # 400 (a real schema / output_format regression) from a transient one, so the
+    # per-error re-raise never fires for it. The systemic total-failure escalation
+    # is what catches it -- otherwise it would silently unmap every label forever.
+    monkeypatch.setattr("parser_service.llm_client.time.sleep", lambda *_a, **_k: None)
+    response = httpx.Response(
+        400, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+
+    def _raise_grammar(**_k):
+        raise anthropic.BadRequestError(
+            "grammar compilation failed for output_format", response=response, body=None
+        )
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_raise_grammar))
+    with pytest.raises(RuntimeError, match="attribute mapping failed for all"):
+        propose_attribute_mappings(["Revenue | 2019F"], client=client)
+
+
+def test_a_config_error_propagates_rather_than_being_swallowed_per_batch() -> None:
+    # A revoked/expired credential (401) or a genuinely invalid request (a
+    # non-grammar 4xx) is a deploy/config problem that fails every batch
+    # identically -- it must propagate (surfacing as one document-level
+    # attribute_mapping SkippedPage), not be silently defaulted to the catch-all
+    # like a transient. A 429, by contrast, stays a transient and is skipped.
+    response = httpx.Response(
+        401, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+
+    def _raise_auth(**_k):
+        raise anthropic.AuthenticationError("invalid x-api-key", response=response, body=None)
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_raise_auth))
+    with pytest.raises(anthropic.AuthenticationError):
+        propose_attribute_mappings(["Revenue | 2019F"], client=client)
+
+
+def test_a_programming_bug_propagates_rather_than_being_swallowed() -> None:
+    # A code defect (TypeError) is NOT a transient -- the narrowed except must let
+    # it propagate loudly, not silently default the batch to operating_metric.
+    def _raise_type_error(**_k):
+        raise TypeError("bad kwarg")
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_raise_type_error))
+    with pytest.raises(TypeError):
+        propose_attribute_mappings(["Revenue | 2019F"], client=client)
 
 
 def test_canonicalize_attributes_gates_a_literal_core_answer_through_clean() -> None:

@@ -313,7 +313,7 @@ def test_complete_recovers_a_gate1_miss_the_prose_tier_left_uncovered(
 
     completeness_calls: list[list[tuple[str, str]]] = []
 
-    def _fake_completeness(page_, missed, *, entity_hint, file, flag_log):
+    def _fake_completeness(page_, missed, *, entity_hint, file, flag_log, client=None):
         completeness_calls.append(missed)
         return [_proposed_claim(entity_hint, "revenue | year two", "$200", page_)]
 

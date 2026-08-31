@@ -37,6 +37,7 @@ from .emit import (
     element_id_for,
 )
 from .extract import claims_from_table
+from .llm_client import make_client
 from .propose import (
     api_key_present,
     assertions_from_prose,
@@ -60,6 +61,32 @@ logger = logging.getLogger(__name__)
 # extraction has. Bumped from 8 -> 16 (SIM perf: CIM-02 was ~13 min).
 _DEFAULT_WORKERS = int(os.getenv("EXTRACT_WORKERS", "16") or "16")
 
+# The tiers whose skips are counted against the prose-page denominator for the
+# systemic-loss escalation. ONLY the tiers that fan out over the prose-page set
+# (`with_prose`) belong here -- "complete" is deliberately excluded: it fans out
+# over pages carrying a gate-1 number miss (misses_by_page), a set that includes
+# table-only pages with no prose, so its skips are not a subset of prose_pages
+# and would let the ERROR print "lost N of M" with N > M. Completeness skips
+# still surface in the per-tier WARNING breakdown, just not the prose escalation.
+_PROSE_TIERS = frozenset({"prose", "qualitative"})
+
+
+def _is_systemic_prose_loss(lost_prose_pages: int, prose_pages: int) -> bool:
+    """True when prose-page loss looks systemic (rate-limit/timeout under the
+    fan-out) rather than a one-off, and so warrants an ERROR.
+
+    `prose_pages` is how many pages carried prose (the denominator); `lost` is how
+    many of them were skipped. Escalates on a large share (>= 20%, floored at 3)
+    OR on total prose loss -- the floor alone would mask a 2-prose-page doc that
+    lost both, which is still 100% loss. `lost` is a distinct-page count and is a
+    subset of `prose_pages` by construction (see _PROSE_TIERS), so it never
+    exceeds the denominator."""
+    if prose_pages <= 0 or lost_prose_pages <= 0:
+        return False
+    if lost_prose_pages >= prose_pages:  # total prose loss, even on a tiny set
+        return True
+    return lost_prose_pages >= max(3, prose_pages // 5)
+
 
 class ProseCredentialMissing(RuntimeError):
     """The prose/qualitative tiers were requested without an Anthropic
@@ -70,9 +97,10 @@ class ProseCredentialMissing(RuntimeError):
 
 def _prose_pages(pages: list[PageIndex], blocks) -> list[PageIndex]:
     """The pages that carry extractable prose -- the shared input to every prose
-    tier. Computed once per document in extract_claims and threaded through, so the
-    per-page block scan is not repeated for the numeric pass and the qualitative
-    pass (both fan out over the same set)."""
+    tier and the denominator for the skip escalation. Computed once per document
+    in extract_claims and threaded through, so the per-page block scan is not
+    repeated for the numeric pass, the qualitative pass, and the escalation count.
+    """
     return [p for p in pages if prose_text(blocks_on_page(blocks, p.page), p).strip()]
 
 
@@ -85,18 +113,24 @@ def _prose_claims(
     file: str,
     flag_log: FlagLog,
     workers: int,
+    client,
 ) -> tuple[list[Claim], list[SkippedPage]]:
     """Run one prose tier over the given prose pages, concurrently.
 
     `with_prose` is the already-filtered list of prose-bearing pages (see
     _prose_pages), so the block scan that selects them happens once per document
-    rather than once per tier. `kind` selects the extractor: "prose" for the
-    numeric pass, "qualitative" for the assertion pass. A page whose model call
-    fails is reported on stderr AND returned as a SkippedPage(page, tier, reason)
-    -- a partial result that names its gaps is more useful than none, and both
-    entry points need that name: the CLI caller can re-run it, and an HTTP caller
-    has no stderr to read at all (see extract_claims' `skipped_pages`).
+    rather than once per tier. `client` is the document's single shared Anthropic
+    client (threaded from extract_claims) so every tier reuses one warm connection
+    pool rather than each spinning up its own. `kind` selects the extractor:
+    "prose" for the numeric pass, "qualitative" for the assertion pass. A page
+    whose model call fails is reported on stderr AND returned as a
+    SkippedPage(page, tier, reason) -- a partial result that names its gaps is more
+    useful than none, and both entry points need that name: the CLI caller can
+    re-run it, and an HTTP caller has no stderr to read at all (see extract_claims'
+    `skipped_pages`).
     """
+    if not with_prose:
+        return [], []  # prose-less document -- nothing to fan out
     extractor = claims_from_prose if kind == "prose" else assertions_from_prose
 
     def run(page: PageIndex) -> tuple[int, list[Claim]]:
@@ -106,6 +140,7 @@ def _prose_claims(
             entity_hint=entity,
             file=file,
             flag_log=flag_log,
+            client=client,
         )
 
     claims: list[Claim] = []
@@ -158,6 +193,7 @@ def _completeness_claims(
     file: str,
     flag_log: FlagLog,
     workers: int,
+    client,
 ) -> tuple[list[Claim], list[SkippedPage]]:
     """Recover Gate-1 coverage misses: numbers a page printed that no claim
     gathered so far covers, but that resolve to a unique span (parser_service/
@@ -185,13 +221,15 @@ def _completeness_claims(
     misses_by_page: dict[int, list[NumberMiss]] = defaultdict(list)
     for miss in coverage.gate1_misses:
         misses_by_page[miss.page].append(miss)
+    if not misses_by_page:
+        return [], []  # every number already covered -- no recovery calls to fan out
     pages_by_no = {p.page: p for p in pages}
 
     def run(page_no: int) -> tuple[int, list[Claim]]:
         page = pages_by_no[page_no]
         missed = [(m.text, m.context) for m in misses_by_page[page_no]]
         return page_no, claims_from_completeness(
-            page, missed, entity_hint=entity, file=file, flag_log=flag_log
+            page, missed, entity_hint=entity, file=file, flag_log=flag_log, client=client
         )
 
     claims: list[Claim] = []
@@ -515,7 +553,7 @@ def _should_audit(claim: Claim) -> bool:
 
 
 def _audit_claims(
-    claims: list[Claim], pages: list[PageIndex], flag_log: FlagLog, *, workers: int
+    claims: list[Claim], pages: list[PageIndex], flag_log: FlagLog, *, workers: int, client
 ) -> None:
     """SIM-359: flag claims whose cited span does not justify their
     (entity, attribute, value) binding, via verify.audit_claim -- an independent
@@ -541,15 +579,18 @@ def _audit_claims(
             quote=text[start:end],
             context=text[max(0, start - _AUDIT_CONTEXT) : end + _AUDIT_CONTEXT],
             page=page_no,
+            client=client,
         )
 
     flagged = 0
+    failed = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(run, item) for item in routed]
         for future in as_completed(futures):
             try:
                 claim, verdict = future.result()
             except Exception as exc:  # noqa: BLE001 -- one bad audit must not lose the run
+                failed += 1
                 print(
                     f"tier binding_audit: a claim's audit failed and was skipped: "
                     f"{type(exc).__name__}: {exc}",
@@ -572,6 +613,18 @@ def _audit_claims(
         f"{flagged} flagged binding_unsupported",
         file=sys.stderr,
     )
+    if failed:
+        # Audit failures don't lose claims (the audit only flags), but they leave
+        # a claim's binding unchecked -- surface them at WARNING so a run where the
+        # audit tier silently degraded under fan-out load is visible, not buried
+        # in per-claim stderr lines. run_id is the caller's (flag_log).
+        logger.warning(
+            "binding_audit: %d of %d claim audit(s) failed and were skipped (run_id=%s); "
+            "their bindings went unchecked",
+            failed,
+            len(routed),
+            flag_log.run_id,
+        )
 
 
 def extract_claims(
@@ -696,11 +749,21 @@ def extract_claims(
     _mark("table")
     print(f"tier tables: {len(claims)} claims", file=sys.stderr)
 
+    # One Anthropic client per document, shared across every LLM fan-out tier
+    # (prose, completeness, qualitative, binding audit) so a later tier reuses the
+    # earlier tier's warm keep-alive connections instead of re-paying the TLS
+    # handshake on a fresh, cold pool. The httpx pool is lazy (no sockets until the
+    # first request), so this costs nothing on a tier that ends up empty; a
+    # table-only, audit-off run builds none at all.
+    shared_client = make_client() if (want_prose or audit) else None
+
+    prose_page_count = 0  # pages that carry prose -- the denominator for the skip escalation
     if want_prose:
         blocks = extract_text_blocks(result.document, result.pages)
-        # Select the prose-bearing pages once; the numeric and qualitative tiers
-        # both reuse this instead of re-scanning the blocks per tier.
+        # Select the prose-bearing pages once; every prose tier below and the
+        # escalation denominator reuse this instead of re-scanning the blocks.
         prose_pages = _prose_pages(result.pages, blocks)
+        prose_page_count = len(prose_pages)
         prose_claims, prose_failed = _prose_claims(
             "prose",
             prose_pages,
@@ -709,6 +772,7 @@ def extract_claims(
             file=file,
             flag_log=flag_log,
             workers=workers,
+            client=shared_client,
         )
         claims += prose_claims
         skipped_pages.extend(prose_failed)
@@ -721,6 +785,7 @@ def extract_claims(
                 file=file,
                 flag_log=flag_log,
                 workers=workers,
+                client=shared_client,
             )
             claims += complete_claims
             skipped_pages.extend(complete_failed)
@@ -746,6 +811,7 @@ def extract_claims(
                 file=file,
                 flag_log=flag_log,
                 workers=workers,
+                client=shared_client,
             )
             claims += qualitative_claims
             skipped_pages.extend(qualitative_failed)
@@ -758,8 +824,8 @@ def extract_claims(
             _canonicalize_quantitative_claims(tier_claims, flag_log)
         except Exception as exc:  # noqa: BLE001 -- one bad API call must not abort the document
             # Document-wide, not page-scoped (one batched call over every
-            # distinct label) -- page=0 is the same sentinel propose.py's
-            # _parse_with_retry already uses for this call's retries. Claims
+            # distinct label) -- page=0 is the same sentinel llm_client's
+            # parse_with_retry already uses for this call's retries. Claims
             # already emitted survive with their raw (pre-canonicalization)
             # attribute rather than being discarded.
             skipped_pages.append(
@@ -777,7 +843,7 @@ def extract_claims(
 
     _mark("canonicalize")
     if audit:
-        _audit_claims(claims, result.pages, flag_log, workers=workers)
+        _audit_claims(claims, result.pages, flag_log, workers=workers, client=shared_client)
     _mark("audit")
 
     profile: DealProfile | None = None
@@ -860,4 +926,44 @@ def extract_claims(
         sum(timings.values()),
         workers,
     )
+
+    # A dropped page-unit is silent partial extraction -- real claims missing
+    # from this run with a clean 200. The per-tier failure lines above go to
+    # stderr per page; this is the one deal-level signal, at WARNING, so the loss
+    # is never invisible to whoever reads the run. When the prose family loses a
+    # large share of the document it is systemic (rate-limit/timeout under the
+    # fan-out) rather than a one-off, so it escalates to ERROR with the fix.
+    if skipped_pages:
+        by_tier: dict[str, int] = defaultdict(int)
+        for s in skipped_pages:
+            by_tier[s.tier] += 1
+        breakdown = ", ".join(f"{tier}={n}" for tier, n in sorted(by_tier.items()))
+        logger.warning(
+            "extract_claims dropped %d page-unit(s) to failures [%s] "
+            "(run_id=%s file=%s workers=%d); their claims are missing from this extraction",
+            len(skipped_pages),
+            breakdown,
+            flag_log.run_id,
+            source_file,
+            workers,
+        )
+        # Distinct pages, not skip events: the prose-family tiers (_PROSE_TIERS)
+        # fan out over the same prose-page set, so one page failing in both the
+        # prose and qualitative tiers is two events but one lost page -- counting
+        # events would fire early and could print "lost N of M" with N > M. The
+        # denominator is pages WITH prose (prose_page_count), so a table-dense CIM
+        # that loses all its prose escalates rather than being diluted by table
+        # pages. The systemic threshold itself lives in a pure, tested helper.
+        prose_skip_pages = {s.page for s in skipped_pages if s.tier in _PROSE_TIERS}
+        if _is_systemic_prose_loss(len(prose_skip_pages), prose_page_count):
+            logger.error(
+                "extract_claims lost %d of %d prose page(s) (run_id=%s workers=%d) -- "
+                "this looks systemic, not a one-off (transient rate-limit/timeout under the "
+                "fan-out). Lower EXTRACT_WORKERS or raise ANTHROPIC_MAX_RETRIES and re-run.",
+                len(prose_skip_pages),
+                prose_page_count,
+                flag_log.run_id,
+                workers,
+            )
+
     return payload
