@@ -292,6 +292,43 @@ _CANONICALIZABLE_TIERS = frozenset({"table", "prose", "complete"})
 _NOT_CANONICALIZABLE_VALUE_TYPES = frozenset({"text", "date"})
 
 
+def _dashboard_eligible(claim: Claim) -> bool:
+    """Whether a claim counts toward the dashboard aggregation. Qualitative
+    assertions are excluded from BOTH the metric_order and the entity grouping:
+    their attribute is an open noun phrase (never canonicalized, see
+    _CANONICALIZABLE_TIERS) that would leak verbatim into metric_order, and their
+    entities are open free text (markets, competitors, named third parties) that
+    would let a prose-heavy tier EVICT real financial entities from the
+    count-ranked, _MAX_ENTITIES-capped grouping. One predicate for both call sites
+    so a future exclusion rule can't be applied to only one -- which would let the
+    leak reappear in just one of metric_order / entity grouping."""
+    return claim.claim_kind != "qualitative"
+
+
+def _dashboard_metrics_present(claims: list[Claim]) -> list[str]:
+    """Distinct metric attributes for the dashboard's metric_order. Excludes the
+    catch-all buckets and (via _dashboard_eligible) qualitative claims."""
+    return sorted(
+        {
+            c.attribute
+            for c in claims
+            if c.attribute
+            and c.attribute not in (OPERATING_METRIC, CORE_UNMAPPED)
+            and _dashboard_eligible(c)
+        }
+    )
+
+
+def _dashboard_entity_counts(claims: list[Claim]) -> dict[str, int]:
+    """Entity fact-counts for the dashboard's grouping. Excludes qualitative
+    claims via _dashboard_eligible (see there for why)."""
+    counts: dict[str, int] = {}
+    for c in claims:
+        if c.entity and _dashboard_eligible(c):
+            counts[c.entity] = counts.get(c.entity, 0) + 1
+    return counts
+
+
 def _canonicalize_quantitative_claims(
     tier_claims: list[tuple[str, list[Claim]]], flag_log: FlagLog
 ) -> None:
@@ -742,6 +779,18 @@ def extract_claims(
             skipped_pages.extend(complete_failed)
             tier_claims.append(("complete", complete_claims))
         if qualitative:
+            # Runs AFTER the prose pass, not concurrently with it, even though the
+            # qualitative extractor depends only on `blocks` (never on the prose
+            # claims, unlike `complete`). Each tier fans out `workers`-wide
+            # (EXTRACT_WORKERS); running two pools at once would put 2*workers
+            # Anthropic calls in flight, past the width that env is set to for the
+            # account's rate-limit headroom -- on a concurrency:1 worker that trades
+            # wall-clock for 429 churn, not real throughput. The added per-prose-
+            # page pass is bounded and absorbed by the raised job.timeout
+            # (worker._normalize_job_policy). A single pool covering both extractors
+            # would cut the wall-clock without raising peak concurrency, but it
+            # entangles the per-tier failure accounting each tier keeps here (its own
+            # skipped_pages tier), so it's left as a separate optimization.
             qualitative_claims, qualitative_failed = _prose_claims(
                 "qualitative",
                 prose_pages,
@@ -818,17 +867,8 @@ def extract_claims(
     structure: DashboardStructure | None = None
     if dashboard:
         try:
-            entity_counts: dict[str, int] = {}
-            for c in claims:
-                if c.entity:
-                    entity_counts[c.entity] = entity_counts.get(c.entity, 0) + 1
-            metrics_present = sorted(
-                {
-                    c.attribute
-                    for c in claims
-                    if c.attribute and c.attribute not in (OPERATING_METRIC, CORE_UNMAPPED)
-                }
-            )
+            entity_counts = _dashboard_entity_counts(claims)
+            metrics_present = _dashboard_metrics_present(claims)
             structure = organize_claims(entity_counts, metrics_present, company=entity)
         except Exception as exc:  # noqa: BLE001 -- best-effort; the dashboard degrades gracefully
             print(

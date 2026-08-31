@@ -196,6 +196,9 @@ async def test_process_document_writes_pointer_and_supplies_run_id(monkeypatch) 
     # attributes, and claim_type to work with -- a table-only run emits zero
     # edges by construction (extract_service.py:376,415).
     assert call["prose"] is True
+    # The qualitative assertion tier is on in the deal flow (market_definition,
+    # competitive_position, ... -> the Market tab and other qualitative surfaces).
+    assert call["qualitative"] is True
     assert call["canonicalize_attributes"] is True
     # extract_claims requires run_id/correlation_id; process_document supplies
     # both (fallback here, since _CTX carries no job to take a key from).
@@ -247,7 +250,7 @@ async def test_normalize_job_policy_gives_process_document_its_own_numbers() -> 
     job = _StubJob()
     await worker._normalize_job_policy(ctx=cast(Context, {"job": job}))
 
-    assert job.timeout == 3600
+    assert job.timeout == 7200  # 2h: qualitative adds a second per-prose-page pass
     assert job.retries == 1  # bounded: extract_claims hits the paid Anthropic API
     assert job.ttl == 86400
     assert job.updated is True
