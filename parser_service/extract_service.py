@@ -68,9 +68,17 @@ class ProseCredentialMissing(RuntimeError):
     argparse SystemExit, the HTTP endpoint maps it to a 503."""
 
 
+def _prose_pages(pages: list[PageIndex], blocks) -> list[PageIndex]:
+    """The pages that carry extractable prose -- the shared input to every prose
+    tier. Computed once per document in extract_claims and threaded through, so the
+    per-page block scan is not repeated for the numeric pass and the qualitative
+    pass (both fan out over the same set)."""
+    return [p for p in pages if prose_text(blocks_on_page(blocks, p.page), p).strip()]
+
+
 def _prose_claims(
     kind: str,
-    pages: list[PageIndex],
+    with_prose: list[PageIndex],
     blocks,
     *,
     entity: str,
@@ -78,14 +86,16 @@ def _prose_claims(
     flag_log: FlagLog,
     workers: int,
 ) -> tuple[list[Claim], list[SkippedPage]]:
-    """Run one prose tier over every page that has prose, concurrently.
+    """Run one prose tier over the given prose pages, concurrently.
 
-    `kind` selects the extractor: "prose" for the numeric pass, "qualitative"
-    for the assertion pass. A page whose model call fails is reported on
-    stderr AND returned as a SkippedPage(page, tier, reason) -- a partial
-    result that names its gaps is more useful than none, and both entry points
-    need that name: the CLI caller can re-run it, and an HTTP caller has no
-    stderr to read at all (see extract_claims' `skipped_pages`).
+    `with_prose` is the already-filtered list of prose-bearing pages (see
+    _prose_pages), so the block scan that selects them happens once per document
+    rather than once per tier. `kind` selects the extractor: "prose" for the
+    numeric pass, "qualitative" for the assertion pass. A page whose model call
+    fails is reported on stderr AND returned as a SkippedPage(page, tier, reason)
+    -- a partial result that names its gaps is more useful than none, and both
+    entry points need that name: the CLI caller can re-run it, and an HTTP caller
+    has no stderr to read at all (see extract_claims' `skipped_pages`).
     """
     extractor = claims_from_prose if kind == "prose" else assertions_from_prose
 
@@ -98,7 +108,6 @@ def _prose_claims(
             flag_log=flag_log,
         )
 
-    with_prose = [p for p in pages if prose_text(blocks_on_page(blocks, p.page), p).strip()]
     claims: list[Claim] = []
     failed: list[tuple[int, str]] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -249,33 +258,39 @@ _CANONICALIZABLE_TIERS = frozenset({"table", "prose", "complete"})
 _NOT_CANONICALIZABLE_VALUE_TYPES = frozenset({"text", "date"})
 
 
+def _dashboard_eligible(claim: Claim) -> bool:
+    """Whether a claim counts toward the dashboard aggregation. Qualitative
+    assertions are excluded from BOTH the metric_order and the entity grouping:
+    their attribute is an open noun phrase (never canonicalized, see
+    _CANONICALIZABLE_TIERS) that would leak verbatim into metric_order, and their
+    entities are open free text (markets, competitors, named third parties) that
+    would let a prose-heavy tier EVICT real financial entities from the
+    count-ranked, _MAX_ENTITIES-capped grouping. One predicate for both call sites
+    so a future exclusion rule can't be applied to only one -- which would let the
+    leak reappear in just one of metric_order / entity grouping."""
+    return claim.claim_kind != "qualitative"
+
+
 def _dashboard_metrics_present(claims: list[Claim]) -> list[str]:
     """Distinct metric attributes for the dashboard's metric_order. Excludes the
-    catch-all buckets AND qualitative claims: a qualitative assertion's attribute
-    is an open noun phrase that is never canonicalized (see _CANONICALIZABLE_TIERS)
-    and would otherwise leak verbatim into metric_order and the inspector's
-    metrics_present."""
+    catch-all buckets and (via _dashboard_eligible) qualitative claims."""
     return sorted(
         {
             c.attribute
             for c in claims
             if c.attribute
             and c.attribute not in (OPERATING_METRIC, CORE_UNMAPPED)
-            and c.claim_kind != "qualitative"
+            and _dashboard_eligible(c)
         }
     )
 
 
 def _dashboard_entity_counts(claims: list[Claim]) -> dict[str, int]:
     """Entity fact-counts for the dashboard's grouping. Excludes qualitative
-    claims for the same reason _dashboard_metrics_present does: their entities are
-    open free text (markets, competitors, named third parties), and
-    organize_claims ranks entities by count and caps at _MAX_ENTITIES, so counting
-    them would let a prose-heavy tier EVICT real financial entities (segments,
-    business units, properties) from the grouping rather than merely pad it."""
+    claims via _dashboard_eligible (see there for why)."""
     counts: dict[str, int] = {}
     for c in claims:
-        if c.entity and c.claim_kind != "qualitative":
+        if c.entity and _dashboard_eligible(c):
             counts[c.entity] = counts.get(c.entity, 0) + 1
     return counts
 
@@ -683,9 +698,12 @@ def extract_claims(
 
     if want_prose:
         blocks = extract_text_blocks(result.document, result.pages)
+        # Select the prose-bearing pages once; the numeric and qualitative tiers
+        # both reuse this instead of re-scanning the blocks per tier.
+        prose_pages = _prose_pages(result.pages, blocks)
         prose_claims, prose_failed = _prose_claims(
             "prose",
-            result.pages,
+            prose_pages,
             blocks,
             entity=entity,
             file=file,
@@ -710,21 +728,19 @@ def extract_claims(
         if qualitative:
             # Runs AFTER the prose pass, not concurrently with it, even though the
             # qualitative extractor depends only on `blocks` (never on the prose
-            # claims, unlike `complete`). The tiers each fan out `workers`-wide;
-            # running two pools at once would put 2*workers Anthropic calls in
-            # flight, past the rate-limit headroom EXTRACT_WORKERS is calibrated to
-            # (the same headroom llm_client's widened retry budget exists to
-            # protect) -- on a concurrency:1 worker that trades wall-clock for 429
-            # churn, not real throughput. The added per-prose-page pass is bounded
-            # and absorbed by the raised job.timeout (worker._normalize_job_policy).
-            # A single pool covering both extractors would cut the wall-clock
-            # without raising peak concurrency, but it entangles the per-tier
-            # failure accounting each tier keeps here (its own skipped_pages tier,
-            # and prose alone driving the systemic-loss escalation denominator), so
-            # it's left as a separate optimization rather than folded in here.
+            # claims, unlike `complete`). Each tier fans out `workers`-wide
+            # (EXTRACT_WORKERS); running two pools at once would put 2*workers
+            # Anthropic calls in flight, past the width that env is set to for the
+            # account's rate-limit headroom -- on a concurrency:1 worker that trades
+            # wall-clock for 429 churn, not real throughput. The added per-prose-
+            # page pass is bounded and absorbed by the raised job.timeout
+            # (worker._normalize_job_policy). A single pool covering both extractors
+            # would cut the wall-clock without raising peak concurrency, but it
+            # entangles the per-tier failure accounting each tier keeps here (its own
+            # skipped_pages tier), so it's left as a separate optimization.
             qualitative_claims, qualitative_failed = _prose_claims(
                 "qualitative",
-                result.pages,
+                prose_pages,
                 blocks,
                 entity=entity,
                 file=file,
