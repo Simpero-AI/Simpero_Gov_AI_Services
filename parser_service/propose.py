@@ -55,7 +55,7 @@ from .emit import (
     emit_pdf_claim,
     gate_canonical_attribute,
 )
-from .llm_client import make_client, parse_with_retry
+from .llm_client import is_grammar_timeout, make_client, parse_with_retry
 from .resolver import contains_flexible, find_exact_span
 from .scale import ValueType, has_parseable_magnitude, holds_one_number
 from .schemas import PageIndex, TextBlockRecord
@@ -760,17 +760,32 @@ def propose_attribute_mappings(
                 what="attribute mapping",
             )
         except (ValidationError, anthropic.APIError) as exc:
-            # A batch that fails on a genuine transient -- a malformed body the
-            # retry could not fix (ValidationError) or an SDK error the client's
-            # retries exhausted (grammar-400, 429, 5xx: the anthropic.APIError
-            # family) -- is skipped, not raised: its labels are simply absent from
-            # the result, so canonicalize_attributes gates each to OPERATING_METRIC
-            # with attribute_unmapped set (an OMITTED label -- kept distinct on
-            # purpose from the model's explicit "financial but unplaceable"
-            # core_unmapped answer, SIM-384), and one bad batch loses only its own
-            # labels, not every batch's already-computed mappings. A programming bug
-            # (TypeError, bad kwarg) is NOT in that set and still propagates loudly,
-            # rather than being silently defaulted to operating_metric.
+            # A client/config error is NOT per-batch transient loss and must not be
+            # silently defaulted to the catch-all: a bad or revoked credential
+            # (401/403) or a genuinely invalid request (a non-grammar 4xx -- a real
+            # schema bug, not the grammar-compilation 400 parse_with_retry already
+            # retries) fails EVERY batch identically. Let it propagate; it then
+            # surfaces as one document-level attribute_mapping SkippedPage (see
+            # _canonicalize_quantitative_claims) instead of N indistinguishable
+            # per-batch WARNINGs -- exactly the silent partial-extraction failure
+            # this PR is otherwise making loud.
+            if (
+                isinstance(exc, anthropic.APIStatusError)
+                and exc.status_code < 500
+                and exc.status_code != 429
+                and not is_grammar_timeout(exc)
+            ):
+                raise
+            # A genuine transient the retry could not clear -- a malformed body
+            # (ValidationError), an exhausted grammar-400, a 429, a 5xx, or a
+            # connection/timeout -- skips only this batch: its labels are simply
+            # absent from the result, so canonicalize_attributes gates each to
+            # OPERATING_METRIC with attribute_unmapped set (an OMITTED label -- kept
+            # distinct on purpose from the model's explicit "financial but
+            # unplaceable" core_unmapped answer, SIM-384), and one bad batch loses
+            # only its own labels, not every batch's already-computed mappings. A
+            # programming bug (TypeError, bad kwarg) is not in that set and still
+            # propagates loudly.
             logger.warning(
                 "attribute mapping: a batch of %d labels failed (%s); skipping it",
                 len(chunk),

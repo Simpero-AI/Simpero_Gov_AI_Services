@@ -30,9 +30,13 @@ def test_make_client_widens_the_retry_and_read_budget_but_keeps_connect_fast(mon
     # soak up rate-limit pressure under the fan-out.
     assert captured["max_retries"] == llm_client._MAX_RETRIES
     assert captured["max_retries"] > 2
-    # Read widened, connect kept fast so a dead endpoint fails quick, not in ~10 min.
+    # Only `read` gets the long budget (the model's generation time). connect,
+    # write, and pool stay short so a dead endpoint, a stalled upload, or a wait for
+    # a pooled connection fails fast (and the SDK retries), not in ~10 min.
     assert captured["timeout"].read == llm_client._TIMEOUT_S
     assert captured["timeout"].connect == 5.0
+    assert captured["timeout"].write == 30.0
+    assert captured["timeout"].pool == 10.0
 
 
 def test_retry_and_timeout_budgets_are_env_tunable(monkeypatch) -> None:

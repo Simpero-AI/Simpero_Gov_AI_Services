@@ -1156,8 +1156,9 @@ def test_propose_attribute_mappings_drops_an_out_of_range_index() -> None:
 
 
 def test_a_batch_api_error_is_skipped_not_raised() -> None:
-    # A genuine transient the SDK retries exhausted (anthropic.APIError family) is
-    # caught: the batch's labels are simply absent, no exception escapes the run.
+    # A genuine transient the SDK retries exhausted (here a connection error; 429s
+    # and 5xx behave the same) is caught: the batch's labels are simply absent, no
+    # exception escapes the run.
     request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
 
     def _raise_api_error(**_k):
@@ -1165,6 +1166,24 @@ def test_a_batch_api_error_is_skipped_not_raised() -> None:
 
     client = SimpleNamespace(messages=SimpleNamespace(parse=_raise_api_error))
     assert propose_attribute_mappings(["Revenue | 2019F"], client=client) == {}
+
+
+def test_a_config_error_propagates_rather_than_being_swallowed_per_batch() -> None:
+    # A revoked/expired credential (401) or a genuinely invalid request (a
+    # non-grammar 4xx) is a deploy/config problem that fails every batch
+    # identically -- it must propagate (surfacing as one document-level
+    # attribute_mapping SkippedPage), not be silently defaulted to the catch-all
+    # like a transient. A 429, by contrast, stays a transient and is skipped.
+    response = httpx.Response(
+        401, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+
+    def _raise_auth(**_k):
+        raise anthropic.AuthenticationError("invalid x-api-key", response=response, body=None)
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_raise_auth))
+    with pytest.raises(anthropic.AuthenticationError):
+        propose_attribute_mappings(["Revenue | 2019F"], client=client)
 
 
 def test_a_programming_bug_propagates_rather_than_being_swallowed() -> None:

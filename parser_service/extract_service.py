@@ -125,6 +125,8 @@ def _prose_claims(
     entry points need that name: the CLI caller can re-run it, and an HTTP caller
     has no stderr to read at all (see extract_claims' `skipped_pages`).
     """
+    if not with_prose:
+        return [], []  # prose-less document -- nothing to fan out, no client needed
     extractor = claims_from_prose if kind == "prose" else assertions_from_prose
     # One client shared across the fan-out, not one per page: a 16-wide burst
     # otherwise spins up 16 connection pools instead of reusing keep-alive
@@ -218,6 +220,8 @@ def _completeness_claims(
     misses_by_page: dict[int, list[NumberMiss]] = defaultdict(list)
     for miss in coverage.gate1_misses:
         misses_by_page[miss.page].append(miss)
+    if not misses_by_page:
+        return [], []  # every number already covered -- no recovery calls, no client needed
     pages_by_no = {p.page: p for p in pages}
     client = make_client()  # shared across the fan-out; see _prose_claims
 

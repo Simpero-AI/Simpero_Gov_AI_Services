@@ -48,13 +48,17 @@ def make_client():
     import anthropic
     import httpx
 
-    # httpx.Timeout, not a bare float: a float sets every phase (connect/read/
-    # write/pool) to _TIMEOUT_S, collapsing the SDK's 5s connect timeout to the
-    # full read budget -- a hard-down endpoint would then hang ~10 min per attempt
-    # before the retry/backoff could react. Widen only the read; keep connect fast.
+    # httpx.Timeout, not a bare float: a bare float sets EVERY phase (connect/read/
+    # write/pool) to _TIMEOUT_S, so a hard-down endpoint, a stalled request-body
+    # upload, or a wait for a free pooled connection would each hang the full read
+    # budget (~10 min) per attempt before the retry/backoff could react. Only
+    # `read` needs that budget -- it is the model's generation time; connect,
+    # write, and pool stay short so those failures react fast and the client's
+    # retries (max_retries above) kick in. `read` is left unset so it inherits the
+    # _TIMEOUT_S positional default.
     return anthropic.Anthropic(
         max_retries=_MAX_RETRIES,
-        timeout=httpx.Timeout(_TIMEOUT_S, connect=5.0),
+        timeout=httpx.Timeout(_TIMEOUT_S, connect=5.0, write=30.0, pool=10.0),
     )
 
 
