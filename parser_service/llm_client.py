@@ -41,8 +41,10 @@ _GRAMMAR_BACKOFF_S = 2.0
 
 
 def make_client():
-    """A configured anthropic.Anthropic. `anthropic` is imported lazily (kept out
-    of module import cost) exactly as the call sites this replaces did."""
+    """A configured anthropic.Anthropic with the widened retry/timeout budget the
+    fan-out needs. The `import anthropic` stays local for tidiness, not to save
+    import cost -- propose.py, imported by every caller that reaches here, now
+    imports anthropic at module scope, so it is already loaded by this point."""
     import anthropic
     import httpx
 

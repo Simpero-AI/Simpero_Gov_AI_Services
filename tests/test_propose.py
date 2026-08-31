@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import anthropic
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -1151,6 +1153,29 @@ def test_propose_attribute_mappings_drops_an_out_of_range_index() -> None:
     )
     result = propose_attribute_mappings(["Revenue | 2019F"], client=client)
     assert result == {}
+
+
+def test_a_batch_api_error_is_skipped_not_raised() -> None:
+    # A genuine transient the SDK retries exhausted (anthropic.APIError family) is
+    # caught: the batch's labels are simply absent, no exception escapes the run.
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+    def _raise_api_error(**_k):
+        raise anthropic.APIConnectionError(request=request)
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_raise_api_error))
+    assert propose_attribute_mappings(["Revenue | 2019F"], client=client) == {}
+
+
+def test_a_programming_bug_propagates_rather_than_being_swallowed() -> None:
+    # A code defect (TypeError) is NOT a transient -- the narrowed except must let
+    # it propagate loudly, not silently default the batch to operating_metric.
+    def _raise_type_error(**_k):
+        raise TypeError("bad kwarg")
+
+    client = SimpleNamespace(messages=SimpleNamespace(parse=_raise_type_error))
+    with pytest.raises(TypeError):
+        propose_attribute_mappings(["Revenue | 2019F"], client=client)
 
 
 def test_canonicalize_attributes_gates_a_literal_core_answer_through_clean() -> None:

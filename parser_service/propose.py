@@ -764,11 +764,13 @@ def propose_attribute_mappings(
             # retry could not fix (ValidationError) or an SDK error the client's
             # retries exhausted (grammar-400, 429, 5xx: the anthropic.APIError
             # family) -- is skipped, not raised: its labels are simply absent from
-            # the result, so canonicalize_attributes defaults them to core_unmapped,
-            # and one bad batch loses only its own labels, not every batch's
-            # already-computed mappings. A programming bug (TypeError, bad kwarg)
-            # is NOT in that set and still propagates loudly, rather than being
-            # silently defaulted to core_unmapped.
+            # the result, so canonicalize_attributes gates each to OPERATING_METRIC
+            # with attribute_unmapped set (an OMITTED label -- kept distinct on
+            # purpose from the model's explicit "financial but unplaceable"
+            # core_unmapped answer, SIM-384), and one bad batch loses only its own
+            # labels, not every batch's already-computed mappings. A programming bug
+            # (TypeError, bad kwarg) is NOT in that set and still propagates loudly,
+            # rather than being silently defaulted to operating_metric.
             logger.warning(
                 "attribute mapping: a batch of %d labels failed (%s); skipping it",
                 len(chunk),

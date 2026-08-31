@@ -34,6 +34,44 @@ class _StubClient:
         return SimpleNamespace(parsed_output=self._assessment)
 
 
+class _GrammarTimeout(Exception):
+    """A transient server-side grammar-compilation 400 (see is_grammar_timeout)."""
+
+    status_code = 400
+
+    def __init__(self) -> None:
+        super().__init__("grammar compilation timed out")
+
+
+class _FlakyGrammarClient:
+    """Raises a transient grammar-400 on the first parse, then succeeds."""
+
+    def __init__(self, assessment: CriteriaAssessment) -> None:
+        self._assessment = assessment
+        self.calls = 0
+        self.messages = SimpleNamespace(parse=self._parse)
+
+    def _parse(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise _GrammarTimeout()
+        return SimpleNamespace(parsed_output=self._assessment)
+
+
+def test_a_transient_grammar_400_is_retried_not_dropped(monkeypatch) -> None:
+    # Regression: assess_criteria must route through parse_with_retry so a transient
+    # grammar-compilation 400 is retried rather than propagating and silently
+    # dropping the stage (same wiring as classify_deal_profile).
+    monkeypatch.setattr("parser_service.llm_client._GRAMMAR_BACKOFF_S", 0.0)
+    finding = CriterionFinding(
+        rule_id="gs_01", verdict="Y", evidence="The founders are full-time on the business."
+    )
+    client = _FlakyGrammarClient(CriteriaAssessment(findings=[finding]))
+    out = assess_criteria(_DOC, entity="Acme", criteria=_CRITERIA, client=client)
+    assert client.calls == 2  # first raised the grammar-400; the retry succeeded
+    assert out["gs_01"]["verdict"] == "Y"
+
+
 def test_grounded_verdict_is_honored() -> None:
     client = _StubClient(
         [
