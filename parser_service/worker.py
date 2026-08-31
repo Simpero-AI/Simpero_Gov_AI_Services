@@ -198,6 +198,13 @@ async def process_document(
             # extract_service.py), so they cannot regress the table claims that
             # already ingest today.
             prose=True,
+            # The qualitative assertion tier: grounded, cited claims the numeric
+            # tiers can't carry -- market_definition, competitive_position,
+            # related_party, risk_or_dependency, ... (assertion_class). It feeds
+            # the Market tab and other qualitative surfaces. One Anthropic call
+            # per prose page (same credential/fan-out as prose) and fails soft
+            # per page, so it cannot regress the claims that already ingest.
+            qualitative=True,
             canonicalize_attributes=True,
             # Path B (mandate-fit screening): classify the target's sector + HQ
             # from the parsed prose so the backend can map them onto the org's
@@ -274,7 +281,13 @@ async def _normalize_job_policy(ctx: Context) -> None:
         # points, not measured -- revisit with real latency data. retries=1 (not
         # 2): extract_claims hits the paid, non-deterministic Anthropic API, so
         # bound whole-job re-runs.
-        job.timeout = 3600
+        #
+        # 7200s (2h), up from 3600: the qualitative tier adds a second per-prose-
+        # page pass that runs AFTER the numeric prose pass (extract_service), so
+        # a large CIM/S-1's Anthropic-bound wall-clock roughly doubles. With
+        # retries=1 a timeout kill re-runs the whole extraction, so the ceiling
+        # is set with headroom rather than risking that on a big document.
+        job.timeout = 7200
         job.retries = 1
     else:
         # parse_document: docling only, CPU-bound.
@@ -324,5 +337,13 @@ settings: SettingsDict = {
     "functions": [parse_document, process_document],
     "before_process": _normalize_job_policy,
     "after_process": _recycle_worker,
+    # One document at a time per worker: process_document already fans out
+    # EXTRACT_WORKERS-wide Anthropic calls internally, so a second concurrent
+    # document would multiply the in-flight burst past the account's rate-limit
+    # headroom. The tradeoff is queue serialization -- a long parse (now longer
+    # with the qualitative tier's added per-prose-page pass) holds the slot and
+    # delays queued jobs; scale that out by running more worker processes, not by
+    # raising this. The raised process_document timeout (_normalize_job_policy)
+    # bounds how long any one document can hold it.
     "concurrency": 1,
 }
