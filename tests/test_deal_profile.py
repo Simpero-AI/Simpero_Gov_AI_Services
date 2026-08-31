@@ -33,6 +33,42 @@ class _StubClient:
         return SimpleNamespace(parsed_output=self._profile)
 
 
+class _GrammarTimeout(Exception):
+    """A transient server-side grammar-compilation 400 (see is_grammar_timeout)."""
+
+    status_code = 400
+
+    def __init__(self) -> None:
+        super().__init__("grammar compilation timed out")
+
+
+class _FlakyGrammarClient:
+    """Raises a transient grammar-400 on the first parse, then succeeds."""
+
+    def __init__(self, profile: DealProfile) -> None:
+        self._profile = profile
+        self.calls = 0
+        self.messages = SimpleNamespace(parse=self._parse)
+
+    def _parse(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise _GrammarTimeout()
+        return SimpleNamespace(parsed_output=self._profile)
+
+
+def test_a_transient_grammar_400_is_retried_not_dropped(monkeypatch) -> None:
+    # Regression: classify_deal_profile must route through parse_with_retry so a
+    # transient grammar-compilation 400 is retried rather than propagating (and
+    # being silently swallowed by extract_claims, dropping the whole stage).
+    monkeypatch.setattr("parser_service.llm_client._GRAMMAR_BACKOFF_S", 0.0)
+    client = _FlakyGrammarClient(DealProfile(sector="fintech", hq_geography="London, UK"))
+    out = classify_deal_profile(["Company overview."], entity="Acme", client=client)
+    assert client.calls == 2  # first raised the grammar-400; the retry succeeded
+    assert out.sector == "fintech"
+    assert out.hq_geography == "London, UK"
+
+
 def test_passes_through_stated_sector_and_hq() -> None:
     profile = DealProfile(
         sector="enterprise SaaS",

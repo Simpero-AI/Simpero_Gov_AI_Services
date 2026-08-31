@@ -744,8 +744,8 @@ def extract_claims(
             _canonicalize_quantitative_claims(tier_claims, flag_log)
         except Exception as exc:  # noqa: BLE001 -- one bad API call must not abort the document
             # Document-wide, not page-scoped (one batched call over every
-            # distinct label) -- page=0 is the same sentinel propose.py's
-            # _parse_with_retry already uses for this call's retries. Claims
+            # distinct label) -- page=0 is the same sentinel llm_client's
+            # parse_with_retry already uses for this call's retries. Claims
             # already emitted survive with their raw (pre-canonicalization)
             # attribute rather than being discarded.
             skipped_pages.append(

@@ -44,7 +44,8 @@ import os
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+import anthropic
+from pydantic import BaseModel, Field, ValidationError
 
 from .emit import (
     CORE_ATTRIBUTES,
@@ -758,12 +759,16 @@ def propose_attribute_mappings(
                 page_no=0,
                 what="attribute mapping",
             )
-        except Exception as exc:  # noqa: BLE001 -- one bad batch must not sink the rest
-            # A batch that fails (malformed body twice, or a transient the retry
-            # exhausted) is skipped, not raised: its labels are simply absent from
-            # the result, so canonicalize_attributes defaults them to core_unmapped
-            # -- one bad batch loses only its own labels, not every batch's
-            # already-computed mappings.
+        except (ValidationError, anthropic.APIError) as exc:
+            # A batch that fails on a genuine transient -- a malformed body the
+            # retry could not fix (ValidationError) or an SDK error the client's
+            # retries exhausted (grammar-400, 429, 5xx: the anthropic.APIError
+            # family) -- is skipped, not raised: its labels are simply absent from
+            # the result, so canonicalize_attributes defaults them to core_unmapped,
+            # and one bad batch loses only its own labels, not every batch's
+            # already-computed mappings. A programming bug (TypeError, bad kwarg)
+            # is NOT in that set and still propagates loudly, rather than being
+            # silently defaulted to core_unmapped.
             logger.warning(
                 "attribute mapping: a batch of %d labels failed (%s); skipping it",
                 len(chunk),

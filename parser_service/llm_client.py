@@ -73,11 +73,11 @@ def is_grammar_timeout(exc: Exception) -> bool:
     transient intent; a non-400 that merely mentions grammar is not ours."""
     if "grammar" not in str(exc).lower():
         return False
-    if getattr(exc, "status_code", None) == 400:
-        return True
-    import anthropic
-
-    return isinstance(exc, anthropic.BadRequestError)
+    # A BadRequestError always carries status_code == 400 (the SDK sets it in
+    # APIStatusError.__init__), and getattr also picks up a class-attribute
+    # status_code on a hand-rolled/mocked error, so this one check covers both --
+    # a separate isinstance(BadRequestError) branch would be unreachable.
+    return getattr(exc, "status_code", None) == 400
 
 
 def parse_with_retry(call, *, page_no: int, what: str):

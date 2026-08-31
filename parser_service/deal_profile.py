@@ -29,9 +29,9 @@ import logging
 import unicodedata
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
-from .llm_client import make_client
+from .llm_client import make_client, parse_with_retry
 from .propose import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -183,11 +183,11 @@ def classify_deal_profile(
             output_format=DealProfile,
         )
 
-    try:
-        response = call()
-    except ValidationError:
-        logger.warning("deal_profile: unparseable body for %s; retrying once", entity)
-        response = call()
+    # Route through the shared retry so the grammar-compilation 400 this PR
+    # narrows is retried here too -- messages.parse(output_format=...) is the
+    # exact structured-output path that triggers it. page_no=0 is the sentinel
+    # for a whole-document (non per-page) call.
+    response = parse_with_retry(call, page_no=0, what="deal_profile")
 
     parsed = response.parsed_output
     if parsed is None:
