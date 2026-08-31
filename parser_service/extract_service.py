@@ -266,6 +266,20 @@ def _dashboard_metrics_present(claims: list[Claim]) -> list[str]:
     )
 
 
+def _dashboard_entity_counts(claims: list[Claim]) -> dict[str, int]:
+    """Entity fact-counts for the dashboard's grouping. Excludes qualitative
+    claims for the same reason _dashboard_metrics_present does: their entities are
+    open free text (markets, competitors, named third parties), and
+    organize_claims ranks entities by count and caps at _MAX_ENTITIES, so counting
+    them would let a prose-heavy tier EVICT real financial entities (segments,
+    business units, properties) from the grouping rather than merely pad it."""
+    counts: dict[str, int] = {}
+    for c in claims:
+        if c.entity and c.claim_kind != "qualitative":
+            counts[c.entity] = counts.get(c.entity, 0) + 1
+    return counts
+
+
 def _canonicalize_quantitative_claims(
     tier_claims: list[tuple[str, list[Claim]]], flag_log: FlagLog
 ) -> None:
@@ -770,10 +784,7 @@ def extract_claims(
     structure: DashboardStructure | None = None
     if dashboard:
         try:
-            entity_counts: dict[str, int] = {}
-            for c in claims:
-                if c.entity:
-                    entity_counts[c.entity] = entity_counts.get(c.entity, 0) + 1
+            entity_counts = _dashboard_entity_counts(claims)
             metrics_present = _dashboard_metrics_present(claims)
             structure = organize_claims(entity_counts, metrics_present, company=entity)
         except Exception as exc:  # noqa: BLE001 -- best-effort; the dashboard degrades gracefully

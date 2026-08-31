@@ -400,11 +400,12 @@ def test_cli_and_direct_call_produce_an_identical_payload_for_the_same_input(
 def _dashboard_claim(
     attribute: str,
     *,
+    entity: str = "ACME",
     claim_kind: Literal["quantitative", "qualitative"] | None = None,
     value_type: ValueType = "currency",
 ) -> extract_service.Claim:
     return extract_service.Claim(
-        entity="ACME",
+        entity=entity,
         attribute=attribute,
         value=ClaimValue(raw="x", normalized=None, unit=None, value_type=value_type),
         location=PdfLocation(file="cim.pdf", page=1, char_start=0, char_end=1),
@@ -430,3 +431,24 @@ def test_dashboard_metrics_present_excludes_catchall_and_qualitative() -> None:
     ]
 
     assert extract_service._dashboard_metrics_present(claims) == ["ebitda", "revenue"]
+
+
+def test_dashboard_entity_counts_excludes_qualitative_entities() -> None:
+    # organize_claims ranks entities by fact count and caps the list, so a
+    # qualitative tier's free-text entities (a market, a competitor) must not be
+    # counted -- they would compete for slots and evict real financial entities.
+    claims = [
+        _dashboard_claim("revenue", entity="AcmeCo"),
+        _dashboard_claim("ebitda", entity="AcmeCo"),
+        _dashboard_claim(
+            "outsources cleaning",
+            entity="A Competitor",
+            claim_kind="qualitative",
+            value_type="text",
+        ),
+        _dashboard_claim(
+            "target market note", entity="The Market", claim_kind="qualitative", value_type="text"
+        ),
+    ]
+
+    assert extract_service._dashboard_entity_counts(claims) == {"AcmeCo": 2}
