@@ -123,7 +123,7 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Validate claims + chunks JSON against shared schemas
-        run: uv run --with jsonschema pytest -q contracts/test_claims_contract.py contracts/test_chunks_contract.py
+        run: uv run --with jsonschema pytest -q contracts/test_claims_contract.py contracts/test_claims_payload_contract.py contracts/test_chunks_contract.py
 
   # ---------------------------------------------------------------------------
   # 5. IMAGE — build the deployable parse service.

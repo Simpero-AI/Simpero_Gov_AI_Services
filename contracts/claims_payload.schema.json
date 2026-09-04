@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simpero.ai/contracts/claims_payload.schema.json",
+  "title": "ClaimsPayload",
+  "description": "SIM-349: the envelope `extract_service.extract_claims` returns across the C3 seam -- both from `POST /extract` (parser_service/main.py, SIM-340/E5) and from the `scripts/emit_claims.py` CLI, which call the same function and return the same shape. `claims.schema.json` only ever formalized ONE claim row; this schema covers everything that wraps it -- run_id, sha256, source_file, the claims/edges arrays, flag_log, and skipped_pages -- so a wrapper-level drift (a renamed key, an unvalidated new field added the way flag_log and skipped_pages originally were) fails the contract test instead of shipping silently.\n\n`claims` and `edges` are validated by reference against claims.schema.json's own root schema and `$defs/edge` -- this file does not duplicate their shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "sha256",
+    "source_file",
+    "claims",
+    "edges",
+    "flag_log",
+    "skipped_pages"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "Identifies one parse run; shared by every flag_log entry from that run. FlagLog(run_id=...) generates one if the caller doesn't supply it."
+    },
+    "sha256": {
+      "type": "string",
+      "description": "Of the source document bytes, from parse_pdf_bytes."
+    },
+    "source_file": {
+      "type": ["string", "null"],
+      "description": "The real filename when the caller has one. Deliberately null, not \"\", when the caller has none -- extract_service.extract_claims keeps that distinguishable from an empty string on purpose (see its docstring); every claim's own location.file still gets a plain \"\" in that case, since a claim's file is debug-only and always a string."
+    },
+    "claims": {
+      "type": "array",
+      "description": "One row per Claim, each conforming to the C3 contract.",
+      "items": {
+        "$ref": "https://simpero.ai/contracts/claims.schema.json"
+      }
+    },
+    "edges": {
+      "type": "array",
+      "description": "SIM-341: within-page relationships the fan-in reducer found, sitting beside claims rather than inside any one claim row.",
+      "items": {
+        "$ref": "https://simpero.ai/contracts/claims.schema.json#/$defs/edge"
+      }
+    },
+    "flag_log": {
+      "type": "array",
+      "description": "Every flag raised anywhere in the run, run-level in addition to being attached to the fact/element it belongs to. Ships as FlagLog.to_json() -- FlagLogEntry.model_dump(exclude_none=True), so `detail` is simply absent when unset, never emitted as null.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "stage", "element_id", "flag_type"],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "description": "Matches the payload's top-level run_id."
+          },
+          "stage": {
+            "type": "string",
+            "description": "Which extraction stage raised the flag, e.g. a tier name or a sub-step within one."
+          },
+          "element_id": {
+            "type": "string",
+            "description": "The claim or table region the flag is about; not the backend's eventual claim id (see emit.element_id_for)."
+          },
+          "flag_type": {
+            "$ref": "https://simpero.ai/contracts/claims.schema.json#/properties/flags/items",
+            "description": "Reuses the same closed flag vocabulary a claim's own `flags` array draws from -- FlagLog.log raises ValueError for anything outside it before an entry is ever constructed."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Free-text elaboration; absent when the flag needs none."
+          }
+        }
+      }
+    },
+    "skipped_pages": {
+      "type": "array",
+      "description": "SIM-342: one entry per page a tier could not extract, sorted by (page, tier). Ships as SkippedPage.to_json().",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["page", "tier", "reason"],
+        "properties": {
+          "page": {
+            "type": "integer",
+            "description": "The PDF page index the tier was working on. 0 is the sentinel extract_service uses for a document-wide failure (attribute_mapping), not a real page."
+          },
+          "tier": {
+            "type": "string",
+            "$comment": "Closed to the tier names extract_service.py actually produces today. A new tier must be added here in the same change that adds it there -- this is not an independent vocabulary.",
+            "enum": ["tables", "prose", "complete", "qualitative", "attribute_mapping"]
+          },
+          "reason": {
+            "type": "string",
+            "description": "The caught exception, as f\"{type(exc).__name__}: {exc}\" -- an exception summary, not a fixed vocabulary."
+          }
+        }
+      }
+    }
+  }
+}
