@@ -38,9 +38,12 @@ flagged assumed_1x instead: an audible understatement in place of a silent
 overstatement, which is the trade this module makes everywhere else.
 
 This does not settle the general question. One page bearing two tables where
-only one carries a banner is still bled, and a per-share amount is currency that
-must never take an "(in millions)" header at all. "Is currency" and "takes the
-scale header" remain two questions with one answer between them.
+only one carries a banner is still bled. "Is currency" and "takes the scale
+header" remain two questions with one answer between them, except where a
+caption itself narrows that answer: "(in thousands, except per share data)"
+says its own multiplier does not reach a per-share row, and a caller that
+marks the value per_share gets that exception honored (SIM-386) instead of a
+silent 1000x. A caption with no such clause is not inferred to mean it.
 """
 
 import re
@@ -352,6 +355,55 @@ _SYMBOL_CURRENCIES: dict[str, str] = {
     "¥": "JPY",
 }
 
+# The currency a caption's trailing "of <word>" tail names, spelled out or as
+# an ISO code -- "(in thousands of U.S. dollars)" and "(in millions of EUR)"
+# both declare a real currency in that tail, matched by _SCALE_PHRASE_RE's
+# tail group but not by the outside/inside symbol slots.
+_TAIL_CURRENCY: dict[str, str] = {
+    "dollar": "USD",
+    "dollars": "USD",
+    "pound": "GBP",
+    "pounds": "GBP",
+    "euro": "EUR",
+    "euros": "EUR",
+    "yen": "JPY",
+    "usd": "USD",
+    "gbp": "GBP",
+    "eur": "EUR",
+    "cad": "CAD",
+    "aud": "AUD",
+    "nzd": "NZD",
+    "hkd": "HKD",
+}
+
+
+# Spellings that name a currency UNIT but not which country's -- the same
+# ambiguity a bare "$" carries. "pounds"/"euros"/"yen" are not here: each names
+# exactly one currency in practice.
+_AMBIGUOUS_TAIL_WORDS = frozenset({"dollar", "dollars"})
+
+
+def _tail_currency(word: str | None, *, us_qualified: bool = False) -> str | None:
+    """The currency a caption's trailing "of <word>" tail names, or None when it
+    names one that cannot be trusted.
+
+    Review ④: a bare "of dollars" returns None. It genuinely says the figures
+    are in dollars, but not WHICH dollar -- a Canadian or Australian CIM
+    captioned "(in thousands of dollars)" is as common as a US one, and reading
+    it as USD turns a known unknown into a silent, confident error. This is the
+    same call _mark_currency already makes for a bare "$"; the two must agree,
+    or the same ambiguity resolves differently depending on which spelling the
+    document happened to use. "U.S. dollars" and the explicit ISO codes are
+    unaffected.
+    """
+    if not word:
+        return None
+    lowered = word.lower()
+    if lowered in _AMBIGUOUS_TAIL_WORDS and not us_qualified:
+        return None
+    return _TAIL_CURRENCY.get(lowered)
+
+
 # "CAD (in Thousands)", "(in millions)", "($ in millions)", "(US$ in millions)".
 #
 # The currency may sit OUTSIDE the parens ("CAD (in Thousands)") or INSIDE them
@@ -398,7 +450,14 @@ _SCALE_PHRASE_RE = re.compile(
     r"(?i:(?P<word>thousands?|millions?|billions?))"
     r"\b"
     r"(?:\s*,?\s*(?i:except|unless|excluding)\b[^()]*"
-    r"|\s+of\s+(?:U\.?\s*S\.?\s*)?(?i:dollars?|pounds?|euros?|yen|USD|GBP|EUR|CAD|AUD|NZD|HKD)\b[^()]*)?"
+    # Review ④: the U.S. qualifier is now CAPTURED (usqual) instead of being an
+    # anonymous optional group. It was optional and outside the capture, so
+    # "(in thousands of dollars)" resolved to USD identically to "(in thousands
+    # of U.S. dollars)" -- a CAD/AUD/NZD CIM using the bare spelling was
+    # confidently mislabelled USD with no ambiguous_unit flag. See
+    # _tail_currency, which now refuses a bare "dollars".
+    r"|\s+of\s+(?P<usqual>U\.?\s*S\.?\s*)?"
+    r"(?i:(?P<tailcur>dollars?|pounds?|euros?|yen|USD|GBP|EUR|CAD|AUD|NZD|HKD))\b[^()]*)?"
     r"\s*\)"
 )
 
@@ -428,6 +487,69 @@ _ZEROS = r"'?000(?:'?[Ss])?"
 _PAREN_000_RE = re.compile(rf"\(\s*(?:(?P<sym>{_CURRENCY_MARK})\s*)?{_ZEROS}\s*\)")
 _BARE_000_RE = re.compile(rf"(?<![\d,.'])(?:(?P<sym>{_CURRENCY_MARK})\s*'?|')000(?:'?[Ss])?\b")
 
+# A currency mark immediately followed by a magnitude word or its
+# abbreviation, with no "(in ...)" wrapper at all -- how a column header
+# states it directly rather than in a caption sentence: "$m", "£m", "USDm",
+# "USD millions". A currency mark is REQUIRED, same guard as _BARE_000_RE,
+# so a bare "5m" (no currency) is not read as a magnitude header; the
+# lookbehind refuses a match preceded by a digit, comma, point or apostrophe
+# for the same reason -- an ordinary number must never be misread as one.
+#
+# "mm"/"bn" are tried before "m"/"b" in the alternation so the longer
+# abbreviation wins; the trailing \b then rejects a partial match against a
+# longer word ("m" cannot match the first letter of "million" and stop
+# there, because \b fails between the "m" and the "i" that follows).
+_MAGNITUDE_ABBREV_MULTIPLIERS: dict[str, float] = {
+    "k": 1_000.0,
+    "m": 1_000_000.0,
+    "mm": 1_000_000.0,
+    # Review ⑤: "mn" is the mirror of "bn" and just as common in CIM column
+    # headers ("USD mn", "£mn"). Without it those fell to assumed_1x -- flagged,
+    # so a recall gap rather than a wrong value, but a needless one.
+    "mn": 1_000_000.0,
+    "b": 1_000_000_000.0,
+    "bn": 1_000_000_000.0,
+}
+
+# Review ① (SIM-386): this pattern must NOT reuse _CURRENCY_MARK. That
+# alternation ends in an unbounded [A-Z]{3}, which here sits directly against a
+# one-letter magnitude, so any all-caps English word whose last four letters are
+# three-plus-{k,m,b} was read as "currency + magnitude":
+#
+#   "TERM LOAN"      -> sym="TER", word="M" -> x1e6, unit "TER"
+#   "LONG-TERM DEBT" / "RISK FACTORS" / "COMMON STOCK" / "BANK" / "FORM" /
+#   "WORK" / "TEAM", and mid-word ("PLATFORM" -> "FOR"+"M")
+#
+# and because `unit` then came back non-None, ambiguous_unit AND scale_assumed
+# were both suppressed while scale_invariant_holds still passed (450 x 1e6 ==
+# 450e6) -- a silent 10^6 overstatement with no flag anywhere. A GBP document
+# containing "LONG TERM DEBT" even had "TER" stamped on every bare-$ value as
+# its document-declared currency.
+#
+# So the mark here is a CLOSED set: real symbols, plus ISO codes we actually
+# know, and never a bare three-letter word. (?<![A-Za-z]) stops a match
+# starting mid-word; the trailing \b after the magnitude already stops the
+# other end.
+_ISO_CURRENCY_CODES = sorted(
+    set(_SYMBOL_CURRENCIES.values()) | set(_TAIL_CURRENCY.values()) | {"CHF", "SEK", "NOK", "DKK"},
+    reverse=True,
+)
+_STRICT_CURRENCY_MARK = "|".join(
+    [r"US\$", r"C\$", r"A\$", r"NZ\$", r"HK\$", r"\$", "£", "€", "¥", *_ISO_CURRENCY_CODES]
+)
+
+_BARE_MAGNITUDE_RE = re.compile(
+    rf"(?<![\d,.'])(?<![A-Za-z])(?P<sym>{_STRICT_CURRENCY_MARK})\s?"
+    r"(?i:(?P<word>k|mm|mn|bn|b|m|thousands?|millions?|billions?))\b"
+)
+
+
+def _bare_magnitude_multiplier(word: str) -> float:
+    lowered = word.lower()
+    if lowered in _MAGNITUDE_ABBREV_MULTIPLIERS:
+        return _MAGNITUDE_ABBREV_MULTIPLIERS[lowered]
+    return _scale_word_multiplier(word)
+
 
 def _mark_currency(mark: str | None) -> str | None:
     """The currency a mark names, or None when it names none that can be trusted.
@@ -445,11 +567,22 @@ def _mark_currency(mark: str | None) -> str | None:
 
 
 def _phrase_currency(match: re.Match[str]) -> str | None:
-    """The currency a "(in thousands)" phrase names, from either slot."""
+    """The currency a "(in thousands)" phrase names, from any of the three
+    slots a real caption can put it in: outside the parens ("CAD (in
+    Thousands)"), inside them ahead of "in" ("($ in millions)"), or in the
+    trailing "of <currency>" tail ("(in thousands of U.S. dollars)") --
+    matched by _SCALE_PHRASE_RE's tail group but previously never read, so
+    that caption fell through to an unresolved unit even though it names its
+    currency in plain words."""
     outside = match.group("currency")
     if outside:
         return outside
-    return _mark_currency(match.group("insym"))
+    inside = _mark_currency(match.group("insym"))
+    if inside:
+        return inside
+    return _tail_currency(
+        match.group("tailcur"), us_qualified=bool(match.groupdict().get("usqual"))
+    )
 
 
 _ScalePhraseMatch = tuple[int, int, float, str | None]
@@ -475,6 +608,15 @@ def _find_scale_phrases(text: str) -> list[_ScalePhraseMatch]:
             (m.start(), m.end(), 1_000.0, _mark_currency(m.group("sym")))
             for m in pattern.finditer(text)
         ]
+    matches += [
+        (
+            m.start(),
+            m.end(),
+            _bare_magnitude_multiplier(m.group("word")),
+            _mark_currency(m.group("sym")),
+        )
+        for m in _BARE_MAGNITUDE_RE.finditer(text)
+    ]
     # One declaration can match twice, because a parenthesised marker CONTAINS
     # the bare one: "(£'000s)" holds "£'000", and "(£ in thousands)" holds
     # nothing but would if the spellings overlapped further. Drop any span fully
@@ -536,6 +678,59 @@ def _column_header_scale(
     return None
 
 
+def document_declared_currency(pages: list[PageIndex]) -> str | None:
+    """The one currency this document actually declared, or None.
+
+    Scans every page's scale phrases for ones with a RESOLVED currency -- a
+    symbol like "£"/"€" or an ISO code, never a bare "$" (_mark_currency
+    already refuses to trust that one). A document that shows more than one
+    distinct resolved currency is genuinely multi-currency, and adopting
+    either for a bare-$ value elsewhere in it would be a guess dressed as a
+    read -- so this returns None for that document exactly as it does for one
+    with no resolved currency anywhere. Never fabricates USD.
+
+    Callers use a returned currency only to FILL a page/column bind's unit
+    when that bind's own phrase left it unresolved; it never changes a
+    multiplier or a scale_source.
+    """
+    found: set[str] = set()
+    for page in pages:
+        for _start, _end, _multiplier, currency in _find_scale_phrases(page.text):
+            if currency:
+                found.add(currency)
+    if len(found) == 1:
+        return next(iter(found))
+    return None
+
+
+# A scale caption's own trailing exception clause naming per-share figures --
+# "(in thousands, except per share data)" says so of itself. Matched against
+# the phrase's own scale_context, not inferred from the value: a bare "(in
+# thousands)" caption does not exempt a per-share row just because the row
+# happens to be one (see determine_scale's per_share parameter).
+#
+# Reviews ② and ③, both of which made the carve-out silently miss and leave a
+# 1000x-overstated EPS behind:
+#   ② the old (?i:...) scoped case-insensitivity to except|unless|excluding
+#      only, leaving `per[- ]share` case-SENSITIVE -- so it matched the
+#      lowercase rendering but not "(In Thousands, Except Per Share Data)",
+#      which is the standard EDGAR title-case form. re.IGNORECASE now covers
+#      the whole pattern; there is no [A-Z]{3} currency slot here to protect,
+#      which is the reason the narrow (?i:...) scoping exists elsewhere.
+#   ③ `per` had to sit adjacent to `share`, so the equally standard "except
+#      per common share data" / "per diluted share data" were refused. Up to
+#      two intervening words are now allowed -- enough for the real captions,
+#      still short enough that "per" and "share" stay one phrase.
+_PER_SHARE_EXCEPTION_RE = re.compile(
+    r"(?:except|unless|excluding)\b[^()]*?\bper(?:[- ]\w+){0,2}[- ]shares?\b",
+    re.IGNORECASE,
+)
+
+
+def _declares_per_share_exception(context: str) -> bool:
+    return bool(_PER_SHARE_EXCEPTION_RE.search(context))
+
+
 def _page_header_scale(page_text: str, before: int) -> tuple[float, str | None, str] | None:
     """The nearest scale phrase anywhere in `page_text` strictly before
     `before` (the value's char_start). "Nearest" because a later scale
@@ -563,6 +758,8 @@ def determine_scale(
     table: TableRecord | None = None,
     cell: TableCellRecord | None = None,
     page_header_ok: bool = True,
+    per_share: bool = False,
+    document_currency: str | None = None,
 ) -> ScaleResult:
     """Resolve one numeric claim's scale, per the module's resolution order.
 
@@ -589,6 +786,24 @@ def determine_scale(
     that the value is really money. It defaults True (prose and every existing
     caller unaffected); the table caller passes False for a value that typed
     currency only by default, so a page banner cannot silently scale it (SIM-323).
+
+    `per_share` says the value's own attribute/column is a per-share figure
+    (EPS, dividend per share, NAV per share...). It defaults False, so it never
+    changes existing behavior on its own -- it only matters combined with a
+    caption that ITSELF names a per-share exception ("...except per share
+    data)"): a per-share row under that caption declines the multiplier the
+    caption explicitly says does not apply to it, falling to a flagged
+    assumed_1x instead of a silent 1000x (SIM-386). A caption with no such
+    exception clause still applies, since nothing has told this function the
+    row is exempt -- inferring it from `per_share` alone is not this ticket's
+    claim.
+
+    `document_currency` (see document_declared_currency) fills a page/column
+    bind's unit when the bind's OWN phrase left it unresolved (a bare "$"),
+    provided the caller determined the whole document declares exactly one
+    currency somewhere. It never changes the multiplier or scale_source, and a
+    document with no resolvable currency anywhere leaves unit None exactly as
+    before (still flagged ambiguous_unit downstream).
     """
     if origin == "prose" and (table is not None or cell is not None):
         raise ValueError("origin='prose' contradicts a supplied table/cell")
@@ -612,18 +827,22 @@ def determine_scale(
     if number is None:
         raise ValueError(f"raw value {raw!r} has no numeric content to scale")
 
+    column_declined_context: str | None = None
     if table is not None and cell is not None:
         column_match = _column_header_scale(table, cell)
         if column_match is not None:
             multiplier, currency, context = column_match
-            return ScaleResult(
-                raw=raw,
-                normalized=number * multiplier,
-                unit=currency,
-                scale_multiplier=multiplier,
-                scale_source="column_header",
-                scale_context=context,
-            )
+            if per_share and _declares_per_share_exception(context):
+                column_declined_context = context
+            else:
+                return ScaleResult(
+                    raw=raw,
+                    normalized=number * multiplier,
+                    unit=currency or document_currency,
+                    scale_multiplier=multiplier,
+                    scale_source="column_header",
+                    scale_context=context,
+                )
 
     # Looked up unconditionally so that a DECLINED banner still reaches the
     # audit trail; only the BINDING is gated. `page_header_ok` is the second gate
@@ -634,12 +853,17 @@ def determine_scale(
     # header, being the value's own column, is trusted regardless and is applied
     # above this gate.
     page_match = _page_header_scale(page.text, char_start)
-    if page_match is not None and origin == "table" and page_header_ok:
+    if (
+        page_match is not None
+        and origin == "table"
+        and page_header_ok
+        and not (per_share and _declares_per_share_exception(page_match[2]))
+    ):
         multiplier, currency, context = page_match
         return ScaleResult(
             raw=raw,
             normalized=number * multiplier,
-            unit=currency,
+            unit=currency or document_currency,
             scale_multiplier=multiplier,
             scale_source="page_header",
             scale_context=context,
@@ -650,13 +874,17 @@ def determine_scale(
     # into the same claim. emit.py already logs scale_context as the flag's
     # detail, so a declined banner is queryable for free -- an assumed_1x with a
     # non-null scale_context is a value that saw a banner and refused it, whether
-    # refused for prose-origin or (SIM-323) for low currency-confidence.
+    # refused for prose-origin, (SIM-323) low currency-confidence, or (SIM-386) a
+    # caption's own per-share exception. The page-level phrase wins when both a
+    # column and a page banner were declined, matching this function's own
+    # column-before-page precedence.
+    declined_context = page_match[2] if page_match is not None else column_declined_context
     return ScaleResult(
         raw=raw,
         normalized=number * 1.0,
         unit=None,
         scale_multiplier=1.0,
         scale_source="assumed_1x",
-        scale_context=None if page_match is None else page_match[2],
+        scale_context=declined_context,
         flags=["scale_assumed"],
     )
