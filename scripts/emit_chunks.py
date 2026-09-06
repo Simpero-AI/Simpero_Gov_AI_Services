@@ -20,11 +20,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from parser_service.chunker import chunk_document
-from parser_service.docling_parser import parse_pdf_bytes
-from parser_service.elements import extract_chart_elements, extract_table_elements
-from parser_service.table_extract import extract_tables
-from parser_service.text_extract import extract_text_blocks
+from parser_service.chunk_pipeline import chunks_for_document
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -32,24 +28,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("pdf_path", type=Path)
     args = parser.parse_args(argv)
 
-    result = parse_pdf_bytes(args.pdf_path.read_bytes())
-    assert result.document is not None, "a successful parse always carries the DoclingDocument"
-
-    blocks = extract_text_blocks(result.document, result.pages)
-    table_elements = extract_table_elements(extract_tables(result.document, result.pages))
-    chart_elements = extract_chart_elements(result.document, result.pages)
-
-    chunks = chunk_document(
-        result.pages,
-        blocks,
-        table_elements,
-        chart_elements,
-        document_id=result.sha256,
-        source_file=args.pdf_path.name,
-    )
+    # Same parse -> chunk flow the deal-flow worker runs (chunk_pipeline), so the
+    # demo and production can never drift on how a document is chunked.
+    sha256, chunks = chunks_for_document(args.pdf_path.read_bytes(), source_file=args.pdf_path.name)
 
     payload = {
-        "sha256": result.sha256,
+        "sha256": sha256,
         "source_file": args.pdf_path.name,
         "chunks": [chunk.model_dump(mode="json") for chunk in chunks],
     }
@@ -57,7 +41,7 @@ def main(argv: list[str] | None = None) -> None:
 
     by_type = Counter(chunk.element_type for chunk in chunks)
     print(
-        f"\n\nemitted {len(chunks)} chunks over {len(result.pages)} pages ({dict(by_type)})",
+        f"\n\nemitted {len(chunks)} chunks ({dict(by_type)})",
         file=sys.stderr,
     )
 

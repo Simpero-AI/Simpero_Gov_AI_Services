@@ -20,6 +20,7 @@ from botocore.exceptions import ClientError
 from saq import Queue
 from saq.types import Context, SettingsDict
 
+from .chunk_pipeline import chunks_for_document
 from .config import get_settings
 from .dispatch import parse_bytes
 from .document_cache import build_spaces_client
@@ -242,6 +243,25 @@ async def process_document(
         )
         return {"status": "rejected", "code": exc.code, "message": exc.message}
 
+    # Cut the same document into retrieval chunks (SIM-238/239) for the backend's
+    # chunk-ingest seam (it walks payload["chunks"]). The docling parse is a
+    # read-through cache hit -- extract_claims just parsed these exact bytes -- so
+    # this adds only element extraction + rule-based chunking, no second parse and
+    # no model call. Best-effort: a chunking failure must never lose the claims
+    # envelope, so it fails soft to an empty list.
+    try:
+        _, chunks = await asyncio.to_thread(
+            chunks_for_document, data, source_file=payload.get("source_file") or spaces_key
+        )
+        payload["chunks"] = [c.model_dump(mode="json") for c in chunks]
+    except Exception:
+        logger.warning(
+            "process_document: chunking failed for %s; claims kept, no chunks",
+            spaces_key,
+            exc_info=True,
+        )
+        payload.setdefault("chunks", [])
+
     results_key = f"{parser_settings.results_key_prefix.rstrip('/')}/{payload['sha256']}.json"
     client.put_object(
         Bucket=parser_settings.spaces_bucket,
@@ -257,6 +277,7 @@ async def process_document(
         "key": results_key,
         "sha256": payload["sha256"],
         "count": len(payload["claims"]),
+        "chunk_count": len(payload.get("chunks", [])),
     }
 
 
