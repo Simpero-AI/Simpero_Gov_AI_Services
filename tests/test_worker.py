@@ -6,10 +6,12 @@ set below is never actually dialed.
 """
 
 import io
+import json
 import os
 from typing import cast
 
 from parser_service import config
+from parser_service.chunker import ChunkRecord
 
 # worker.py reads settings (and raises at import time if valkey_url is unset)
 # at module import, so the env var must be set and the settings cache cleared
@@ -175,6 +177,9 @@ async def test_process_document_writes_pointer_and_supplies_run_id(monkeypatch) 
         }
     )
     monkeypatch.setattr(worker, "extract_claims", rec)
+    # Keep this test hermetic: stub the chunk pass (its own test covers it) so no
+    # real docling parse runs here.
+    monkeypatch.setattr(worker, "chunks_for_document", lambda *_a, **_k: ("abc123", []))
 
     result = await worker.process_document(ctx=_CTX, spaces_key="deal/doc.pdf", entity="Target Co")
 
@@ -182,6 +187,7 @@ async def test_process_document_writes_pointer_and_supplies_run_id(monkeypatch) 
     assert result["status"] == "parsed"
     assert result["sha256"] == "abc123"
     assert result["count"] == 3
+    assert result["chunk_count"] == 0
     assert result["key"].endswith("abc123.json")
     assert "claims" not in result
     assert len(stub.put_calls) == 1
@@ -205,6 +211,82 @@ async def test_process_document_writes_pointer_and_supplies_run_id(monkeypatch) 
     assert call["run_id"] and call["correlation_id"]
     # known_sha256s must NOT be forwarded -- extract_claims has no such param.
     assert "known_sha256s" not in call
+
+
+async def test_process_document_includes_chunks_in_the_envelope(monkeypatch) -> None:
+    # The deal flow's chunk-ingest seam: process_document must add the document's
+    # retrieval chunks to the claims envelope it writes to Spaces (the backend
+    # walks payload["chunks"]).
+    stub = _StubS3({"deal/doc.pdf": b"document-bytes"})
+    monkeypatch.setattr(worker, "build_spaces_client", lambda settings: stub)
+    monkeypatch.setattr(
+        worker,
+        "extract_claims",
+        _ExtractRecorder(
+            payload={
+                "run_id": "ignored",
+                "sha256": "abc123",
+                "source_file": "deal/doc.pdf",
+                "claims": [{}],
+                "edges": [],
+                "flag_log": [],
+                "skipped_pages": [],
+            }
+        ),
+    )
+    chunks = [
+        ChunkRecord(
+            content="Revenue grew to $15M",
+            element_type="prose",
+            page=1,
+            order=0,
+            document_id="abc123",
+            source_file="deal/doc.pdf",
+        )
+    ]
+    monkeypatch.setattr(worker, "chunks_for_document", lambda *_a, **_k: ("abc123", chunks))
+
+    result = await worker.process_document(ctx=_CTX, spaces_key="deal/doc.pdf", entity="Target Co")
+
+    assert result["chunk_count"] == 1
+    written = json.loads(stub.put_calls[0]["Body"])
+    assert [c["content"] for c in written["chunks"]] == ["Revenue grew to $15M"]
+    assert written["chunks"][0]["element_type"] == "prose"
+
+
+async def test_process_document_chunking_failure_keeps_the_claims_envelope(monkeypatch) -> None:
+    # Chunking is best-effort: if it raises, the claims envelope is still written
+    # (with an empty chunks list), never lost.
+    stub = _StubS3({"deal/doc.pdf": b"document-bytes"})
+    monkeypatch.setattr(worker, "build_spaces_client", lambda settings: stub)
+    monkeypatch.setattr(
+        worker,
+        "extract_claims",
+        _ExtractRecorder(
+            payload={
+                "run_id": "ignored",
+                "sha256": "abc123",
+                "source_file": "deal/doc.pdf",
+                "claims": [{}, {}],
+                "edges": [],
+                "flag_log": [],
+                "skipped_pages": [],
+            }
+        ),
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("chunking blew up")
+
+    monkeypatch.setattr(worker, "chunks_for_document", _boom)
+
+    result = await worker.process_document(ctx=_CTX, spaces_key="deal/doc.pdf", entity="Target Co")
+
+    assert result["status"] == "parsed"
+    assert result["count"] == 2
+    assert result["chunk_count"] == 0
+    written = json.loads(stub.put_calls[0]["Body"])
+    assert written["chunks"] == []
 
 
 async def test_process_document_rejection_does_not_write_a_result(monkeypatch) -> None:

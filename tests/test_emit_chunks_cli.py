@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 
+from parser_service import chunk_pipeline
 from parser_service.chunker import ChunkRecord
 from scripts import emit_chunks
 
@@ -22,12 +23,14 @@ class _Result:
 
 
 def _stub(monkeypatch, chunks: list[ChunkRecord]) -> None:
-    monkeypatch.setattr(emit_chunks, "parse_pdf_bytes", lambda _b: _Result())
-    monkeypatch.setattr(emit_chunks, "extract_text_blocks", lambda *_a: [])
-    monkeypatch.setattr(emit_chunks, "extract_tables", lambda *_a: [])
-    monkeypatch.setattr(emit_chunks, "extract_table_elements", lambda *_a: [])
-    monkeypatch.setattr(emit_chunks, "extract_chart_elements", lambda *_a: [])
-    monkeypatch.setattr(emit_chunks, "chunk_document", lambda *_a, **_k: chunks)
+    # emit_chunks now delegates to chunk_pipeline.chunks_for_document, so stub the
+    # parse/extract/chunk primitives where that helper calls them.
+    monkeypatch.setattr(chunk_pipeline, "parse_pdf_bytes", lambda _b: _Result())
+    monkeypatch.setattr(chunk_pipeline, "extract_text_blocks", lambda *_a: [])
+    monkeypatch.setattr(chunk_pipeline, "extract_tables", lambda *_a: [])
+    monkeypatch.setattr(chunk_pipeline, "extract_table_elements", lambda *_a: [])
+    monkeypatch.setattr(chunk_pipeline, "extract_chart_elements", lambda *_a: [])
+    monkeypatch.setattr(chunk_pipeline, "chunk_document", lambda *_a, **_k: chunks)
 
 
 def test_emits_one_json_chunk_per_record_with_metadata(monkeypatch, tmp_path, capsys) -> None:
