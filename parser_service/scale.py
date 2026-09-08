@@ -402,6 +402,41 @@ _SCALE_PHRASE_RE = re.compile(
     r"\s*\)"
 )
 
+# The un-parenthesised declarative scale NOTE a slide deck or presentation
+# footnote uses in place of a parenthesised caption: "Numbers are in thousands,
+# except percentages", "Amounts are expressed in millions", "Figures presented
+# in thousands". Verified against Snowflake's Q1 FY24 investor deck, whose
+# income statements shipped every figure a thousand-fold too small: the note is
+# prose, not "(in thousands)", so _SCALE_PHRASE_RE -- anchored on "(" ... ")" --
+# never bound it, and origin/page_header_ok/position all already permitted it.
+#
+# The precision bar the parenthesised grammar holds with its bracket anchor is
+# held here by REQUIRING BOTH a caption noun AND a connecting verb: the two
+# together are what make a clause a scale declaration rather than a prose
+# fragment. "measured in thousands of hours" has the verb but no caption noun;
+# "values in millions of homes" has the noun but no verb; neither binds. The
+# "in <magnitude> of <non-currency>" refusal the paren form gets for free from
+# its required ")" ("in thousands of filings") is reproduced by the trailing
+# negative lookahead here.
+#
+# Case-sensitivity is scoped exactly as in _SCALE_PHRASE_RE: the [A-Z]{3}
+# currency slots stay case-sensitive so a lowercase word is never read as a
+# currency code, while the noun / verb / "in" / magnitude words are not.
+_BARE_NOTE_RE = re.compile(
+    r"(?:(?P<currency>[A-Z]{3})\s+)?"
+    r"\b(?i:numbers?|amounts?|dollars?|shares?|figures?|values?)\s+"
+    r"(?:"
+    r"(?i:are|is|were|was)\s+(?:(?i:expressed|stated|presented|reported|shown|denominated)\s+)?"
+    r"|(?i:expressed|stated|presented|reported|shown|denominated)\s+"
+    r")"
+    rf"(?:(?P<insym>{_CURRENCY_MARK})\s*)?"
+    r"(?i:in)\s+"
+    r"(?i:(?P<word>thousands?|millions?|billions?))"
+    r"\b"
+    r"(?!\s+of\s+(?!(?:U\.?\s*S\.?\s*)?"
+    r"(?i:dollars?|pounds?|euros?|yen|USD|GBP|EUR|CAD|AUD|NZD|HKD)\b))"
+)
+
 # The zeros form of a thousands marker, in its two spellings.
 #
 # "(000s)", "($000s)", "(£'000s)" -- parenthesised, where a bare "000" is
@@ -469,6 +504,10 @@ def _find_scale_phrases(text: str) -> list[_ScalePhraseMatch]:
     matches: list[_ScalePhraseMatch] = [
         (m.start(), m.end(), _scale_word_multiplier(m.group("word")), _phrase_currency(m))
         for m in _SCALE_PHRASE_RE.finditer(text)
+    ]
+    matches += [
+        (m.start(), m.end(), _scale_word_multiplier(m.group("word")), _phrase_currency(m))
+        for m in _BARE_NOTE_RE.finditer(text)
     ]
     for pattern in (_PAREN_000_RE, _BARE_000_RE):
         matches += [

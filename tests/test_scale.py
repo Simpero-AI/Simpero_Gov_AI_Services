@@ -318,6 +318,96 @@ def test_prose_lookalikes_declare_no_scale(text: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Un-parenthesised declarative scale NOTES (SIM-XXX / Snowflake Q1 FY24 deck).
+#
+# A slide deck writes its scale as a footnote sentence -- "Numbers are in
+# thousands, except percentages" -- not the "(in thousands)" caption a 10-K
+# uses. That note carries no parentheses, so _SCALE_PHRASE_RE never bound it and
+# every currency figure on the income statement shipped a thousand-fold too
+# small (assumed_1x), even though origin, page_header_ok and position all
+# permitted binding. _BARE_NOTE_RE recovers the note form while holding the
+# precision bar: it requires BOTH a caption noun AND a connecting verb.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "multiplier"),
+    [
+        # The exact wording from the Snowflake deck's income-statement footnote.
+        ("Numbers are in thousands, except percentages.", 1_000.0),
+        ("Numbers are in thousands, except per share data.", 1_000.0),
+        # be-verb + participle, participle alone, and other magnitudes.
+        ("Amounts are expressed in millions", 1_000_000.0),
+        ("Figures presented in thousands", 1_000.0),
+        ("All dollar amounts are stated in thousands of U.S. dollars", 1_000.0),
+        ("Financial figures are reported in billions", 1_000_000_000.0),
+    ],
+)
+def test_unparenthesised_scale_notes_are_recognized(text: str, multiplier: float) -> None:
+    found = scale_phrase_in_text(text)
+    assert found is not None, f"{text!r} declares a scale"
+    assert found[0] == multiplier
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A caption noun with NO connecting verb is a prose fragment, not a note:
+        # "values in millions of homes", "amounts in thousands of filings".
+        "values in millions of homes",
+        "amounts in thousands of filings",
+        # A connecting verb with NO caption noun ("measured in thousands of
+        # hours") -- the noun anchor is what separates a note from prose.
+        "we measured returns expressed in thousands of hours",
+        # The "in <magnitude> of <non-currency>" refusal the paren form gives
+        # for free must hold for the note form too.
+        "amounts stated in thousands of filings",
+        "figures reported in millions of users",
+        # Ordinary prose that merely contains a caption noun and "in <magnitude>".
+        "customers numbering in the thousands",
+        "we invested in millions of dollars of new infrastructure",
+    ],
+)
+def test_unparenthesised_note_lookalikes_declare_no_scale(text: str) -> None:
+    assert scale_phrase_in_text(text) is None
+
+
+def test_determine_scale_unparenthesised_note_before_value_binds() -> None:
+    # The Snowflake deck end-to-end: a currency table figure under a declarative
+    # note footnote scales by the note, not to a silent assumed_1x. "$ 2,065,659"
+    # in thousands is Snowflake's ~$2.07B FY23 revenue.
+    text = "Numbers are in thousands, except percentages.\nRevenue $ 2,065,659 total"
+    page = _page(text)
+    result = determine_scale(
+        "$ 2,065,659",
+        page,
+        char_start=text.index("$ 2,065,659"),
+        origin="table",
+        value_type="currency",
+    )
+
+    assert result.scale_source == "page_header"
+    assert result.scale_multiplier == 1_000.0
+    assert result.normalized == 2_065_659_000.0
+    assert result.scale_context == "Numbers are in thousands"
+
+
+def test_determine_scale_unparenthesised_note_does_not_scale_a_count() -> None:
+    # The safety property: a declarative "(in millions)"-style note must not
+    # scale an adjacent block of operating counts. A count self-scales at a
+    # known 1.0 and never consults the note at all.
+    text = "Amounts are expressed in millions\nStores 1,309 total"
+    page = _page(text)
+    result = determine_scale(
+        "1,309", page, char_start=text.index("1,309"), origin="table", value_type="count"
+    )
+
+    assert result.scale_source == "not_applicable"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 1_309.0
+
+
+# --------------------------------------------------------------------------- #
 # determine_scale -- full resolution order.
 # --------------------------------------------------------------------------- #
 
