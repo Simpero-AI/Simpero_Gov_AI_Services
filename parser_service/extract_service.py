@@ -295,6 +295,15 @@ _CANONICALIZABLE_TIERS = frozenset({"table", "prose", "complete"})
 # being forced into a vocabulary that was never meant to name them.
 _NOT_CANONICALIZABLE_VALUE_TYPES = frozenset({"text", "date"})
 
+# C / bug #2: percentage-family canonical attributes and the value_types that
+# legitimately express them. A margin claim that arrives as currency (a stray
+# dollar figure the extractor mislabeled -- staging test: "Gross Margin
+# -3.90M") must never render in a percent slot; see _canonicalize_quantitative_claims.
+_PERCENT_ATTRIBUTES = frozenset(
+    {"gross_margin", "net_margin", "ebitda_margin", "customer_concentration"}
+)
+_PERCENT_VALUE_TYPES = frozenset({"percent", "ratio"})
+
 
 def _dashboard_eligible(claim: Claim) -> bool:
     """Whether a claim counts toward the dashboard aggregation. Qualitative
@@ -371,6 +380,32 @@ def _canonicalize_quantitative_claims(
                 claim.flags = [*claim.flags, *extra_flags]
                 flag_log.log_all(
                     _STAGE_ATTRIBUTE_MAPPING, element_id_for(claim), extra_flags, detail=raw
+                )
+            # C / bug #2: a percentage metric that arrived with a non-percent
+            # value_type is a mis-extraction -- the extractor grabbed a stray
+            # DOLLAR figure and stuck a margin label on it (staging test: "Gross
+            # Margin -3.90M"). Fail the value closed to text so no number can
+            # render in a percent slot (a null `normalized` also drops it from the
+            # headline/consistency gates), keep the raw text for provenance, and
+            # record why. Never retype it to percent -- the value is a real dollar
+            # figure; inventing a % from it would fabricate. Reset the attribute to
+            # the document label, uncanonicalized, like any other text claim.
+            if (
+                canonical in _PERCENT_ATTRIBUTES
+                and claim.value.value_type not in _PERCENT_VALUE_TYPES
+            ):
+                claim.flags = [*claim.flags, "pct_attr_type_mismatch"]
+                claim.value.normalized = None
+                claim.value.unit = None
+                claim.value.scale_multiplier = None
+                claim.value.scale_source = None
+                claim.value.value_type = "text"
+                claim.attribute = raw
+                flag_log.log_all(
+                    _STAGE_ATTRIBUTE_MAPPING,
+                    element_id_for(claim),
+                    ["pct_attr_type_mismatch"],
+                    detail=raw,
                 )
 
 

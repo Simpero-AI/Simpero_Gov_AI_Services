@@ -479,7 +479,8 @@
           "cites_boilerplate",
           "binding_unsupported",
           "attribute_unmapped",
-          "superseded_by_same_fact"
+          "superseded_by_same_fact",
+          "pct_attr_type_mismatch"
         ]
       }
     },
