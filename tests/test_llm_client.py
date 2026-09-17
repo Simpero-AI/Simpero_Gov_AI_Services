@@ -12,7 +12,12 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 import parser_service.llm_client as llm_client
-from parser_service.llm_client import _GRAMMAR_RETRIES, is_grammar_timeout, parse_with_retry
+from parser_service.llm_client import (
+    _GRAMMAR_RETRIES,
+    is_credit_exhausted,
+    is_grammar_timeout,
+    parse_with_retry,
+)
 
 
 def test_make_client_widens_the_retry_and_read_budget_but_keeps_connect_fast(monkeypatch) -> None:
@@ -103,6 +108,48 @@ def test_parse_with_retry_gives_up_after_the_grammar_budget(monkeypatch) -> None
         parse_with_retry(call, page_no=1, what="numeric proposal")
     # one initial attempt plus _GRAMMAR_RETRIES retries, then the caller sees it.
     assert calls["n"] == _GRAMMAR_RETRIES + 1
+
+
+class _LowBalance400(Exception):
+    """Stand-in for the SDK's BadRequestError on a depleted balance: a 400 whose
+    message is Anthropic's 'credit balance is too low' invalid_request error."""
+
+    status_code = 400
+
+
+class _Payment402(Exception):
+    status_code = 402
+
+
+def test_is_credit_exhausted_matches_low_balance_or_402_but_not_transients() -> None:
+    assert is_credit_exhausted(
+        _LowBalance400("Your credit balance is too low to access the Anthropic API.")
+    )
+    assert is_credit_exhausted(_Payment402("payment required"))
+    # NARROW: a transient rate limit or a grammar-compilation 400 is not exhaustion
+    # and must not be misread as one (that would turn a retryable/transient into a
+    # hard, run-failing error).
+    assert not is_credit_exhausted(Exception("rate limit exceeded"))
+    assert not is_credit_exhausted(_Grammar400("Grammar compilation timed out"))
+
+
+def test_parse_with_retry_fails_loud_on_credit_exhaustion(monkeypatch) -> None:
+    # A depleted balance must raise AnthropicCreditExhausted (loud), never be
+    # narrowed/retried or passed through as a raw error a caller would swallow
+    # into a skipped page (the silent "no financials" bug).
+    monkeypatch.setattr("parser_service.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        raise _LowBalance400("Your credit balance is too low to access the Anthropic API.")
+
+    # Reference the class via the module: an earlier test reloads llm_client, so
+    # parse_with_retry raises whatever AnthropicCreditExhausted currently lives in
+    # the module dict -- match against that same object, not the import binding.
+    with pytest.raises(llm_client.AnthropicCreditExhausted):
+        parse_with_retry(call, page_no=1, what="numeric proposal")
+    assert calls["n"] == 1  # not retried -- exhaustion is non-transient
 
 
 def test_parse_with_retry_reraises_a_non_transient_error(monkeypatch) -> None:

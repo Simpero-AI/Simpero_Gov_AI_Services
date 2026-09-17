@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
 
 from parser_service import extract_service, main
+from parser_service.llm_client import AnthropicCreditExhausted
 from parser_service.main import app
 
 
@@ -104,6 +105,28 @@ def test_extract_prose_without_a_credential_is_a_503(monkeypatch) -> None:
         headers=_headers(**{"X-Prose": "true"}),
     )
     assert response.status_code == 503
+
+
+def test_extract_credit_exhaustion_is_a_503(monkeypatch) -> None:
+    # A present-but-unfunded key that fails MID-extraction must surface as a 503
+    # the backend records as a FAILED run -- never a 200 with empty claims (a deal
+    # that silently shows "no financials"). Distinct from the missing-credential
+    # 503 above, which is rejected before any parsing.
+    def _boom(*_a, **_k):
+        raise AnthropicCreditExhausted(
+            "Anthropic credit balance is exhausted; top up the account and re-run."
+        )
+
+    monkeypatch.setattr(main, "extract_claims", _boom)
+
+    client = TestClient(app)
+    response = client.post(
+        "/extract",
+        content=_minimal_pdf_bytes(),
+        headers=_headers(**{"X-Prose": "true"}),
+    )
+    assert response.status_code == 503
+    assert "credit" in str(response.json()["detail"]).lower()
 
 
 def test_extract_qualitative_header_implies_prose_for_the_credential_check(monkeypatch) -> None:
