@@ -508,6 +508,10 @@
         "commercial_terms",
         "risk_or_dependency",
         "plan_or_commitment",
+        "co_investor",
+        "funding_history",
+        "key_customer",
+        "geographic_presence",
         null
       ],
       "description": "For a qualitative claim, which kind of assertion it is. Null otherwise."
