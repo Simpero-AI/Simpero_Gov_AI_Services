@@ -168,6 +168,11 @@ AssertionClass = Literal[
     "commercial_terms",
     "risk_or_dependency",
     "plan_or_commitment",
+    # Company-tab firmographic classes (backend keystone: Simpero_AI_Gov_Alpha#209).
+    "co_investor",
+    "funding_history",
+    "key_customer",
+    "geographic_presence",
 ]
 
 # A generous runaway backstop, not a precision limit: a page states as many
@@ -266,6 +271,17 @@ requirement, key person, single supplier, or condition the plan rests on.
   plan_or_commitment   -- a forward step the business states it will take, with a \
 mechanism: entering a segment, expansion, rollout, funding or exit intention. Not an \
 outcome it merely hopes for.
+  co_investor          -- another backer in the company's capital: a named fund, \
+syndicate member or existing shareholder stated to have invested, distinct from a \
+related_party control relationship.
+  funding_history      -- a prior financing event stated qualitatively: a round raised, \
+an investment made, a capital injection or a valuation at raise (the point is the event, \
+not a figure the numeric pass already took).
+  key_customer         -- a named customer, a key account, or a stated customer \
+concentration (a single customer or a few said to drive much of the business), without \
+requiring the figure.
+  geographic_presence  -- where the business operates or sells: named regions, countries, \
+markets or facilities, or a stated regional split of the business.
 
 Extract every DISTINCT checkable assertion the page makes. Do not hold yourself to a \
 handful, and do not drop a claim because the page already stated another of the same \
