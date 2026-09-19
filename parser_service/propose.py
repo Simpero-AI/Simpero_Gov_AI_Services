@@ -45,6 +45,7 @@ import re
 from typing import Literal
 
 import anthropic
+from anthropic.types import ThinkingConfigParam
 from pydantic import BaseModel, Field, ValidationError
 
 from .emit import (
@@ -79,7 +80,7 @@ _STAGE_ASSERTION = "prose_assertion"
 DEFAULT_MODEL = os.getenv("PARSER_EXTRACT_MODEL") or "claude-opus-4-8"
 
 
-def _extract_thinking() -> dict:
+def _extract_thinking() -> ThinkingConfigParam:
     """The `thinking` config for the per-page extractor calls. Adaptive extended
     thinking (today's behaviour) unless PARSER_EXTRACT_THINKING is set to a
     disabling value (off/disabled/none/0/false), which turns extended thinking
