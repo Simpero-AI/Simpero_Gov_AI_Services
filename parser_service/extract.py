@@ -40,6 +40,7 @@ never a wrong citation.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 from .emit import Claim, FlagLog, PeriodKind, emit_pdf_table_cell_claim
 from .scale import ValueType, has_parseable_magnitude
@@ -623,6 +624,121 @@ def attribute_for(
     return " | ".join([*parts, column_header])
 
 
+# --------------------------------------------------------------------------- #
+# Column ROLE: a primary figure vs a derived/auxiliary RE-EXPRESSION of one.
+#
+# Beside a metric's primary figure a financial table often prints columns that
+# only re-express it: a percentage OF another column ("% of revenue"), a
+# period-over-period CHANGE in it ("$ change", "Increase / (Decrease)", "YoY %"),
+# a growth rate or a variance. Each such cell passes _is_a_figure, so without a
+# role check every one is emitted as its own claim under the same row label. Once
+# canonicalize_attributes (propose.py) strips the period/scale qualifier, a
+# change or percentage cell can canonicalize onto the SAME metric as the primary
+# column beside it and be surfaced in its place -- the Total-Liabilities-514M
+# class, where a component/change figure stands in for the true total.
+#
+# The classifier keys on the column HEADER, never on counting value columns:
+# table_extract._value_columns needs >=2 figures per row in >=2 rows, so it drops
+# single-value-column tables outright -- a recall loss the follow-up brief
+# forbids. A header-semantic test instead skips a column only on a POSITIVE
+# derived signal, and only when a primary column survives to carry the metric
+# (the guard in _value_column_roles). A single unlabeled or plainly-labelled
+# value column is therefore always kept, and a table whose columns are ALL
+# percentages is its own data and is kept whole.
+#
+# Per-share is deliberately NOT derived: EPS and other per-share figures are
+# first-class facts a consumer wants, and canonicalize_attributes already keeps
+# "<metric> per share" distinct from "<metric>" (it strips only period/basis/
+# scale qualifiers, never "per share"), so per-share never collapses onto the
+# total the way a bare "% of" or "change" column does.
+#
+# The verbs are anchored against the ONE recall risk a header-semantic filter
+# carries: a transposed/matrix CIM disclosure where a genuine primary metric
+# heads a column. "change"/"difference" are matched only when NOT continued by
+# "in <noun>", so "Change in fair value" and "Net change in cash" survive while a
+# bare "Change" / "% Change" / "Change (%)" column is dropped; "increase"/
+# "decrease" only as the standalone PAIR ("Increase / (Decrease)") and again not
+# when it runs into "in <noun>", so "Net increase (decrease) in cash" survives;
+# "growth" only as an explicit RATE ("growth rate", "% growth"), so "Growth
+# capital" survives. Word boundaries already spare "Exchange rate",
+# "Interchange fees" and the like.
+# The "not continued by in <noun>" guard tolerates an intervening ")" and
+# whitespace, so it still spares "Net increase (decrease) in cash" where a close
+# paren sits between the verb and "in".
+_NOT_INTO_NOUN = r"(?![\s)]*\bin\b)"
+_DERIVED_COLUMN_RE = re.compile(
+    rf"""
+      \bchange\b{_NOT_INTO_NOUN} | \bchg\b | \bvariance\b | \bdifference\b{_NOT_INTO_NOUN}
+    | \bincrease\b[\s/()]*\bdecrease\b{_NOT_INTO_NOUN}
+    | \byoy\b | \bqoq\b | \by\s*/\s*y\b | \by-o-y\b
+    | \bcagr\b | \bgrowth\s+rate\b | \bgrowth\s*% | %\s*growth\b
+    | \bperiod[\s-]to[\s-]period\b
+    | %\s*of\b | \bpercent(?:age)?\s+of\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_derived_column(table: TableRecord, col: int) -> bool:
+    """Whether `col` re-expresses another column (a %/change/growth OF it) rather
+    than carrying a primary figure, judged from its stacked column header."""
+    header = _column_header(table, col)
+    return bool(header and _DERIVED_COLUMN_RE.search(header))
+
+
+def _value_column_roles(
+    table: TableRecord, label_col: int, header_block: set[int]
+) -> tuple[set[int], set[int]]:
+    """Partition the table's value columns into (emitted, skipped).
+
+    A value column carries at least one figure in a data row. A column is skipped
+    only when its header reads as a derived re-expression AND at least one primary
+    (non-derived) value column survives to carry the metric. When every value
+    column is derived-headed they ARE the table's data, so none is skipped -- the
+    recall guard that keeps a percentages-only or single-column table whole."""
+    data_rows = {c.row for c in table.cells if c.row not in header_block}
+    value_cols = {
+        c.col
+        for c in table.cells
+        if c.col != label_col and c.row in data_rows and _is_a_figure(c.text_normalized.strip())
+    }
+    derived = {col for col in value_cols if _is_derived_column(table, col)}
+    primary = value_cols - derived
+    if not primary:
+        return value_cols, set()
+    return primary, derived
+
+
+def _unresolved_header_columns(table: TableRecord, emitted_cols: set[int]) -> set[int]:
+    """The emitted value columns whose period/column qualifier cannot be trusted
+    because the header failed to SEPARATE them.
+
+    The danger a header carries is cross-column collapse: two value columns in one
+    table that resolve to the SAME (row label x column header) attribute cannot be
+    told apart, so their claims fold onto one metric-period and a consumer picks
+    between them blind. That is what produces the impossible orderings when the
+    header lands on a title/scale/caption row, or on nothing at all -- three years
+    of one line item wearing one indistinguishable name.
+
+    A column is unresolved when the table has two or more emitted value columns
+    and this column's header is either SHARED with another emitted column (the two
+    collapse onto one attribute) or ABSENT (the value carries no period qualifier
+    at all, so its period is untrustworthy even though it does not collapse). A
+    lone value column has nothing to collapse against and is always trusted, so
+    single-value-column recall is untouched.
+
+    This is a header-STRING signal, not a resolved-period one: two headers that
+    differ as text but map to the same period downstream ("2019" vs "FY2019" vs
+    "2019 (1)") collapse after canonicalize_attributes strips the qualifier yet
+    are not flagged here. That residue is rare and belongs to the period resolver,
+    not to this structural check."""
+    if len(emitted_cols) < 2:
+        return set()
+    header_by_col = {col: _column_header(table, col) for col in emitted_cols}
+    counts = Counter(header_by_col.values())
+    return {col for col, header in header_by_col.items() if not header or counts[header] > 1}
+
+
 def claims_from_table(
     table: TableRecord,
     page: PageIndex,
@@ -656,9 +772,16 @@ def claims_from_table(
     banners = section_banners(table)
     header_block = set(_header_rows(table))
     label_col = _infer_label_column(table, header_block)
+    emitted_cols, skipped_cols = _value_column_roles(table, label_col, header_block)
+    unresolved_cols = _unresolved_header_columns(table, emitted_cols)
     claims: list[Claim] = []
     for cell in sorted(table.cells, key=lambda c: (c.row, c.col)):
         if cell.col == label_col or cell.row in header_block:
+            continue
+        # A derived/auxiliary column (a %/change/growth re-expression of a primary
+        # column) is dropped so it cannot canonicalize onto the metric beside it
+        # and be surfaced in place of the true figure.
+        if cell.col in skipped_cols:
             continue
         raw = cell.text_normalized.strip()
         if not raw or not _is_a_figure(raw):
@@ -669,6 +792,11 @@ def claims_from_table(
             continue
 
         period_year, period_kind = resolve_period(_column_header(table, cell.col))
+        # A value whose column the header could not tell apart from another is
+        # still emitted -- a dropped cell is invisible -- but flagged, so a
+        # consumer never silently trusts its (missing or collapsed) period
+        # qualifier as if the columns had been cleanly separated.
+        extra_flags = ["header_unresolved"] if cell.col in unresolved_cols else None
 
         claims.append(
             emit_pdf_table_cell_claim(
@@ -684,6 +812,7 @@ def claims_from_table(
                 page_header_ok=is_confident_currency(raw, attribute),
                 period_year=period_year,
                 period_kind=period_kind,
+                extra_flags=extra_flags,
             )
         )
     return claims

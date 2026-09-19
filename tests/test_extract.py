@@ -755,3 +755,205 @@ def test_spacer_led_table_binds_values_to_the_real_label_not_a_stray_cell() -> N
     # The bare "42" in the label column is skipped, never emitted as a figure.
     assert "42" not in raw_values
     assert not any(a.startswith("42") for a in attributes)
+
+
+# --------------------------------------------------------------------------- #
+# column ROLE: derived/auxiliary columns are not emitted under the metric they
+# re-express (the Total-Liabilities-514M / component-for-total class).
+# --------------------------------------------------------------------------- #
+
+
+def _claims(cells: list[TableCellRecord], page_text: str, **table_kwargs):
+    return claims_from_table(
+        _table(cells, **table_kwargs),
+        make_page(page_text),
+        entity="Acme",
+        file="acme.pdf",
+        flag_log=FlagLog(),
+    )
+
+
+def test_derived_change_column_is_dropped_while_primary_columns_survive() -> None:
+    # A period-over-period "Change" column re-expresses the two primary period
+    # columns beside it. Its cells must not be emitted under the same row label,
+    # or a change figure can be surfaced in place of the true value.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "2019"),
+        _cell(0, 2, "2018"),
+        _cell(0, 3, "Change"),
+        _cell(1, 0, "Total liabilities"),
+        _cell(1, 1, "$1,200"),
+        _cell(1, 2, "$1,000"),
+        _cell(1, 3, "$200"),
+    ]
+    claims = _claims(cells, "2019 2018 Change Total liabilities $1,200 $1,000 $200")
+    attributes = [c.attribute for c in claims]
+    assert "Total liabilities | 2019" in attributes
+    assert "Total liabilities | 2018" in attributes
+    # The change column is gone -- neither its attribute nor its value survives.
+    assert "Total liabilities | Change" not in attributes
+    assert "$200" not in [c.value.raw for c in claims]
+
+
+def test_percent_of_total_column_is_dropped() -> None:
+    # "% of Total" is a composition percentage OF the dollar column, not a
+    # primary figure -- dropped so it cannot collapse onto the metric.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "Amount"),
+        _cell(0, 2, "% of Total"),
+        _cell(1, 0, "Software"),
+        _cell(1, 1, "$800"),
+        _cell(1, 2, "80%"),
+    ]
+    claims = _claims(cells, "Amount % of Total Software $800 80%")
+    raws = [c.value.raw for c in claims]
+    assert "$800" in raws
+    assert "80%" not in raws
+
+
+def test_percentages_only_table_is_kept_whole() -> None:
+    # The recall guard: when EVERY value column is derived-headed there is no
+    # primary column to protect, so the percentages ARE the data and are kept.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "% Change"),
+        _cell(1, 0, "Organic sales"),
+        _cell(1, 1, "1.2%"),
+        _cell(2, 0, "Total"),
+        _cell(2, 1, "3.4%"),
+    ]
+    claims = _claims(cells, "% Change Organic sales 1.2% Total 3.4%")
+    raws = [c.value.raw for c in claims]
+    assert "1.2%" in raws and "3.4%" in raws
+
+
+def test_single_value_column_is_never_dropped_by_role_filter() -> None:
+    # A lone value column has no primary sibling to protect, so even a
+    # derived-sounding header does not drop it -- single-value-column recall is
+    # preserved, which is the trap _value_columns would fall into.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "Change"),
+        _cell(1, 0, "Net cash"),
+        _cell(1, 1, "$50"),
+    ]
+    claims = _claims(cells, "Change Net cash $50")
+    assert "$50" in [c.value.raw for c in claims]
+
+
+def test_genuine_metric_headers_are_not_dropped_in_a_transposed_table() -> None:
+    # A transposed/matrix CIM disclosure can put a genuine primary metric in the
+    # column header. The derived filter's verbs are anchored so a metric phrase
+    # ("Change in fair value", "Net increase (decrease) in cash", "Growth
+    # capital") is NOT mistaken for a %/change re-expression, even when a plain
+    # primary column ("2019") sits beside it and the survive-guard would not save
+    # it.
+    for header in (
+        "Change in fair value",
+        "Net increase (decrease) in cash",
+        "Growth capital",
+    ):
+        cells = [
+            _cell(0, 0, ""),
+            _cell(0, 1, "2019"),
+            _cell(0, 2, header),
+            _cell(1, 0, "Fund I"),
+            _cell(1, 1, "$100"),
+            _cell(1, 2, "$40"),
+        ]
+        claims = _claims(cells, f"2019 {header} Fund I $100 $40")
+        raws = [c.value.raw for c in claims]
+        assert "$40" in raws, f"{header!r} was wrongly dropped as derived"
+
+
+def test_per_share_column_is_not_treated_as_derived() -> None:
+    # EPS / per-share figures are first-class facts, and canonicalization keeps
+    # "<metric> per share" distinct from the total already -- so per-share is
+    # deliberately kept, not dropped.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "Total"),
+        _cell(0, 2, "Per share"),
+        _cell(1, 0, "Net income"),
+        _cell(1, 1, "$1,000"),
+        _cell(1, 2, "$2.50"),
+    ]
+    claims = _claims(cells, "Total Per share Net income $1,000 $2.50")
+    raws = [c.value.raw for c in claims]
+    assert "$1,000" in raws and "$2.50" in raws
+
+
+# --------------------------------------------------------------------------- #
+# header confidence: a table whose columns the header cannot separate is still
+# emitted (recall) but flagged, never silently trusted with a collapsed period.
+# --------------------------------------------------------------------------- #
+
+
+def test_unlabeled_value_columns_are_flagged_header_unresolved() -> None:
+    # No header row: two value columns share the bare row-label attribute and
+    # collapse. The claims are still emitted, but flagged so a consumer never
+    # treats their missing period qualifier as cleanly resolved.
+    cells = [
+        _cell(0, 0, "Revenue"),
+        _cell(0, 1, "100"),
+        _cell(0, 2, "200"),
+        _cell(1, 0, "Costs"),
+        _cell(1, 1, "50"),
+        _cell(1, 2, "80"),
+    ]
+    claims = _claims(cells, "Revenue 100 200 Costs 50 80", header_row=None)
+    assert claims
+    assert all("header_unresolved" in c.flags for c in claims)
+
+
+def test_duplicate_column_headers_are_flagged_header_unresolved() -> None:
+    # The header lands on a row whose year labels REPEAT (a Domestic/International
+    # super-header was lost above it), so 2019 and 2019 cannot be told apart. A
+    # bare `header_row is None` check misses this; keying on collapse catches it.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "2019"),
+        _cell(0, 2, "2018"),
+        _cell(0, 3, "2019"),
+        _cell(0, 4, "2018"),
+        _cell(1, 0, "Discount rate"),
+        _cell(1, 1, "4.00%"),
+        _cell(1, 2, "3.75%"),
+        _cell(1, 3, "1.90%"),
+        _cell(1, 4, "2.80%"),
+    ]
+    claims = _claims(cells, "2019 2018 2019 2018 Discount rate 4.00% 3.75% 1.90% 2.80%")
+    assert claims
+    assert all("header_unresolved" in c.flags for c in claims)
+
+
+def test_clean_distinct_headers_are_not_flagged() -> None:
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "2019"),
+        _cell(0, 2, "2018"),
+        _cell(0, 3, "2017"),
+        _cell(1, 0, "Revenue"),
+        _cell(1, 1, "$300"),
+        _cell(1, 2, "$200"),
+        _cell(1, 3, "$100"),
+    ]
+    claims = _claims(cells, "2019 2018 2017 Revenue $300 $200 $100")
+    assert claims
+    assert not any("header_unresolved" in c.flags for c in claims)
+
+
+def test_single_value_column_is_not_flagged_header_unresolved() -> None:
+    # One value column has nothing to collapse against, so its period being
+    # unlabeled is not an ambiguity -- no flag.
+    cells = [
+        _cell(0, 0, "Revenue"),
+        _cell(0, 1, "100"),
+        _cell(1, 0, "Costs"),
+        _cell(1, 1, "50"),
+    ]
+    claims = _claims(cells, "Revenue 100 Costs 50", header_row=None)
+    assert claims
+    assert not any("header_unresolved" in c.flags for c in claims)
