@@ -448,6 +448,29 @@ def is_confident_currency(raw: str, attribute: str) -> bool:
     return _names_an_amount(_label_tokens(attribute))
 
 
+def is_per_share(attribute: str) -> bool:
+    """Whether the attribute names a per-share figure -- EPS, dividend per
+    share, NAV per share. The positive signal scale.py's per_share parameter
+    needs: a "(in thousands, except per share data)" caption exempts a
+    per-share row from its own multiplier, but only a row this function
+    identifies as one, never inferred from the caption alone (SIM-386)."""
+    tokens = _label_tokens(attribute)
+    if "eps" in tokens:
+        return True
+    # Review ③: "per" adjacent to "share" was required, so "Net income per
+    # COMMON share" / "per DILUTED share" -- both standard captions -- were
+    # not recognised as per-share rows, and the caption's own carve-out then
+    # never applied to them (a 1000x-overstated EPS). Mirrors the same {0,2}
+    # intervening-word allowance as scale._PER_SHARE_EXCEPTION_RE; keep the
+    # two in step.
+    for index, token in enumerate(tokens):
+        if token != "per":
+            continue
+        if any(later in ("share", "shares") for later in tokens[index + 1 : index + 4]):
+            return True
+    return False
+
+
 def section_banners(table: TableRecord) -> dict[int, str]:
     """Each row's governing in-table section banner, by row index.
 
@@ -569,6 +592,7 @@ def claims_from_table(
     file: str,
     flag_log: FlagLog,
     section: str | None = None,
+    document_currency: str | None = None,
 ) -> list[Claim]:
     """Propose one claim per numeric data cell in `table`.
 
@@ -590,6 +614,11 @@ def claims_from_table(
     line keeps the heading the document filed it under. That is what separates
     the two "Coffee Shop" rows on a P&L, and what names the unlabelled subtotal
     rows that were previously dropped for having nothing to call them.
+
+    `document_currency` (scale.document_declared_currency, computed once per
+    document by the caller) is passed straight through to determine_scale so a
+    bare-$ page/column bind can adopt it (SIM-386); this function has no view
+    of the document beyond its own table and does not compute it itself.
     """
     banners = section_banners(table)
     header_block = set(_header_rows(table))
@@ -619,6 +648,8 @@ def claims_from_table(
                 flag_log=flag_log,
                 section=section,
                 page_header_ok=is_confident_currency(raw, attribute),
+                per_share=is_per_share(attribute),
+                document_currency=document_currency,
                 period_year=period_year,
                 period_kind=period_kind,
             )

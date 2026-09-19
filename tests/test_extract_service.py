@@ -30,8 +30,9 @@ class _Result:
 
 
 class _Page:
-    def __init__(self, page: int) -> None:
+    def __init__(self, page: int, text: str = "") -> None:
         self.page = page
+        self.text = text
 
 
 def _table_claim(
@@ -102,6 +103,36 @@ def test_table_only_tier_runs_without_touching_the_credential_check(monkeypatch)
     assert payload["claims"] == []
 
 
+def test_document_currency_is_scanned_once_and_passed_to_every_table(monkeypatch) -> None:
+    # SIM-386: the document-level currency pass runs once, ahead of the
+    # per-page loop, over every page's text -- and every claims_from_table
+    # call for the document receives the same result, not one it recomputes.
+    class _MultiPageResult:
+        document = _Doc()
+        pages = [_Page(1, text="CAD (in Thousands)\nsome text"), _Page(2, text="more text")]
+        sha256 = "0" * 64
+
+    seen_document_currency: list[str | None] = []
+
+    def _fake_claims_from_table(table, page, *, entity, file, flag_log, document_currency=None):
+        seen_document_currency.append(document_currency)
+        return []
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _MultiPageResult())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda *_a, **_k: ["t1"])
+    monkeypatch.setattr(extract_service, "claims_from_table", _fake_claims_from_table)
+
+    extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+    )
+    assert seen_document_currency == ["CAD", "CAD"]
+
+
 def test_correlation_id_is_not_written_into_the_returned_payload(monkeypatch) -> None:
     # correlation_id/run_id identify the caller's run for logging/correlation --
     # the C3 claims contract has no slot for either, so only run_id (which the
@@ -152,7 +183,7 @@ def test_a_bad_table_does_not_abort_the_document_and_is_reported_skipped(monkeyp
     def _fake_tables_on_page(_tables, page_no: int) -> list[str]:
         return {1: ["t1-bad", "t1-good"], 2: ["t2-good"]}[page_no]
 
-    def _fake_claims_from_table(table, page, *, entity, file, flag_log):
+    def _fake_claims_from_table(table, page, *, entity, file, flag_log, document_currency=None):
         if table == "t1-bad":
             raise ValueError("a malformed table")
         return [_table_claim(page.page, attribute=table)]
@@ -228,7 +259,7 @@ def test_canonicalize_attributes_maps_table_claims_end_to_end(monkeypatch) -> No
     monkeypatch.setattr(
         extract_service,
         "claims_from_table",
-        lambda table, page, *, entity, file, flag_log: [
+        lambda table, page, *, entity, file, flag_log, document_currency=None: [
             _table_claim(page.page, attribute="Revenue | 2019F")
         ],
     )
@@ -323,7 +354,7 @@ def test_canonicalize_attributes_failure_does_not_abort_the_document(monkeypatch
     monkeypatch.setattr(
         extract_service,
         "claims_from_table",
-        lambda table, page, *, entity, file, flag_log: [
+        lambda table, page, *, entity, file, flag_log, document_currency=None: [
             _table_claim(page.page, attribute="Revenue | 2019F")
         ],
     )
