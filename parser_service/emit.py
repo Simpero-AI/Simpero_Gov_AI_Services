@@ -126,6 +126,15 @@ FLAG_TYPES = frozenset(
         # are kept identical (test_all_flag_types_constant_matches_schema_enum), so it
         # lives here too.
         "superseded_by_same_fact",
+        # The table's header could not be trusted to SEPARATE this cell's column
+        # from another: its column header is empty or shared, so the value shares a
+        # (row label x column header) attribute with another column's value and the
+        # two cannot be told apart. Set by extract.claims_from_table so a consumer
+        # never treats a collapsed or missing period qualifier as a cleanly
+        # resolved one -- the header misinference behind impossible cross-period
+        # orderings. NOT quote_unresolved (the citation still resolves) and NOT
+        # ambiguous_unit (scale is unaffected); this is a column-binding signal.
+        "header_unresolved",
     }
 )
 
@@ -822,6 +831,7 @@ def emit_pdf_table_cell_claim(
     period_kind: PeriodKind | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
     attribute_raw: str | None = None,
+    extra_flags: list[str] | None = None,
 ) -> Claim:
     """Emit a fact for one table cell. A cell with no resolvable bbox (neither
     Docling-native nor DS-2's reconstruction fallback located it) is written
@@ -831,15 +841,25 @@ def emit_pdf_table_cell_claim(
     period_year/period_kind (SIM-345) are the caller's to supply: this function
     reads one table cell and has no view of the column header its value sits
     under, so the caller (extract.claims_from_table, which does) resolves the
-    period and passes it through."""
+    period and passes it through.
+
+    extra_flags rides through to the claim unchanged, for cell-selection signals
+    the caller alone can judge -- header_unresolved, raised when the column could
+    not be told apart from another. Carried on both the missing and resolved
+    paths so the flag is never lost to an uncitable cell."""
     if cell.bbox_source is None:
         element_id = f"pdf:{file}:p{page.page}:table:r{cell.row}c{cell.col}:{attribute}"
+        flags = [*(extra_flags or []), "ambiguous_region_bounds"]
+        # Logged per flag, not with one shared detail: the bbox detail describes
+        # ambiguous_region_bounds, not a piggybacked cell-selection flag such as
+        # header_unresolved, which carries no detail of its own.
         flag_log.log(
             stage,
             element_id,
             "ambiguous_region_bounds",
             detail=f"cell ({cell.row},{cell.col}) has no resolvable source bbox",
         )
+        flag_log.log_all(stage, element_id, list(extra_flags or []))
         return _missing_pdf_claim(
             entity,
             attribute,
@@ -847,7 +867,7 @@ def emit_pdf_table_cell_claim(
             value_type,
             page,
             file,
-            ["ambiguous_region_bounds"],
+            flags,
             document_id=document_id,
             document_name=document_name,
             section=section,
@@ -879,6 +899,7 @@ def emit_pdf_table_cell_claim(
         period_kind=period_kind,
         stage=stage,
         attribute_raw=attribute_raw,
+        extra_flags=extra_flags,
     )
 
 
