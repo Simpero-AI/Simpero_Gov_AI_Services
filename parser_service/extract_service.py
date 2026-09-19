@@ -104,8 +104,8 @@ def _prose_pages(pages: list[PageIndex], blocks) -> list[PageIndex]:
     return [p for p in pages if prose_text(blocks_on_page(blocks, p.page), p).strip()]
 
 
-def _prose_claims(
-    kind: str,
+def _prose_tiers(
+    kinds: list[str],
     with_prose: list[PageIndex],
     blocks,
     *,
@@ -114,27 +114,41 @@ def _prose_claims(
     flag_log: FlagLog,
     workers: int,
     client,
-) -> tuple[list[Claim], list[SkippedPage]]:
-    """Run one prose tier over the given prose pages, concurrently.
+) -> dict[str, tuple[list[Claim], list[SkippedPage]]]:
+    """Run one or more prose tiers over the given prose pages in a SINGLE fan-out pool.
 
-    `with_prose` is the already-filtered list of prose-bearing pages (see
-    _prose_pages), so the block scan that selects them happens once per document
-    rather than once per tier. `client` is the document's single shared Anthropic
-    client (threaded from extract_claims) so every tier reuses one warm connection
-    pool rather than each spinning up its own. `kind` selects the extractor:
-    "prose" for the numeric pass, "qualitative" for the assertion pass. A page
-    whose model call fails is reported on stderr AND returned as a
-    SkippedPage(page, tier, reason) -- a partial result that names its gaps is more
-    useful than none, and both entry points need that name: the CLI caller can
-    re-run it, and an HTTP caller has no stderr to read at all (see extract_claims'
-    `skipped_pages`).
+    The numeric ("prose") and qualitative ("qualitative") extractors each read only
+    `blocks` -- neither depends on the other's claims -- so their per-page calls are
+    independent and belong in one pool rather than two drained back-to-back. A single
+    pool bounded at `workers` holds peak concurrency at exactly the width each separate
+    pool reached: it never puts 2*workers calls in flight, the ceiling EXTRACT_WORKERS
+    is sized to for the account's rate-limit headroom. What it removes is the
+    drain-then-refill gap between the tiers -- the numeric pool's slow-tail pages used
+    to leave workers idle that the qualitative pass could not fill until the first pool
+    had fully drained. Same calls, same prompts, same per-tier accounting; only the
+    wall-clock changes, which is why this merge is safe to make without re-validating
+    extraction quality.
+
+    `with_prose` is the already-filtered prose-bearing page set (see _prose_pages), so
+    the block scan that selects it happens once per document rather than once per tier,
+    and `client` is the document's single shared Anthropic client (threaded from
+    extract_claims) so every tier reuses one warm connection pool. Per-tier failure
+    accounting is preserved: each (kind, page) task carries its kind, so a page that
+    fails in both passes is two SkippedPage records under two tiers -- the same shape
+    two separate pools produced, which both entry points need (the CLI caller can re-run
+    a named page; an HTTP caller has no stderr to read, only `skipped_pages`). Returns
+    one (claims, skipped) pair per requested kind, keyed by kind.
     """
+    result: dict[str, tuple[list[Claim], list[SkippedPage]]] = {k: ([], []) for k in kinds}
     if not with_prose:
-        return [], []  # prose-less document -- nothing to fan out
-    extractor = claims_from_prose if kind == "prose" else assertions_from_prose
+        return result  # prose-less document -- nothing to fan out
 
-    def run(page: PageIndex) -> tuple[int, list[Claim]]:
-        return page.page, extractor(
+    # "prose" is the numeric pass, "qualitative" the assertion pass; resolved here (not
+    # at import) so a test can substitute either extractor.
+    extractors = {"prose": claims_from_prose, "qualitative": assertions_from_prose}
+
+    def run(kind: str, page: PageIndex) -> list[Claim]:
+        return extractors[kind](
             blocks_on_page(blocks, page.page),
             page,
             entity_hint=entity,
@@ -143,30 +157,39 @@ def _prose_claims(
             client=client,
         )
 
-    claims: list[Claim] = []
-    failed: list[tuple[int, str]] = []
+    claims: dict[str, list[Claim]] = {k: [] for k in kinds}
+    failed: dict[str, list[tuple[int, str]]] = {k: [] for k in kinds}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(run, p): p.page for p in with_prose}
+        futures = {
+            pool.submit(run, kind, page): (kind, page.page) for kind in kinds for page in with_prose
+        }
         for future in as_completed(futures):
+            kind, page_no = futures[future]
             try:
-                _, page_claims = future.result()
-                claims += page_claims
+                claims[kind] += future.result()
             except Exception as exc:  # noqa: BLE001 -- one bad page must not lose the run
-                failed.append((futures[future], f"{type(exc).__name__}: {exc}"))
-    resolved = sum(1 for c in claims if c.status != "missing")
-    print(
-        f"tier {kind}: {len(claims)} claims over {len(with_prose)} prose pages "
-        f"({resolved} resolved)",
-        file=sys.stderr,
-    )
-    if failed:
+                failed[kind].append((page_no, f"{type(exc).__name__}: {exc}"))
+
+    for kind in kinds:
+        kind_claims = claims[kind]
+        kind_failed = failed[kind]
+        resolved = sum(1 for c in kind_claims if c.status != "missing")
         print(
-            f"  {len(failed)} page(s) failed and were skipped: {[p for p, _ in failed]}",
+            f"tier {kind}: {len(kind_claims)} claims over {len(with_prose)} prose pages "
+            f"({resolved} resolved)",
             file=sys.stderr,
         )
-    return claims, [
-        SkippedPage(page=page_no, tier=kind, reason=reason) for page_no, reason in failed
-    ]
+        if kind_failed:
+            print(
+                f"  {len(kind_failed)} page(s) failed and were skipped: "
+                f"{[p for p, _ in kind_failed]}",
+                file=sys.stderr,
+            )
+        result[kind] = (
+            kind_claims,
+            [SkippedPage(page=p, tier=kind, reason=r) for p, r in kind_failed],
+        )
+    return result
 
 
 def _pdf_span(claim: Claim) -> tuple[int, int, int] | None:
@@ -764,8 +787,18 @@ def extract_claims(
         # escalation denominator reuse this instead of re-scanning the blocks.
         prose_pages = _prose_pages(result.pages, blocks)
         prose_page_count = len(prose_pages)
-        prose_claims, prose_failed = _prose_claims(
-            "prose",
+
+        # The numeric prose tier and the qualitative tier both read only `blocks`
+        # (neither depends on the other's claims), so they fan out through ONE pool
+        # rather than two drained back-to-back -- see _prose_tiers, which keeps peak
+        # concurrency at EXTRACT_WORKERS while dropping the drain-then-refill gap
+        # between them. `complete` is deliberately NOT in that pool: coverage is
+        # measured over the numeric claims, so it must run after them, and it runs
+        # over exactly table+prose -- the same input it had when it ran between the
+        # two tiers -- because qualitative is appended to `claims` only afterwards.
+        kinds = ["prose", *(["qualitative"] if qualitative else [])]
+        tiers = _prose_tiers(
+            kinds,
             prose_pages,
             blocks,
             entity=entity,
@@ -774,9 +807,12 @@ def extract_claims(
             workers=workers,
             client=shared_client,
         )
+
+        prose_claims, prose_failed = tiers["prose"]
         claims += prose_claims
         skipped_pages.extend(prose_failed)
         tier_claims.append(("prose", prose_claims))
+
         if complete:
             complete_claims, complete_failed = _completeness_claims(
                 result.pages,
@@ -790,29 +826,9 @@ def extract_claims(
             claims += complete_claims
             skipped_pages.extend(complete_failed)
             tier_claims.append(("complete", complete_claims))
+
         if qualitative:
-            # Runs AFTER the prose pass, not concurrently with it, even though the
-            # qualitative extractor depends only on `blocks` (never on the prose
-            # claims, unlike `complete`). Each tier fans out `workers`-wide
-            # (EXTRACT_WORKERS); running two pools at once would put 2*workers
-            # Anthropic calls in flight, past the width that env is set to for the
-            # account's rate-limit headroom -- on a concurrency:1 worker that trades
-            # wall-clock for 429 churn, not real throughput. The added per-prose-
-            # page pass is bounded and absorbed by the raised job.timeout
-            # (worker._normalize_job_policy). A single pool covering both extractors
-            # would cut the wall-clock without raising peak concurrency, but it
-            # entangles the per-tier failure accounting each tier keeps here (its own
-            # skipped_pages tier), so it's left as a separate optimization.
-            qualitative_claims, qualitative_failed = _prose_claims(
-                "qualitative",
-                prose_pages,
-                blocks,
-                entity=entity,
-                file=file,
-                flag_log=flag_log,
-                workers=workers,
-                client=shared_client,
-            )
+            qualitative_claims, qualitative_failed = tiers["qualitative"]
             claims += qualitative_claims
             skipped_pages.extend(qualitative_failed)
             tier_claims.append(("qualitative", qualitative_claims))

@@ -45,6 +45,7 @@ import re
 from typing import Literal
 
 import anthropic
+from anthropic.types import ThinkingConfigParam
 from pydantic import BaseModel, Field, ValidationError
 
 from .emit import (
@@ -65,8 +66,49 @@ logger = logging.getLogger(__name__)
 _STAGE_ASSERTION = "prose_assertion"
 
 # Sonnet-always is the locked floor for extraction; Opus is the current default and the
-# quality-sensitive choice for a pass whose output enters the claims spine.
+# quality-sensitive choice for a pass whose output enters the claims spine. This stays
+# the fixed default for the document-level classifiers that import it (deal_profile,
+# screen_criteria, dashboard, verify) -- one call each, not the fan-out that dominates
+# wall-clock -- so retargeting the per-page tiers below must never silently move them.
 DEFAULT_MODEL = "claude-opus-4-8"
+
+# The model and the extended-thinking config for the per-page prose-family extractor
+# tiers (numeric prose, the completeness re-pass, and qualitative assertions) -- the
+# ~one-call-per-page fan-out that dominates a large document's wall-clock (a ~100-page
+# CIM is ~200 Opus calls, each with adaptive extended thinking and a 16k output cap).
+# Both are env-tunable, like EXTRACT_WORKERS, so a real deal can be re-extracted on a
+# cheaper/faster config to measure the accuracy/latency trade BEFORE any default moves.
+# Unset, both are byte-identical to before this knob existed (Opus + adaptive thinking);
+# accuracy is paramount, so the defaults do not change until a measured comparison says
+# they should. Kept separate from DEFAULT_MODEL on purpose (see above).
+EXTRACT_MODEL = os.getenv("EXTRACT_MODEL") or DEFAULT_MODEL
+
+
+def _extract_thinking() -> ThinkingConfigParam:
+    """The `thinking` config for one per-page prose-family model call, tunable via
+    EXTRACT_THINKING. Read per call (not frozen at import) so a test can set the env and
+    so an operator's value takes effect on redeploy without a code change.
+
+        unset / "adaptive"                  -> {"type": "adaptive"}  (today's default:
+                                               the highest-quality config every prose
+                                               call used before this knob; the model
+                                               chooses its own thinking depth)
+        "off"/"disabled"/"none"/"0"/"false" -> {"type": "disabled"} (no extended
+                                               thinking -- the single largest per-call
+                                               latency cut for an extraction whose output
+                                               is grammar-constrained anyway)
+
+    Anything else keeps adaptive, failing safe toward extraction quality. A fixed
+    thinking *budget* is deliberately not offered: `budget_tokens` is rejected with a
+    400 on the Opus-4.8 / Sonnet-5 family this defaults to (Anthropic removed it; depth
+    is tuned with request effort instead), so the knob exposes only the two states valid
+    across the models EXTRACT_MODEL would realistically select.
+    """
+    mode = (os.getenv("EXTRACT_THINKING") or "adaptive").strip().lower()
+    if mode in {"off", "disabled", "none", "0", "false"}:
+        return {"type": "disabled"}
+    return {"type": "adaptive"}
+
 
 # Docling labels whose blocks carry assertions. Advisory, per text_extract's warning:
 # page_header was measured labelling a reproduced press clipping, so furniture is excluded
@@ -393,7 +435,7 @@ def propose_for_page(
     *,
     entity_hint: str,
     file: str,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[ProposedClaim]:
     """Ask the model for the claims one page's prose asserts.
@@ -417,7 +459,7 @@ def propose_for_page(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
-            thinking={"type": "adaptive"},
+            thinking=_extract_thinking(),
             # The system prompt is byte-identical across every page of every document, so it
             # is the whole cacheable prefix. The page text follows it and varies per call.
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
@@ -513,7 +555,7 @@ def claims_from_prose(
     entity_hint: str,
     file: str,
     flag_log: FlagLog,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[Claim]:
     """Propose claims for one page's prose and emit each through the citation boundary.
@@ -547,7 +589,7 @@ def propose_completion_for_page(
     *,
     entity_hint: str,
     file: str,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[ProposedClaim]:
     """The completeness re-pass over ONE page: given (number, context) pairs the
@@ -584,7 +626,7 @@ def propose_completion_for_page(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
-            thinking={"type": "adaptive"},
+            thinking=_extract_thinking(),
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
             output_format=PageProposals,
@@ -603,7 +645,7 @@ def claims_from_completeness(
     entity_hint: str,
     file: str,
     flag_log: FlagLog,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[Claim]:
     """Recover claims for a page's coverage misses, emitted through the same
@@ -921,7 +963,7 @@ def propose_assertions_for_page(
     *,
     entity_hint: str,
     file: str,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[ProposedAssertion]:
     """Ask the model for the qualitative claims one page's prose asserts.
@@ -940,7 +982,7 @@ def propose_assertions_for_page(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
-            thinking={"type": "adaptive"},
+            thinking=_extract_thinking(),
             system=[
                 {"type": "text", "text": _ASSERTION_SYSTEM, "cache_control": {"type": "ephemeral"}}
             ],
@@ -988,7 +1030,7 @@ def assertions_from_prose(
     entity_hint: str,
     file: str,
     flag_log: FlagLog,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[Claim]:
     """Qualitative claims for one page, emitted through the same citation boundary.
