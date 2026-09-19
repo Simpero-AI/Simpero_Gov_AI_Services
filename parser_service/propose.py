@@ -45,6 +45,7 @@ import re
 from typing import Literal
 
 import anthropic
+from anthropic.types import ThinkingConfigParam
 from pydantic import BaseModel, Field, ValidationError
 
 from .emit import (
@@ -66,7 +67,29 @@ _STAGE_ASSERTION = "prose_assertion"
 
 # Sonnet-always is the locked floor for extraction; Opus is the current default and the
 # quality-sensitive choice for a pass whose output enters the claims spine.
-DEFAULT_MODEL = "claude-opus-4-8"
+#
+# Both the model and the per-call extended-thinking config are env-tunable so ops
+# can trade extraction speed/cost against quality WITHOUT a code change -- the
+# two biggest per-call latency levers behind the ~13-min parse of a ~100-page
+# document (each prose + qualitative page is one Opus call with adaptive extended
+# thinking). Defaults preserve today's behaviour EXACTLY (Opus + adaptive
+# thinking); PARSER_EXTRACT_MODEL selects a lighter model (e.g. Sonnet, the
+# documented floor) and PARSER_EXTRACT_THINKING=off disables extended thinking,
+# the single largest cut for a largely structured extraction. Accuracy is
+# paramount: measure extraction quality before flipping either default.
+DEFAULT_MODEL = os.getenv("PARSER_EXTRACT_MODEL") or "claude-opus-4-8"
+
+
+def _extract_thinking() -> ThinkingConfigParam:
+    """The `thinking` config for the per-page extractor calls. Adaptive extended
+    thinking (today's behaviour) unless PARSER_EXTRACT_THINKING is set to a
+    disabling value (off/disabled/none/0/false), which turns extended thinking
+    off -- the biggest single per-call latency reduction available here."""
+    mode = (os.getenv("PARSER_EXTRACT_THINKING") or "adaptive").strip().lower()
+    if mode in {"off", "disabled", "none", "0", "false"}:
+        return {"type": "disabled"}
+    return {"type": "adaptive"}
+
 
 # Docling labels whose blocks carry assertions. Advisory, per text_extract's warning:
 # page_header was measured labelling a reproduced press clipping, so furniture is excluded
@@ -417,7 +440,7 @@ def propose_for_page(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
-            thinking={"type": "adaptive"},
+            thinking=_extract_thinking(),
             # The system prompt is byte-identical across every page of every document, so it
             # is the whole cacheable prefix. The page text follows it and varies per call.
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
@@ -584,7 +607,7 @@ def propose_completion_for_page(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
-            thinking={"type": "adaptive"},
+            thinking=_extract_thinking(),
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
             output_format=PageProposals,
@@ -940,7 +963,7 @@ def propose_assertions_for_page(
         lambda: client.messages.parse(
             model=model,
             max_tokens=16000,
-            thinking={"type": "adaptive"},
+            thinking=_extract_thinking(),
             system=[
                 {"type": "text", "text": _ASSERTION_SYSTEM, "cache_control": {"type": "ephemeral"}}
             ],
