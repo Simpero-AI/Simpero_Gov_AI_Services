@@ -37,7 +37,7 @@ from .emit import (
     element_id_for,
 )
 from .extract import claims_from_table
-from .llm_client import make_client
+from .llm_client import AnthropicCreditExhausted, make_client
 from .propose import (
     api_key_present,
     assertions_from_prose,
@@ -152,6 +152,12 @@ def _prose_claims(
                 _, page_claims = future.result()
                 claims += page_claims
             except Exception as exc:  # noqa: BLE001 -- one bad page must not lose the run
+                # Credit exhaustion dooms every remaining page identically, so a
+                # per-page skip would just accumulate into a silent empty (or
+                # near-empty) 200 -- the "no financials" bug. Fail loud instead:
+                # propagate so extract_claims aborts and the run is marked failed.
+                if isinstance(exc, AnthropicCreditExhausted):
+                    raise
                 failed.append((futures[future], f"{type(exc).__name__}: {exc}"))
     resolved = sum(1 for c in claims if c.status != "missing")
     print(
@@ -241,6 +247,12 @@ def _completeness_claims(
                 _, page_claims = future.result()
                 claims += page_claims
             except Exception as exc:  # noqa: BLE001 -- one bad page must not lose the run
+                # Credit exhaustion dooms every remaining page identically, so a
+                # per-page skip would just accumulate into a silent empty (or
+                # near-empty) 200 -- the "no financials" bug. Fail loud instead:
+                # propagate so extract_claims aborts and the run is marked failed.
+                if isinstance(exc, AnthropicCreditExhausted):
+                    raise
                 failed.append((futures[future], f"{type(exc).__name__}: {exc}"))
     recovered = sum(1 for c in claims if c.status != "missing")
     print(

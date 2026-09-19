@@ -8,6 +8,7 @@ from .dispatch import ParseResponse, parse_bytes
 from .docling_parser import parse_known_hashes
 from .errors import ParseError
 from .extract_service import ProseCredentialMissing, extract_claims
+from .llm_client import AnthropicCreditExhausted
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,12 @@ async def extract(
         )
     except ProseCredentialMissing as exc:
         logger.warning("extract rejected: run_id=%s missing prose credential", x_run_id)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except AnthropicCreditExhausted as exc:
+        # Fail loud: a depleted balance must surface as an error the backend
+        # records as a FAILED run, never a 200 with empty claims (a deal that
+        # silently shows "no financials"). 503 = ops-fixable: top up + re-run.
+        logger.error("extract failed: run_id=%s Anthropic credit exhausted", x_run_id)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ParseError as exc:
         logger.warning(

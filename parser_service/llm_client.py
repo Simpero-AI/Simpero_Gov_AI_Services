@@ -86,6 +86,32 @@ def is_grammar_timeout(exc: Exception) -> bool:
     return getattr(exc, "status_code", None) == 400
 
 
+class AnthropicCreditExhausted(RuntimeError):
+    """The Anthropic account is out of credit -- a present-but-unfunded key.
+
+    Distinct from a MISSING key (ProseCredentialMissing, raised before any call)
+    and from a transient 429/5xx (which the SDK retries): a depleted balance is a
+    NON-retryable error that would otherwise be caught per page and recorded as a
+    SkippedPage, silently yielding a partial/empty extraction with a clean 200 --
+    a deal that shows "no financials" when the real cause is billing. Raising it
+    lets extract_claims fail LOUD so the run is marked failed/degraded instead.
+    Ops fix: top up credit (or raise the spend cap) and re-run."""
+
+
+def is_credit_exhausted(exc: Exception) -> bool:
+    """Whether `exc` is an Anthropic insufficient-credit error.
+
+    Anthropic signals a depleted balance as a non-retryable 400 invalid_request
+    error whose message is "Your credit balance is too low to access the
+    Anthropic API ..." (some deployments use a 402 status). Matched on that
+    stable phrase OR a 402 -- deliberately NARROW so a transient 429/5xx (retried
+    by the SDK) or a grammar-compilation 400 is never misread as exhaustion and
+    turned into a hard failure."""
+    if getattr(exc, "status_code", None) == 402:
+        return True
+    return "credit balance is too low" in str(exc).lower()
+
+
 def parse_with_retry(call, *, page_no: int, what: str):
     """Run a structured-output call, narrowing two transient failures.
 
@@ -119,6 +145,15 @@ def parse_with_retry(call, *, page_no: int, what: str):
                 type(exc).__name__,
             )
         except Exception as exc:  # noqa: BLE001 -- re-raised unless it is a known transient
+            # Credit exhaustion is non-retryable and must fail LOUD, not be
+            # narrowed as a transient or (upstream) swallowed into a skipped
+            # page. Checked before the grammar-timeout narrowing so a low-balance
+            # 400 can never be mistaken for one.
+            if is_credit_exhausted(exc):
+                raise AnthropicCreditExhausted(
+                    "Anthropic credit balance is exhausted; top up the account "
+                    "(or raise the spend cap) and re-run."
+                ) from exc
             if not is_grammar_timeout(exc) or grammar_attempts >= _GRAMMAR_RETRIES:
                 raise
             grammar_attempts += 1
