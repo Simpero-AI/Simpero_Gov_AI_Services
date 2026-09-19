@@ -352,6 +352,49 @@ _SYMBOL_CURRENCIES: dict[str, str] = {
     "¥": "JPY",
 }
 
+# ISO-4217 codes accepted as a spelled-out currency (e.g. "USD in millions"). An
+# allowlist, not "any 3 uppercase letters": a bare [A-Z]{3} let a document word
+# be read as a currency (a standalone "TAX (in millions)" -> "TAX"), and the
+# regex word-boundary alone does not stop a real word that IS a standalone token.
+# Deliberately EXCLUDES codes that are common English words (ALL/TRY/TOP/LAK) --
+# in a US/UK/CA filing corpus a real such code is far rarer than the word, and a
+# missed code degrades safely to ambiguous_unit (magnitude applied, unit unknown),
+# never a confident wrong unit. Add a code here only from an observed real filing.
+_ISO_4217_CODES: frozenset[str] = frozenset(
+    {
+        "USD",
+        "EUR",
+        "GBP",
+        "JPY",
+        "CAD",
+        "AUD",
+        "NZD",
+        "HKD",
+        "CHF",
+        "CNY",
+        "SGD",
+        "INR",
+        "SEK",
+        "NOK",
+        "DKK",
+        "KRW",
+        "BRL",
+        "MXN",
+        "ZAR",
+        "AED",
+        "SAR",
+        "ILS",
+        "PLN",
+        "THB",
+        "IDR",
+        "MYR",
+        "PHP",
+        "TWD",
+        "CZK",
+        "HUF",
+    }
+)
+
 # "CAD (in Thousands)", "(in millions)", "($ in millions)", "(US$ in millions)".
 #
 # The currency may sit OUTSIDE the parens ("CAD (in Thousands)") or INSIDE them
@@ -385,7 +428,10 @@ _CURRENCY_MARK = r"US\$|C\$|A\$|NZ\$|HK\$|\$|£|€|¥|[A-Z]{3}"
 # |excluding ..." and "... of <currency>". A bare "of <non-currency>" ("in
 # thousands of filings") is refused, so "thousands of X" prose cannot bind.
 _SCALE_PHRASE_RE = re.compile(
-    r"(?:(?P<currency>[A-Z]{3})\s+)?"
+    # (?<![A-Za-z]): the currency code must be a standalone token, not the tail of
+    # a word -- without it, "...SHAREHOLDERS' EQUITY (In millions)" captured
+    # currency="ITY" and stamped it onto the value's unit (a real Apple 10-K bug).
+    r"(?:(?P<currency>(?<![A-Za-z])[A-Z]{3})\s+)?"
     r"\(\s*"
     r"(?:"
     r"(?:[A-Za-z][A-Za-z.\s]{0,25}?\s+)?"
@@ -423,7 +469,8 @@ _SCALE_PHRASE_RE = re.compile(
 # currency slots stay case-sensitive so a lowercase word is never read as a
 # currency code, while the noun / verb / "in" / magnitude words are not.
 _BARE_NOTE_RE = re.compile(
-    r"(?:(?P<currency>[A-Z]{3})\s+)?"
+    # (?<![A-Za-z]): standalone-token guard, same reason as _SCALE_PHRASE_RE.
+    r"(?:(?P<currency>(?<![A-Za-z])[A-Z]{3})\s+)?"
     r"\b(?i:numbers?|amounts?|dollars?|shares?|figures?|values?)\s+"
     r"(?:"
     r"(?i:are|is|were|was)\s+(?:(?i:expressed|stated|presented|reported|shown|denominated)\s+)?"
@@ -475,15 +522,18 @@ def _mark_currency(mark: str | None) -> str | None:
     if not mark:
         return None
     if len(mark) == 3 and mark.isalpha():
-        return mark
+        code = mark.upper()
+        return code if code in _ISO_4217_CODES else None
     return _SYMBOL_CURRENCIES.get(mark)
 
 
 def _phrase_currency(match: re.Match[str]) -> str | None:
-    """The currency a "(in thousands)" phrase names, from either slot."""
+    """The currency a "(in thousands)" phrase names, from either slot -- routed
+    through _mark_currency so the outside code is allowlist-checked too, not
+    trusted verbatim (a captured word-tail like "ITY" resolves to None)."""
     outside = match.group("currency")
     if outside:
-        return outside
+        return _mark_currency(outside)
     return _mark_currency(match.group("insym"))
 
 

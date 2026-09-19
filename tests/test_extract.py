@@ -19,6 +19,7 @@ import pytest
 
 from parser_service.emit import FlagLog, PdfLocation
 from parser_service.extract import (
+    _infer_label_column,
     attribute_for,
     claims_from_table,
     infer_value_type_for,
@@ -658,3 +659,99 @@ def test_a_two_row_header_stacks_into_the_column_label_and_types_the_count() -> 
     attr = attribute_for(table, room)
     assert attr is not None and attr.endswith("Hotel Rooms")
     assert infer_value_type_for("2,444", attr) == "count"
+
+
+# --------------------------------------------------------------------------- #
+# label-column inference (Docling leading-spacer tables)
+# --------------------------------------------------------------------------- #
+
+
+def test_infer_label_column_is_zero_for_a_normal_table() -> None:
+    # Column 0 holds the labels in the data rows -> unchanged from the old
+    # hardcoded _LABEL_COL=0.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "2019F"),
+        _cell(1, 0, "Revenue"),
+        _cell(1, 1, "$15,295"),
+        _cell(2, 0, "Employees"),
+        _cell(2, 1, "36,000"),
+    ]
+    table = _table(cells)
+    assert _infer_label_column(table, {0}) == 0
+
+
+def test_infer_label_column_skips_a_leading_empty_spacer() -> None:
+    # Docling emits a blank column 0; the real labels sit in column 1.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, ""),
+        _cell(0, 2, "2019F"),
+        _cell(1, 0, ""),
+        _cell(1, 1, "Revenue"),
+        _cell(1, 2, "$15,295"),
+        _cell(2, 0, ""),
+        _cell(2, 1, "Employees"),
+        _cell(2, 2, "36,000"),
+    ]
+    table = _table(cells)
+    assert _infer_label_column(table, {0}) == 1
+
+
+def test_infer_label_column_falls_back_to_zero_when_no_text_label_column() -> None:
+    # A spacer followed only by value columns has no text label column; falling
+    # back to 0 keeps the old behaviour (no recall regression) rather than
+    # shifting onto a value column and dropping it.
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "2018"),
+        _cell(0, 2, "2019"),
+        _cell(1, 0, ""),
+        _cell(1, 1, "1,000"),
+        _cell(1, 2, "2,000"),
+        _cell(2, 0, ""),
+        _cell(2, 1, "3,000"),
+        _cell(2, 2, "4,000"),
+    ]
+    table = _table(cells)
+    assert _infer_label_column(table, {0}) == 0
+
+
+def test_spacer_led_table_binds_values_to_the_real_label_not_a_stray_cell() -> None:
+    # The failure this guards against ("grabbed a stray table number"): Docling
+    # emits a blank column 0, so the real labels sit in column 1. With the old
+    # hardcoded label column 0, attribute_for read the label from the blank
+    # column (every value -> None -> DROPPED) AND column 1 was treated as a value
+    # column, so a bare-number footnote/reference row sitting in the label column
+    # ("42") passed _is_a_figure and was emitted. Inferring the label column
+    # fixes both: the real figures bind to their real labels, and the stray 42 in
+    # the label column is skipped, not emitted.
+    page = make_page("2019F Revenue $15,295 Employees 36,000 42")
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, ""),
+        _cell(0, 2, "2019F"),
+        _cell(1, 0, ""),
+        _cell(1, 1, "Revenue"),
+        _cell(1, 2, "$15,295"),
+        _cell(2, 0, ""),
+        _cell(2, 1, "Employees"),
+        _cell(2, 2, "36,000"),
+        _cell(3, 0, ""),
+        _cell(3, 1, "42"),  # a bare-number footnote/ref row inside the label column
+        _cell(3, 2, ""),
+    ]
+    claims = claims_from_table(
+        _table(cells), page, entity="Acme", file="acme.pdf", flag_log=FlagLog()
+    )
+    attributes = [c.attribute for c in claims]
+    raw_values = [c.value.raw for c in claims]
+
+    # The real figures bind to their real labels via the inferred label column
+    # (all DROPPED under the old hardcoded label column 0).
+    assert "Revenue | 2019F" in attributes
+    assert "Employees | 2019F" in attributes
+    assert "36,000" in raw_values
+    # The bare "42" in the label column is skipped, never emitted as a figure.
+    assert "42" not in raw_values
+    assert not any(a.startswith("42") for a in attributes)

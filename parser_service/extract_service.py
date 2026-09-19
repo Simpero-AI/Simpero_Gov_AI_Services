@@ -37,7 +37,7 @@ from .emit import (
     element_id_for,
 )
 from .extract import claims_from_table
-from .llm_client import make_client
+from .llm_client import AnthropicCreditExhausted, make_client
 from .propose import (
     api_key_present,
     assertions_from_prose,
@@ -168,6 +168,12 @@ def _prose_tiers(
             try:
                 claims[kind] += future.result()
             except Exception as exc:  # noqa: BLE001 -- one bad page must not lose the run
+                # Credit exhaustion dooms every remaining page identically, so a
+                # per-page skip would just accumulate into a silent empty (or
+                # near-empty) 200 -- the "no financials" bug. Fail loud instead:
+                # propagate so extract_claims aborts and the run is marked failed.
+                if isinstance(exc, AnthropicCreditExhausted):
+                    raise
                 failed[kind].append((page_no, f"{type(exc).__name__}: {exc}"))
 
     for kind in kinds:
@@ -264,6 +270,12 @@ def _completeness_claims(
                 _, page_claims = future.result()
                 claims += page_claims
             except Exception as exc:  # noqa: BLE001 -- one bad page must not lose the run
+                # Credit exhaustion dooms every remaining page identically, so a
+                # per-page skip would just accumulate into a silent empty (or
+                # near-empty) 200 -- the "no financials" bug. Fail loud instead:
+                # propagate so extract_claims aborts and the run is marked failed.
+                if isinstance(exc, AnthropicCreditExhausted):
+                    raise
                 failed.append((futures[future], f"{type(exc).__name__}: {exc}"))
     recovered = sum(1 for c in claims if c.status != "missing")
     print(
@@ -317,6 +329,15 @@ _CANONICALIZABLE_TIERS = frozenset({"table", "prose", "complete"})
 # their document-supplied label as `attribute`, uncanonicalized, rather than
 # being forced into a vocabulary that was never meant to name them.
 _NOT_CANONICALIZABLE_VALUE_TYPES = frozenset({"text", "date"})
+
+# C / bug #2: percentage-family canonical attributes and the value_types that
+# legitimately express them. A margin claim that arrives as currency (a stray
+# dollar figure the extractor mislabeled -- staging test: "Gross Margin
+# -3.90M") must never render in a percent slot; see _canonicalize_quantitative_claims.
+_PERCENT_ATTRIBUTES = frozenset(
+    {"gross_margin", "net_margin", "ebitda_margin", "customer_concentration"}
+)
+_PERCENT_VALUE_TYPES = frozenset({"percent", "ratio"})
 
 
 def _dashboard_eligible(claim: Claim) -> bool:
@@ -394,6 +415,32 @@ def _canonicalize_quantitative_claims(
                 claim.flags = [*claim.flags, *extra_flags]
                 flag_log.log_all(
                     _STAGE_ATTRIBUTE_MAPPING, element_id_for(claim), extra_flags, detail=raw
+                )
+            # C / bug #2: a percentage metric that arrived with a non-percent
+            # value_type is a mis-extraction -- the extractor grabbed a stray
+            # DOLLAR figure and stuck a margin label on it (staging test: "Gross
+            # Margin -3.90M"). Fail the value closed to text so no number can
+            # render in a percent slot (a null `normalized` also drops it from the
+            # headline/consistency gates), keep the raw text for provenance, and
+            # record why. Never retype it to percent -- the value is a real dollar
+            # figure; inventing a % from it would fabricate. Reset the attribute to
+            # the document label, uncanonicalized, like any other text claim.
+            if (
+                canonical in _PERCENT_ATTRIBUTES
+                and claim.value.value_type not in _PERCENT_VALUE_TYPES
+            ):
+                claim.flags = [*claim.flags, "pct_attr_type_mismatch"]
+                claim.value.normalized = None
+                claim.value.unit = None
+                claim.value.scale_multiplier = None
+                claim.value.scale_source = None
+                claim.value.value_type = "text"
+                claim.attribute = raw
+                flag_log.log_all(
+                    _STAGE_ATTRIBUTE_MAPPING,
+                    element_id_for(claim),
+                    ["pct_attr_type_mismatch"],
+                    detail=raw,
                 )
 
 

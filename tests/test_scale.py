@@ -189,6 +189,36 @@ def test_scale_phrase_in_text_returns_none_when_absent() -> None:
     assert scale_phrase_in_text("Revenue and gross margin, no scale phrase") is None
 
 
+def test_scale_phrase_ignores_a_currency_captured_from_a_word_tail() -> None:
+    # "...SHAREHOLDERS' EQUITY (In millions)": the tail of EQUITY must NOT be read
+    # as currency "ITY" (the real Apple 10-K bug -- it stamped "ITY 112.01B" onto
+    # Net Income / Total Equity). The magnitude still applies; the unit resolves to
+    # None -> ambiguous_unit downstream, i.e. a bare number, never a bogus code.
+    result = scale_phrase_in_text("Total shareholders' EQUITY (In millions)")
+    assert result is not None
+    multiplier, currency, _phrase = result
+    assert multiplier == 1_000_000.0
+    assert currency is None
+
+
+def test_scale_phrase_rejects_a_non_iso_standalone_word() -> None:
+    # Even as a standalone token (past the word-boundary guard), a non-ISO word is
+    # not a currency -- the allowlist is what stops "TAX (in millions)" -> "TAX".
+    result = scale_phrase_in_text("TAX (in millions)")
+    assert result is not None
+    multiplier, currency, _phrase = result
+    assert multiplier == 1_000_000.0
+    assert currency is None
+
+
+def test_scale_phrase_still_accepts_a_valid_iso_code() -> None:
+    assert scale_phrase_in_text("USD (in millions)") == (
+        1_000_000.0,
+        "USD",
+        "USD (in millions)",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Non-dollar thousands markers.
 #

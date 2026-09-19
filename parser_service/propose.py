@@ -244,6 +244,14 @@ ONCE. If the sentence appears more than once, extend the quote with adjacent wor
 is unique, keeping every character contiguous and verbatim. A restated sentence cannot be \
 located, so a claim carrying one is DISCARDED.
 
+`quote` MUST be one or more COMPLETE SENTENCES. Begin at the sentence's own start (its \
+capital letter, not mid-clause) and end at its terminal punctuation (a full stop, question \
+mark or exclamation mark) -- treat an abbreviation dot ("Inc.", "U.S.", "Corp.") as part of \
+the sentence, not its end. The quote is stored and shown to an analyst AS the assertion \
+itself, so a mid-sentence fragment reads as broken output. When one sentence is not enough \
+to make the quote unique, or to carry the whole subject-and-predicate, include the adjacent \
+WHOLE sentence(s) -- never a partial clause dangling at either end.
+
 THE ADMISSION TEST. Propose a claim only when ALL FOUR hold. Apply them in order and stop \
 at the first failure.
 
