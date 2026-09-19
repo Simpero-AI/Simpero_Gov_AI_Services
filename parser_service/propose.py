@@ -66,26 +66,45 @@ logger = logging.getLogger(__name__)
 _STAGE_ASSERTION = "prose_assertion"
 
 # Sonnet-always is the locked floor for extraction; Opus is the current default and the
-# quality-sensitive choice for a pass whose output enters the claims spine.
-#
-# Both the model and the per-call extended-thinking config are env-tunable so ops
-# can trade extraction speed/cost against quality WITHOUT a code change -- the
-# two biggest per-call latency levers behind the ~13-min parse of a ~100-page
-# document (each prose + qualitative page is one Opus call with adaptive extended
-# thinking). Defaults preserve today's behaviour EXACTLY (Opus + adaptive
-# thinking); PARSER_EXTRACT_MODEL selects a lighter model (e.g. Sonnet, the
-# documented floor) and PARSER_EXTRACT_THINKING=off disables extended thinking,
-# the single largest cut for a largely structured extraction. Accuracy is
-# paramount: measure extraction quality before flipping either default.
-DEFAULT_MODEL = os.getenv("PARSER_EXTRACT_MODEL") or "claude-opus-4-8"
+# quality-sensitive choice for a pass whose output enters the claims spine. This stays
+# the fixed default for the document-level classifiers that import it (deal_profile,
+# screen_criteria, dashboard, verify) -- one call each, not the fan-out that dominates
+# wall-clock -- so retargeting the per-page tiers below must never silently move them.
+DEFAULT_MODEL = "claude-opus-4-8"
+
+# The model and the extended-thinking config for the per-page prose-family extractor
+# tiers (numeric prose, the completeness re-pass, and qualitative assertions) -- the
+# ~one-call-per-page fan-out that dominates a large document's wall-clock (a ~100-page
+# CIM is ~200 Opus calls, each with adaptive extended thinking and a 16k output cap).
+# Both are env-tunable, like EXTRACT_WORKERS, so a real deal can be re-extracted on a
+# cheaper/faster config to measure the accuracy/latency trade BEFORE any default moves.
+# Unset, both are byte-identical to before this knob existed (Opus + adaptive thinking);
+# accuracy is paramount, so the defaults do not change until a measured comparison says
+# they should. Kept separate from DEFAULT_MODEL on purpose (see above).
+EXTRACT_MODEL = os.getenv("EXTRACT_MODEL") or DEFAULT_MODEL
 
 
 def _extract_thinking() -> ThinkingConfigParam:
-    """The `thinking` config for the per-page extractor calls. Adaptive extended
-    thinking (today's behaviour) unless PARSER_EXTRACT_THINKING is set to a
-    disabling value (off/disabled/none/0/false), which turns extended thinking
-    off -- the biggest single per-call latency reduction available here."""
-    mode = (os.getenv("PARSER_EXTRACT_THINKING") or "adaptive").strip().lower()
+    """The `thinking` config for one per-page prose-family model call, tunable via
+    EXTRACT_THINKING. Read per call (not frozen at import) so a test can set the env and
+    so an operator's value takes effect on redeploy without a code change.
+
+        unset / "adaptive"                  -> {"type": "adaptive"}  (today's default:
+                                               the highest-quality config every prose
+                                               call used before this knob; the model
+                                               chooses its own thinking depth)
+        "off"/"disabled"/"none"/"0"/"false" -> {"type": "disabled"} (no extended
+                                               thinking -- the single largest per-call
+                                               latency cut for an extraction whose output
+                                               is grammar-constrained anyway)
+
+    Anything else keeps adaptive, failing safe toward extraction quality. A fixed
+    thinking *budget* is deliberately not offered: `budget_tokens` is rejected with a
+    400 on the Opus-4.8 / Sonnet-5 family this defaults to (Anthropic removed it; depth
+    is tuned with request effort instead), so the knob exposes only the two states valid
+    across the models EXTRACT_MODEL would realistically select.
+    """
+    mode = (os.getenv("EXTRACT_THINKING") or "adaptive").strip().lower()
     if mode in {"off", "disabled", "none", "0", "false"}:
         return {"type": "disabled"}
     return {"type": "adaptive"}
@@ -424,7 +443,7 @@ def propose_for_page(
     *,
     entity_hint: str,
     file: str,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[ProposedClaim]:
     """Ask the model for the claims one page's prose asserts.
@@ -544,7 +563,7 @@ def claims_from_prose(
     entity_hint: str,
     file: str,
     flag_log: FlagLog,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[Claim]:
     """Propose claims for one page's prose and emit each through the citation boundary.
@@ -578,7 +597,7 @@ def propose_completion_for_page(
     *,
     entity_hint: str,
     file: str,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[ProposedClaim]:
     """The completeness re-pass over ONE page: given (number, context) pairs the
@@ -634,7 +653,7 @@ def claims_from_completeness(
     entity_hint: str,
     file: str,
     flag_log: FlagLog,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[Claim]:
     """Recover claims for a page's coverage misses, emitted through the same
@@ -952,7 +971,7 @@ def propose_assertions_for_page(
     *,
     entity_hint: str,
     file: str,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[ProposedAssertion]:
     """Ask the model for the qualitative claims one page's prose asserts.
@@ -1019,7 +1038,7 @@ def assertions_from_prose(
     entity_hint: str,
     file: str,
     flag_log: FlagLog,
-    model: str = DEFAULT_MODEL,
+    model: str = EXTRACT_MODEL,
     client=None,
 ) -> list[Claim]:
     """Qualitative claims for one page, emitted through the same citation boundary.

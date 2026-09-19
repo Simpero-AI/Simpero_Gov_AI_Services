@@ -18,6 +18,8 @@ from pydantic import ValidationError
 from parser_service.emit import CORE_ATTRIBUTES, OPERATING_METRIC, FlagLog, PdfLocation
 from parser_service.propose import (
     _ATTRIBUTE_BATCH,
+    DEFAULT_MODEL,
+    EXTRACT_MODEL,
     MAX_ASSERTIONS_PER_PAGE,
     AttributeMapping,
     AttributeMappings,
@@ -1319,21 +1321,59 @@ def test_canonicalize_does_not_merge_distinct_metrics_sharing_an_entity_prefix()
     assert "Casino Square Footage" in sent and "Slots" in sent
 
 
+# --------------------------------------------------------------------------- #
+# Env-tunable per-page extractor model + extended-thinking (parse perf). The
+# defaults must stay byte-identical to the pre-knob behaviour: accuracy is
+# paramount, so nothing changes until a measured comparison says to move it.
+# --------------------------------------------------------------------------- #
+
+
 def test_extract_thinking_defaults_to_adaptive(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Default (env unset) preserves today's behaviour exactly: adaptive extended
-    # thinking on every per-page extractor call.
-    monkeypatch.delenv("PARSER_EXTRACT_THINKING", raising=False)
+    # Env unset -> the exact config every per-page call used before this knob existed.
+    monkeypatch.delenv("EXTRACT_THINKING", raising=False)
     assert _extract_thinking() == {"type": "adaptive"}
 
 
-def test_extract_thinking_can_be_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The per-call latency lever: PARSER_EXTRACT_THINKING=off disables extended
-    # thinking. Several disabling spellings are accepted.
-    for value in ("off", "disabled", "none", "0", "false", "OFF"):
-        monkeypatch.setenv("PARSER_EXTRACT_THINKING", value)
-        assert _extract_thinking() == {"type": "disabled"}, value
-    # Any other value keeps adaptive thinking (fail-safe toward quality).
-    monkeypatch.setenv("PARSER_EXTRACT_THINKING", "adaptive")
+@pytest.mark.parametrize("value", ["off", "disabled", "none", "0", "false", "OFF", "  Off  "])
+def test_extract_thinking_disables_on_a_disabling_value(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # The single largest per-call latency lever: disable extended thinking. Several
+    # spellings, case- and whitespace-insensitive.
+    monkeypatch.setenv("EXTRACT_THINKING", value)
+    assert _extract_thinking() == {"type": "disabled"}
+
+
+@pytest.mark.parametrize("value", ["adaptive", "on", "garbage", "1024"])
+def test_extract_thinking_keeps_adaptive_for_anything_else(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # Fail safe toward quality: an unrecognized value never silently downgrades
+    # thinking, and a bare budget integer is deliberately NOT honoured -- budget_tokens
+    # 400s on the Opus-4.8/Sonnet-5 family, so the knob stays at adaptive.
+    monkeypatch.setenv("EXTRACT_THINKING", value)
     assert _extract_thinking() == {"type": "adaptive"}
-    monkeypatch.setenv("PARSER_EXTRACT_THINKING", "garbage")
-    assert _extract_thinking() == {"type": "adaptive"}
+
+
+def test_the_thinking_config_reaches_the_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The knob is wired into the actual per-page call, not merely a helper in isolation.
+    monkeypatch.setenv("EXTRACT_THINKING", "off")
+    page = _page("Turnover in the Bristol venue reached 1,309 units.")
+    client = _StubClient([])
+    propose_for_page([_block(page.text)], page, entity_hint="BarWash", file="bw.pdf", client=client)
+    assert client.calls[0]["thinking"] == {"type": "disabled"}
+
+
+def test_the_extractor_model_defaults_to_opus_and_does_not_move_the_classifiers() -> None:
+    # EXTRACT_MODEL unset resolves to DEFAULT_MODEL, so the per-page fan-out and the
+    # document-level classifiers (deal_profile / screen / dashboard / verify, which
+    # import DEFAULT_MODEL) still share Opus by default -- retargeting the fan-out is
+    # a separate, explicit opt-in, never a side effect of this knob.
+    assert EXTRACT_MODEL == DEFAULT_MODEL == "claude-opus-4-8"
+
+
+def test_the_extractor_model_reaches_the_model_call() -> None:
+    page = _page("Turnover in the Bristol venue reached 1,309 units.")
+    client = _StubClient([])
+    propose_for_page([_block(page.text)], page, entity_hint="BarWash", file="bw.pdf", client=client)
+    assert client.calls[0]["model"] == EXTRACT_MODEL

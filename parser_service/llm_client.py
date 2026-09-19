@@ -6,7 +6,7 @@ default since #55) to parallelize the prose tiers and the per-claim binding
 audit. That burst routinely pushes past the account's rate limit, so individual
 page calls hit 429/529/timeout. The SDK retries exactly those with exponential
 backoff -- but its default of 2 retries is too little headroom for a 16-wide
-burst: the retries exhaust, the error propagates, and extract_service._prose_claims
+burst: the retries exhaust, the error propagates, and extract_service._prose_tiers
 catches it and drops that whole page's claims. The result is a silent partial
 extraction -- fewer claims AND a faster run, because failed calls short-circuit
 the full generation. Raising the retry ceiling lets the SDK's own backoff absorb

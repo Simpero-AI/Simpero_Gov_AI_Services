@@ -9,6 +9,8 @@ identical to what the CLI would print for the same input.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Literal
 
 import pytest
@@ -44,6 +46,13 @@ def _table_claim(
         location=PdfLocation(file="cim.pdf", page=page, char_start=0, char_end=2),
         status="proposed",
     )
+
+
+def _page_index(page: int) -> extract_service.PageIndex:
+    # A minimal real PageIndex for the _prose_tiers unit tests: those stub the
+    # extractors and blocks_on_page, so only `.page` is ever read, but the helper
+    # is typed as PageIndex to match the signature the fan-out actually takes.
+    return extract_service.PageIndex(page=page, text="", char_map=[])
 
 
 def test_prose_without_a_key_raises_before_any_parsing(monkeypatch) -> None:
@@ -521,3 +530,232 @@ def test_dashboard_entity_counts_excludes_qualitative_entities() -> None:
     ]
 
     assert extract_service._dashboard_entity_counts(claims) == {"AcmeCo": 2}
+
+
+# --------------------------------------------------------------------------- #
+# The numeric prose tier and the qualitative tier share ONE fan-out pool (they
+# read only `blocks`, never each other's claims). The merge is a pure wall-clock
+# win -- same calls, same prompts -- so these guard the invariants that make it
+# safe: peak concurrency stays at EXTRACT_WORKERS, per-tier failure accounting
+# survives, and completeness still sees exactly table+prose (never qualitative).
+# --------------------------------------------------------------------------- #
+
+
+def _prose_extractor(
+    kind: str, *, barrier: threading.Barrier | None = None, counter: dict | None = None
+):
+    """A fake prose/qualitative extractor: returns one claim tagged with `kind`.
+    Optionally rendezvous on `barrier` (to prove two tiers run at once) or record
+    live/peak concurrency in `counter` (to prove the worker cap holds)."""
+
+    def run(_blocks, page, *, entity_hint, file, flag_log, client):
+        if barrier is not None:
+            barrier.wait()  # completes only if a task from the OTHER tier is also live
+        if counter is not None:
+            with counter["lock"]:
+                counter["live"] += 1
+                counter["peak"] = max(counter["peak"], counter["live"])
+            time.sleep(0.02)  # hold the slot so overlap is actually exercised
+            with counter["lock"]:
+                counter["live"] -= 1
+        return [_table_claim(page.page, attribute=kind)]
+
+    return run
+
+
+def test_prose_tiers_runs_the_two_passes_concurrently_in_one_pool(monkeypatch) -> None:
+    # The point of the merge: a numeric page and a qualitative page run at the SAME
+    # time. Two pools drained back-to-back could never both reach this barrier, so
+    # the rendezvous completing (no skip) is what proves the single-pool behaviour.
+    barrier = threading.Barrier(2, timeout=5)
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda _b, _p: None)
+    monkeypatch.setattr(
+        extract_service, "claims_from_prose", _prose_extractor("prose", barrier=barrier)
+    )
+    monkeypatch.setattr(
+        extract_service, "assertions_from_prose", _prose_extractor("qualitative", barrier=barrier)
+    )
+
+    tiers = extract_service._prose_tiers(
+        ["prose", "qualitative"],
+        [_page_index(1)],
+        blocks=None,
+        entity="ACME",
+        file="cim.pdf",
+        flag_log=extract_service.FlagLog(run_id="run-1"),
+        workers=2,
+        client=None,
+    )
+
+    # A timed-out barrier (sequential pools) would surface as skipped pages, not claims.
+    assert tiers["prose"][1] == [] and tiers["qualitative"][1] == []
+    assert len(tiers["prose"][0]) == 1 and len(tiers["qualitative"][0]) == 1
+
+
+def test_prose_tiers_never_exceeds_the_worker_cap_across_both_passes(monkeypatch) -> None:
+    # 2 * len(pages) tasks share one pool, but peak concurrency stays at `workers`
+    # -- the merge must not double the Anthropic calls in flight, since that width
+    # is what the account's rate-limit headroom (EXTRACT_WORKERS) is sized for.
+    counter = {"lock": threading.Lock(), "live": 0, "peak": 0}
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda _b, _p: None)
+    monkeypatch.setattr(
+        extract_service, "claims_from_prose", _prose_extractor("prose", counter=counter)
+    )
+    monkeypatch.setattr(
+        extract_service, "assertions_from_prose", _prose_extractor("qualitative", counter=counter)
+    )
+
+    extract_service._prose_tiers(
+        ["prose", "qualitative"],
+        [_page_index(n) for n in (1, 2, 3, 4)],  # 8 tasks
+        blocks=None,
+        entity="ACME",
+        file="cim.pdf",
+        flag_log=extract_service.FlagLog(run_id="run-1"),
+        workers=3,
+        client=None,
+    )
+
+    assert counter["peak"] <= 3, "one merged pool must not exceed EXTRACT_WORKERS"
+
+
+def test_prose_tiers_attributes_each_failure_to_its_own_tier(monkeypatch) -> None:
+    # A page that fails the numeric pass but not the qualitative one is a skip
+    # record under "prose" only -- the per-tier accounting the single pool must
+    # preserve, since skipped_pages is the only loss signal an HTTP caller can read.
+    def _boom(_blocks, page, *, entity_hint, file, flag_log, client):
+        raise RuntimeError("numeric boom")
+
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda _b, _p: None)
+    monkeypatch.setattr(extract_service, "claims_from_prose", _boom)
+    monkeypatch.setattr(extract_service, "assertions_from_prose", _prose_extractor("qualitative"))
+
+    tiers = extract_service._prose_tiers(
+        ["prose", "qualitative"],
+        [_page_index(7)],
+        blocks=None,
+        entity="ACME",
+        file="cim.pdf",
+        flag_log=extract_service.FlagLog(run_id="run-1"),
+        workers=4,
+        client=None,
+    )
+
+    assert tiers["prose"][0] == []
+    assert [(s.page, s.tier) for s in tiers["prose"][1]] == [(7, "prose")]
+    assert "numeric boom" in tiers["prose"][1][0].reason
+    assert len(tiers["qualitative"][0]) == 1
+    assert tiers["qualitative"][1] == []
+
+
+def test_prose_tiers_a_page_failing_both_passes_is_one_skip_per_tier(monkeypatch) -> None:
+    # The other half of per-tier accounting: a page whose numeric AND qualitative calls
+    # both fail is TWO SkippedPage records -- one under each tier -- not one merged loss.
+    # skipped_pages is keyed per-(page, tier), so both entry points can name each gap.
+    def _boom(message: str):
+        def run(_blocks, page, *, entity_hint, file, flag_log, client):
+            raise RuntimeError(message)
+
+        return run
+
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda _b, _p: None)
+    monkeypatch.setattr(extract_service, "claims_from_prose", _boom("numeric boom"))
+    monkeypatch.setattr(extract_service, "assertions_from_prose", _boom("qualitative boom"))
+
+    tiers = extract_service._prose_tiers(
+        ["prose", "qualitative"],
+        [_page_index(5)],
+        blocks=None,
+        entity="ACME",
+        file="cim.pdf",
+        flag_log=extract_service.FlagLog(run_id="run-1"),
+        workers=4,
+        client=None,
+    )
+
+    assert tiers["prose"][0] == [] and tiers["qualitative"][0] == []
+    assert [(s.page, s.tier) for s in tiers["prose"][1]] == [(5, "prose")]
+    assert [(s.page, s.tier) for s in tiers["qualitative"][1]] == [(5, "qualitative")]
+    assert "numeric boom" in tiers["prose"][1][0].reason
+    assert "qualitative boom" in tiers["qualitative"][1][0].reason
+
+
+def test_prose_tiers_returns_only_the_requested_kinds(monkeypatch) -> None:
+    # Qualitative off -> the pool runs the numeric pass alone (kinds == ["prose"]),
+    # and the qualitative extractor is never called.
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("the qualitative extractor must not run when it is not requested")
+
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda _b, _p: None)
+    monkeypatch.setattr(extract_service, "claims_from_prose", _prose_extractor("prose"))
+    monkeypatch.setattr(extract_service, "assertions_from_prose", _must_not_run)
+
+    tiers = extract_service._prose_tiers(
+        ["prose"],
+        [_page_index(1)],
+        blocks=None,
+        entity="ACME",
+        file="cim.pdf",
+        flag_log=extract_service.FlagLog(run_id="run-1"),
+        workers=2,
+        client=None,
+    )
+
+    assert set(tiers) == {"prose"}
+    assert len(tiers["prose"][0]) == 1
+
+
+def test_completeness_sees_prose_but_never_qualitative(monkeypatch) -> None:
+    # Completeness measures coverage over the numeric claims and must see exactly
+    # what it saw when it ran BETWEEN the two tiers: table + prose, never qualitative.
+    # The merge fans prose+qualitative out together but appends qualitative to
+    # `claims` only AFTER completeness runs, so this ordering invariant is preserved.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class _OnePageResult:
+        document = _Doc()
+        pages = [_Page(1)]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _OnePageResult())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "make_client", lambda: None)
+    monkeypatch.setattr(extract_service, "extract_text_blocks", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "_prose_pages", lambda pages, _blocks: list(pages))
+    monkeypatch.setattr(extract_service, "blocks_on_page", lambda _b, _p: None)
+    monkeypatch.setattr(
+        extract_service,
+        "claims_from_prose",
+        lambda _b, page, **_k: [_table_claim(page.page, attribute="from-prose")],
+    )
+    monkeypatch.setattr(
+        extract_service,
+        "assertions_from_prose",
+        lambda _b, page, **_k: [
+            _table_claim(page.page, attribute="from-qualitative", value_type="text")
+        ],
+    )
+
+    seen: dict[str, list[str]] = {}
+
+    def _spy_completeness(pages, prior_claims, *, entity, file, flag_log, workers, client):
+        seen["prior"] = [c.attribute for c in prior_claims]
+        return [], []
+
+    monkeypatch.setattr(extract_service, "_completeness_claims", _spy_completeness)
+
+    extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+        prose=True,
+        complete=True,
+        qualitative=True,
+    )
+
+    assert seen["prior"] == ["from-prose"], (
+        "completeness must see table+prose only -- qualitative is appended to claims after it"
+    )
