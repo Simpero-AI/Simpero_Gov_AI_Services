@@ -98,6 +98,64 @@ def _header_rows(table: TableRecord) -> list[int]:
     return [table.header_row, *table.header_continuation]
 
 
+def _infer_label_column(table: TableRecord, header_block: set[int]) -> int:
+    """The column that holds the row labels.
+
+    Column 0 is the label column in the normal case and is returned whenever it
+    carries content in a majority of the data rows -- so for an ordinary table
+    this is byte-identical to the old hardcoded _LABEL_COL=0.
+
+    It only shifts right when column 0 is a near-empty LEADING SPACER, which
+    Docling routinely emits for indented line items. With a hardcoded label
+    column that spacer is read as the label (blank -> the row falls back to its
+    banner) AND the real label column beside it is treated as a value column, so
+    a stray digit sitting in a label cell (a footnote marker, a reference, a bare
+    count) is emitted as a figure bound to the wrong metric -- the "grabbed a
+    stray table number" failure. When column 0 is a spacer this returns the
+    leftmost column that is majority TEXT (label-like, not figures) instead.
+
+    It never shifts onto a genuine value column: a value column is majority
+    figures, so it fails the text test, and if there is no text label column at
+    all (a spacer followed only by value columns) it falls back to column 0 --
+    exactly the old behaviour, so recall never regresses relative to today."""
+    data_rows = {c.row for c in table.cells if c.row not in header_block}
+    if not data_rows:
+        return _LABEL_COL
+    threshold = len(data_rows) // 2 + 1  # a STRICT majority of the data rows
+
+    def _filled(col: int) -> int:
+        return sum(
+            1
+            for row in data_rows
+            if (c := _cell_at(table, row, col)) is not None and c.text_normalized.strip()
+        )
+
+    def _texty(col: int) -> int:
+        # Non-empty AND not a parseable figure -- a label, not a value. Uses the
+        # same _is_a_figure gate emission uses, so "text" here means exactly
+        # "would not be emitted as a value".
+        return sum(
+            1
+            for row in data_rows
+            if (c := _cell_at(table, row, col)) is not None
+            and c.text_normalized.strip()
+            and not _is_a_figure(c.text_normalized.strip())
+        )
+
+    cols = sorted({c.col for c in table.cells})
+    if not cols:
+        return _LABEL_COL
+    # Normal case: column 0 carries labels in most rows -> it IS the label column.
+    if _filled(cols[0]) >= threshold:
+        return cols[0]
+    # Column 0 is a near-empty leading spacer: pick the leftmost majority-text
+    # column (a real label column), never a value column. If none exists, keep 0.
+    for col in cols[1:]:
+        if _texty(col) >= threshold:
+            return col
+    return _LABEL_COL
+
+
 def _column_header(table: TableRecord, col: int) -> str:
     """This column's label: the header block's cells stacked top to bottom
     ("Hotel" + "Rooms" -> "Hotel Rooms"), col_span honoured so a merged label
@@ -497,7 +555,11 @@ def section_banners(table: TableRecord) -> dict[int, str]:
 
 
 def attribute_for(
-    table: TableRecord, cell: TableCellRecord, banner: str | None = None
+    table: TableRecord,
+    cell: TableCellRecord,
+    banner: str | None = None,
+    *,
+    label_col: int = _LABEL_COL,
 ) -> str | None:
     """The table's own name for this cell:
     "<section banner> | <row label> | <column header>".
@@ -524,7 +586,7 @@ def attribute_for(
     Returns None when the row has no label AND no banner governs it, because a
     value nothing in the table can name has no attribute to claim.
     """
-    label_cell = _cell_at(table, cell.row, _LABEL_COL)
+    label_cell = _cell_at(table, cell.row, label_col)
     label = label_cell.text_normalized.strip() if label_cell else ""
     if not label:
         # An unlabelled row under a banner is that section's own line -- a
@@ -593,15 +655,16 @@ def claims_from_table(
     """
     banners = section_banners(table)
     header_block = set(_header_rows(table))
+    label_col = _infer_label_column(table, header_block)
     claims: list[Claim] = []
     for cell in sorted(table.cells, key=lambda c: (c.row, c.col)):
-        if cell.col == _LABEL_COL or cell.row in header_block:
+        if cell.col == label_col or cell.row in header_block:
             continue
         raw = cell.text_normalized.strip()
         if not raw or not _is_a_figure(raw):
             continue
 
-        attribute = attribute_for(table, cell, banners.get(cell.row))
+        attribute = attribute_for(table, cell, banners.get(cell.row), label_col=label_col)
         if attribute is None:
             continue
 
