@@ -16,6 +16,7 @@ from parser_service.llm_client import (
     _GRAMMAR_RETRIES,
     is_credit_exhausted,
     is_grammar_timeout,
+    is_usage_limited,
     parse_with_retry,
 )
 
@@ -121,6 +122,14 @@ class _Payment402(Exception):
     status_code = 402
 
 
+class _UsageLimit400(Exception):
+    """Stand-in for the SDK's BadRequestError on a hit usage/spend cap: a 400
+    whose message is Anthropic's 'reached your specified API usage limits'
+    invalid_request error (distinct from a depleted balance)."""
+
+    status_code = 400
+
+
 def test_is_credit_exhausted_matches_low_balance_or_402_but_not_transients() -> None:
     assert is_credit_exhausted(
         _LowBalance400("Your credit balance is too low to access the Anthropic API.")
@@ -150,6 +159,42 @@ def test_parse_with_retry_fails_loud_on_credit_exhaustion(monkeypatch) -> None:
     with pytest.raises(llm_client.AnthropicCreditExhausted):
         parse_with_retry(call, page_no=1, what="numeric proposal")
     assert calls["n"] == 1  # not retried -- exhaustion is non-transient
+
+
+def test_is_usage_limited_matches_the_spend_cap_message_but_not_transients() -> None:
+    assert is_usage_limited(
+        _UsageLimit400(
+            "You have reached your specified API usage limits. You will regain "
+            "access on 2026-10-01 at 00:00 UTC."
+        )
+    )
+    # NARROW: neither a depleted balance nor a transient rate limit is a usage cap
+    # (each has its own handling), and must not be misread as one.
+    assert not is_usage_limited(
+        _LowBalance400("Your credit balance is too low to access the Anthropic API.")
+    )
+    assert not is_usage_limited(Exception("rate limit exceeded"))
+    assert not is_usage_limited(_Grammar400("Grammar compilation timed out"))
+
+
+def test_parse_with_retry_fails_loud_on_a_usage_cap(monkeypatch) -> None:
+    # A hit usage/spend cap blocks every call until an admin raises it, so it must
+    # raise AnthropicCreditExhausted (loud) like a depleted balance -- never be
+    # narrowed/retried or swallowed into a skipped page (the silent-empty bug this
+    # closes: a capped account previously "succeeded" with only docling claims).
+    monkeypatch.setattr("parser_service.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        raise _UsageLimit400(
+            "You have reached your specified API usage limits. You will regain "
+            "access on 2026-10-01 at 00:00 UTC."
+        )
+
+    with pytest.raises(llm_client.AnthropicCreditExhausted):
+        parse_with_retry(call, page_no=1, what="numeric proposal")
+    assert calls["n"] == 1  # not retried -- a usage cap is non-transient
 
 
 def test_parse_with_retry_reraises_a_non_transient_error(monkeypatch) -> None:

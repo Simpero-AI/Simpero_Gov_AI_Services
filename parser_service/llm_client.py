@@ -87,15 +87,19 @@ def is_grammar_timeout(exc: Exception) -> bool:
 
 
 class AnthropicCreditExhausted(RuntimeError):
-    """The Anthropic account is out of credit -- a present-but-unfunded key.
+    """The Anthropic account cannot make calls for a billing/quota reason -- a
+    present-but-unusable key. Two causes are handled identically (see
+    is_credit_exhausted / is_usage_limited): a depleted CREDIT balance, and a
+    configured USAGE/SPEND CAP the account has hit.
 
     Distinct from a MISSING key (ProseCredentialMissing, raised before any call)
-    and from a transient 429/5xx (which the SDK retries): a depleted balance is a
-    NON-retryable error that would otherwise be caught per page and recorded as a
+    and from a transient 429/5xx (which the SDK retries): both are NON-retryable
+    account-level errors that would otherwise be caught per page and recorded as a
     SkippedPage, silently yielding a partial/empty extraction with a clean 200 --
     a deal that shows "no financials" when the real cause is billing. Raising it
     lets extract_claims fail LOUD so the run is marked failed/degraded instead.
-    Ops fix: top up credit (or raise the spend cap) and re-run."""
+    Ops fix: top up credit, or raise/reset the usage limit in the Console (or wait
+    for it to reset), then re-run."""
 
 
 def is_credit_exhausted(exc: Exception) -> bool:
@@ -110,6 +114,21 @@ def is_credit_exhausted(exc: Exception) -> bool:
     if getattr(exc, "status_code", None) == 402:
         return True
     return "credit balance is too low" in str(exc).lower()
+
+
+def is_usage_limited(exc: Exception) -> bool:
+    """Whether `exc` is an Anthropic account usage/spend-cap error.
+
+    Distinct from a depleted balance (is_credit_exhausted): the account has credit
+    but has hit a configured spend/usage limit, which Anthropic signals as a
+    non-retryable 400 invalid_request error reading "You have reached your
+    specified API usage limits. You will regain access on <date> ...". Like an
+    empty balance it blocks EVERY call until an admin raises/resets the limit (or
+    it resets on the boundary), so it must fail LOUD, not be swallowed per page
+    into a silently-empty extraction. Matched on the stable distinctive phrase --
+    deliberately NARROW, so a transient 429 rate limit ("rate limit exceeded") or
+    another 400 is never misread as an account cap."""
+    return "specified api usage limit" in str(exc).lower()
 
 
 def parse_with_retry(call, *, page_no: int, what: str):
@@ -145,14 +164,21 @@ def parse_with_retry(call, *, page_no: int, what: str):
                 type(exc).__name__,
             )
         except Exception as exc:  # noqa: BLE001 -- re-raised unless it is a known transient
-            # Credit exhaustion is non-retryable and must fail LOUD, not be
-            # narrowed as a transient or (upstream) swallowed into a skipped
-            # page. Checked before the grammar-timeout narrowing so a low-balance
-            # 400 can never be mistaken for one.
+            # A billing/quota block (depleted balance OR a hit usage/spend cap) is
+            # non-retryable and must fail LOUD, not be narrowed as a transient or
+            # (upstream) swallowed into a skipped page. Both are 400s, so they are
+            # checked before the grammar-timeout narrowing -- which also matches on
+            # a 400 -- so neither can be mistaken for a grammar timeout.
             if is_credit_exhausted(exc):
                 raise AnthropicCreditExhausted(
                     "Anthropic credit balance is exhausted; top up the account "
                     "(or raise the spend cap) and re-run."
+                ) from exc
+            if is_usage_limited(exc):
+                raise AnthropicCreditExhausted(
+                    "Anthropic usage/spend limit reached for this account; raise "
+                    "or reset the limit in the Console (or wait for it to reset) "
+                    "and re-run."
                 ) from exc
             if not is_grammar_timeout(exc) or grammar_attempts >= _GRAMMAR_RETRIES:
                 raise
