@@ -126,6 +126,12 @@ FLAG_TYPES = frozenset(
         # are kept identical (test_all_flag_types_constant_matches_schema_enum), so it
         # lives here too.
         "superseded_by_same_fact",
+        # Bug #2: a percentage-family attribute (gross_margin/net_margin/
+        # ebitda_margin/customer_concentration) whose extracted value_type was not
+        # percent/ratio -- a stray dollar figure mislabeled as a margin. The claim's
+        # value is failed closed to text (see _canonicalize_quantitative_claims) so
+        # it cannot render in a percent slot; this flag records that it happened.
+        "pct_attr_type_mismatch",
     }
 )
 

@@ -304,6 +304,60 @@ def test_canonicalize_attributes_skips_text_and_date_claims(monkeypatch) -> None
     assert "attribute_raw" not in by_attribute["Current assets:"]
 
 
+def test_percent_attribute_with_currency_value_is_failed_to_text(monkeypatch) -> None:
+    # Bug #2: the extractor grabbed a stray DOLLAR figure and its label
+    # canonicalized to a percentage metric ("Gross Margin -3.90M"). The guard
+    # must fail the value closed to text (no number can render in a percent
+    # slot), keep the raw label uncanonicalized, and flag pct_attr_type_mismatch
+    # -- never invent a percent from the dollar figure. A legitimately
+    # percent-typed margin alongside it is untouched.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class _OnePageResult:
+        document = _Doc()
+        pages = [_Page(1)]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _OnePageResult())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda *_a, **_k: ["t1"])
+    monkeypatch.setattr(
+        extract_service,
+        "claims_from_table",
+        lambda table, page, *, entity, file, flag_log: [
+            _table_claim(page.page, attribute="Gross Margin | 2024", value_type="currency"),
+            _table_claim(page.page, attribute="Gross Margin % | 2024", value_type="percent"),
+        ],
+    )
+    monkeypatch.setattr(
+        extract_service,
+        "canonicalize_attributes",
+        lambda labels: {label: ("gross_margin", []) for label in labels},
+    )
+
+    payload = extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+        canonicalize_attributes=True,
+    )
+
+    # The currency-typed margin is failed closed: no number, value_type text,
+    # flagged, and NOT labeled gross_margin (so it cannot fill a percent slot).
+    bad = next(c for c in payload["claims"] if "pct_attr_type_mismatch" in c.get("flags", []))
+    assert bad["attribute"] == "Gross Margin | 2024"
+    assert bad["value"]["value_type"] == "text"
+    assert bad["value"].get("normalized") is None
+
+    # The genuinely percent-typed margin is untouched: still canonical gross_margin.
+    by_raw = {c.get("attribute_raw", c["attribute"]): c for c in payload["claims"]}
+    good = by_raw["Gross Margin % | 2024"]
+    assert good["attribute"] == "gross_margin"
+    assert "pct_attr_type_mismatch" not in good.get("flags", [])
+
+
 def test_canonicalize_attributes_failure_does_not_abort_the_document(monkeypatch) -> None:
     # Unlike the sibling tiers (table/prose/completeness), the canonicalization
     # pass had no try/except -- a transient API error discarded every
