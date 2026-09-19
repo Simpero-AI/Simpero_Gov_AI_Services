@@ -25,6 +25,7 @@ from parser_service.propose import (
     PageProposals,
     ProposedAssertion,
     ProposedClaim,
+    _extract_thinking,
     _normalize_attribute_label,
     assertions_from_prose,
     canonicalize_attributes,
@@ -1316,3 +1317,23 @@ def test_canonicalize_does_not_merge_distinct_metrics_sharing_an_entity_prefix()
     assert set(result) == set(labels)
     sent = client.calls[0]["messages"][0]["content"]
     assert "Casino Square Footage" in sent and "Slots" in sent
+
+
+def test_extract_thinking_defaults_to_adaptive(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default (env unset) preserves today's behaviour exactly: adaptive extended
+    # thinking on every per-page extractor call.
+    monkeypatch.delenv("PARSER_EXTRACT_THINKING", raising=False)
+    assert _extract_thinking() == {"type": "adaptive"}
+
+
+def test_extract_thinking_can_be_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The per-call latency lever: PARSER_EXTRACT_THINKING=off disables extended
+    # thinking. Several disabling spellings are accepted.
+    for value in ("off", "disabled", "none", "0", "false", "OFF"):
+        monkeypatch.setenv("PARSER_EXTRACT_THINKING", value)
+        assert _extract_thinking() == {"type": "disabled"}, value
+    # Any other value keeps adaptive thinking (fail-safe toward quality).
+    monkeypatch.setenv("PARSER_EXTRACT_THINKING", "adaptive")
+    assert _extract_thinking() == {"type": "adaptive"}
+    monkeypatch.setenv("PARSER_EXTRACT_THINKING", "garbage")
+    assert _extract_thinking() == {"type": "adaptive"}
