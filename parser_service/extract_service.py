@@ -435,7 +435,17 @@ def _canonicalize_quantitative_claims(
                 claim.value.scale_multiplier = None
                 claim.value.scale_source = None
                 claim.value.value_type = "text"
+                # Restore the raw document label AND drop the E2-ran signal: a
+                # claim carrying attribute_raw asserts canonicalization ran and the
+                # contract then requires `attribute` to be canonical
+                # (#/$defs/canonicalAttribute). We just set it back to the raw
+                # label, so leaving attribute_raw non-null (set above) emits an
+                # attribute_raw + non-canonical attribute pair the backend's verify
+                # stage rejects (ValueError: "claim N violates the contract"),
+                # aborting the whole run. Clearing it makes this an ordinary
+                # uncanonicalized text claim, exactly as the value now is.
                 claim.attribute = raw
+                claim.attribute_raw = None
                 flag_log.log_all(
                     _STAGE_ATTRIBUTE_MAPPING,
                     element_id_for(claim),

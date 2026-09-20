@@ -11,14 +11,33 @@ from __future__ import annotations
 import json
 import threading
 import time
+from pathlib import Path
 from typing import Literal
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from parser_service import extract_service
 from parser_service.emit import ClaimValue, PdfLocation
 from parser_service.scale import ValueType
 from scripts import emit_claims
+
+# The SAME contract file the backend's verify stage validates every emitted claim
+# against (start_deal_verification._validate_claims); a claim that fails it aborts
+# the whole run with "claim N violates the contract". Validating emitted claims
+# here catches that class of drift in-repo instead of only in production.
+_CLAIMS_SCHEMA = json.loads(
+    (
+        Path(extract_service.__file__).resolve().parent.parent / "contracts" / "claims.schema.json"
+    ).read_text()
+)
+_CLAIMS_VALIDATOR = Draft202012Validator(_CLAIMS_SCHEMA)
+
+
+def _assert_conforms_to_contract(claims: list[dict]) -> None:
+    for i, claim in enumerate(claims):
+        errors = sorted(_CLAIMS_VALIDATOR.iter_errors(claim), key=str)
+        assert not errors, f"claim {i} violates the contract: {errors[0].message}"
 
 
 class _Doc:
@@ -359,12 +378,22 @@ def test_percent_attribute_with_currency_value_is_failed_to_text(monkeypatch) ->
     assert bad["attribute"] == "Gross Margin | 2024"
     assert bad["value"]["value_type"] == "text"
     assert bad["value"].get("normalized") is None
+    # ...and it drops the E2-ran signal: restoring the raw (non-canonical) label
+    # while still carrying attribute_raw would violate the contract's
+    # canonicalAttribute rule and abort the backend's verify stage (ValueError).
+    assert "attribute_raw" not in bad
 
     # The genuinely percent-typed margin is untouched: still canonical gross_margin.
     by_raw = {c.get("attribute_raw", c["attribute"]): c for c in payload["claims"]}
     good = by_raw["Gross Margin % | 2024"]
     assert good["attribute"] == "gross_margin"
     assert "pct_attr_type_mismatch" not in good.get("flags", [])
+
+    # The failed-closed claim must pass the shared contract the backend
+    # re-validates against -- this is the exact check that failed in production
+    # ("claim N violates the contract: '<raw label>' is not one of [...]") when
+    # attribute_raw was left set alongside the restored raw attribute.
+    _assert_conforms_to_contract([bad])
 
 
 def test_canonicalize_attributes_failure_does_not_abort_the_document(monkeypatch) -> None:
