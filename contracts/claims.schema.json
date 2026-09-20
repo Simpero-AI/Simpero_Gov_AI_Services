@@ -480,7 +480,8 @@
           "binding_unsupported",
           "attribute_unmapped",
           "superseded_by_same_fact",
-          "pct_attr_type_mismatch"
+          "pct_attr_type_mismatch",
+          "header_unresolved"
         ]
       }
     },
