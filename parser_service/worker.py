@@ -26,6 +26,7 @@ from .dispatch import parse_bytes
 from .document_cache import build_spaces_client
 from .errors import ParseError
 from .extract_service import ProseCredentialMissing, extract_claims
+from .llm_client import AnthropicCreditExhausted
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,23 @@ async def process_document(
         # as a job failure, not as per-document rejections producing no claims.
         logger.error("process_document: no Anthropic credential in worker env (audit=%s)", audit)
         raise
+    except AnthropicCreditExhausted as exc:
+        # A billing/quota block -- a depleted CREDIT balance or a hit USAGE/SPEND
+        # cap (see llm_client.is_credit_exhausted / is_usage_limited). The key is
+        # present but the account can make no calls, so every document fails the
+        # same way until an operator tops up / raises the limit and re-runs. Unlike
+        # ProseCredentialMissing this is NOT re-raised: an uncaught raise reaches
+        # Alpha only as an opaque SAQ job failure ("Parsing job failed
+        # unexpectedly"), hiding the real, actionable cause. Return a structured
+        # rejection with a STABLE code Alpha maps to a credit-specific run status,
+        # same shape as a ParseError. str(exc) is a fixed operator string (never
+        # document-derived), so it is safe to forward and persist.
+        logger.error("process_document: Anthropic billing/quota block for %s: %s", spaces_key, exc)
+        return {
+            "status": "rejected",
+            "code": "anthropic_credit_exhausted",
+            "message": str(exc),
+        }
     except ParseError as exc:
         logger.warning(
             "process_document rejected: key=%s code=%s: %s", spaces_key, exc.code, exc.message

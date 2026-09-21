@@ -316,6 +316,30 @@ async def test_process_document_missing_credential_raises_not_rejects(monkeypatc
     assert stub.put_calls == []
 
 
+async def test_process_document_credit_exhausted_rejects_with_stable_code(monkeypatch) -> None:
+    # A billing/quota block (depleted credit or a hit usage/spend cap) is neither a
+    # bad document nor a config problem: process_document returns a structured
+    # rejection carrying a STABLE code Alpha maps to a credit-specific run status --
+    # it must NOT collapse into an opaque SAQ job failure (unlike
+    # ProseCredentialMissing, which raises), and must NOT write a result.
+    stub = _StubS3({"deal/doc.pdf": b"document-bytes"})
+    monkeypatch.setattr(worker, "build_spaces_client", lambda settings: stub)
+    rec = _ExtractRecorder(
+        raises=worker.AnthropicCreditExhausted(
+            "Anthropic credit balance is exhausted; top up the account "
+            "(or raise the spend cap) and re-run."
+        )
+    )
+    monkeypatch.setattr(worker, "extract_claims", rec)
+
+    result = await worker.process_document(ctx=_CTX, spaces_key="deal/doc.pdf", entity="Target Co")
+
+    assert result["status"] == "rejected"
+    assert result["code"] == "anthropic_credit_exhausted"
+    assert "credit balance is exhausted" in result["message"]
+    assert stub.put_calls == []
+
+
 async def test_normalize_job_policy_gives_process_document_its_own_numbers() -> None:
     class _StubJob:
         function = "process_document"
