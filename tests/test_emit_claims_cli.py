@@ -125,6 +125,9 @@ def test_canonicalize_attributes_flag_maps_a_table_claim(monkeypatch, tmp_path, 
     class _Page:
         def __init__(self, page: int) -> None:
             self.page = page
+            # Mirrors PageIndex.text: extract_claims scans page.text for a
+            # cross-page scale banner to carry forward, so the fake needs it.
+            self.text = ""
 
     class _Result:
         document = _Doc()
@@ -137,7 +140,7 @@ def test_canonicalize_attributes_flag_maps_a_table_claim(monkeypatch, tmp_path, 
     monkeypatch.setattr(
         extract_service,
         "claims_from_table",
-        lambda table, page, *, entity, file, flag_log: [
+        lambda table, page, *, entity, file, flag_log, inherited_scale=None: [
             _proposed_claim(entity, "Revenue | 2019F", "$1", _page("$1 total", page_no=page.page))
         ],
     )
@@ -239,6 +242,9 @@ def test_a_failed_prose_page_is_recorded_and_the_run_still_succeeds(
     class _Page:
         def __init__(self, page: int) -> None:
             self.page = page
+            # Mirrors PageIndex.text: extract_claims scans page.text for a
+            # cross-page scale banner to carry forward, so the fake needs it.
+            self.text = ""
 
     class _Result:
         document = _Doc()
