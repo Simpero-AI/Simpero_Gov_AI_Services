@@ -51,7 +51,12 @@ from pydantic import BaseModel, Field
 from .schemas import PageIndex, TableCellRecord, TableRecord
 
 ScaleSource = Literal[
-    "explicit_in_value", "column_header", "page_header", "assumed_1x", "not_applicable"
+    "explicit_in_value",
+    "column_header",
+    "page_header",
+    "inherited_page_header",
+    "assumed_1x",
+    "not_applicable",
 ]
 
 # Mirrors the value.value_type enum in contracts/claims.schema.json. Kept here
@@ -652,6 +657,7 @@ def determine_scale(
     table: TableRecord | None = None,
     cell: TableCellRecord | None = None,
     page_header_ok: bool = True,
+    inherited_scale: tuple[float, str | None, str] | None = None,
 ) -> ScaleResult:
     """Resolve one numeric claim's scale, per the module's resolution order.
 
@@ -678,6 +684,15 @@ def determine_scale(
     that the value is really money. It defaults True (prose and every existing
     caller unaffected); the table caller passes False for a value that typed
     currency only by default, so a page banner cannot silently scale it (SIM-323).
+
+    `inherited_scale` is the nearest PRECEDING page's scale banner (multiplier,
+    currency, phrase), carried forward by the caller for the case the own-page
+    scans cannot reach: a caption-only statement title page, or the first page of
+    a table that continues onto this one, declares "(in millions)" while the data
+    lands on the next page with no banner of its own. It binds only as the lowest
+    priority -- below an own-page column or page header -- and behind the same
+    origin=='table' + page_header_ok gates, so it can never silently rescale a
+    value the own-page banner itself would have been refused for.
     """
     if origin == "prose" and (table is not None or cell is not None):
         raise ValueError("origin='prose' contradicts a supplied table/cell")
@@ -734,18 +749,49 @@ def determine_scale(
             scale_context=context,
         )
 
+    # A caption on a PRECEDING page is out of reach of the two scans above --
+    # page.text is one page, and a per-page TableRecord holds no cell from the
+    # page that introduced the statement. The caller carries the nearest preceding
+    # page's banner here as `inherited_scale` (a one-page look-back, reset whenever
+    # a page declares its own banner) so a caption-only title page or a
+    # table-continues-onto-this-page split still binds the scale the statement
+    # declared -- the Apple 10-K balance sheet whose "(In millions ...)" caption
+    # sits alone on the page before the figures. Reached ONLY after the own-page
+    # column/page header returned nothing (both return above), so an own-page scale
+    # always wins over an inherited one. Behind the SAME origin=='table' +
+    # page_header_ok gates as the own-page banner, so an inherited "(in thousands)"
+    # cannot silently scale an adjacent count table a thousand-fold (SIM-323).
+    if inherited_scale is not None and origin == "table" and page_header_ok:
+        multiplier, currency, context = inherited_scale
+        return ScaleResult(
+            raw=raw,
+            normalized=number * multiplier,
+            unit=currency,
+            scale_multiplier=multiplier,
+            scale_source="inherited_page_header",
+            scale_context=context,
+        )
+
     # assumed_1x now records what it turned down, so "there was no banner on
     # this page" and "there was one and I was not entitled to it" never collapse
     # into the same claim. emit.py already logs scale_context as the flag's
     # detail, so a declined banner is queryable for free -- an assumed_1x with a
-    # non-null scale_context is a value that saw a banner and refused it, whether
-    # refused for prose-origin or (SIM-323) for low currency-confidence.
+    # non-null scale_context is a value that saw a banner (own-page or inherited)
+    # and refused it, whether refused for prose-origin or (SIM-323) for low
+    # currency-confidence.
+    declined_context = (
+        page_match[2]
+        if page_match is not None
+        else inherited_scale[2]
+        if inherited_scale is not None
+        else None
+    )
     return ScaleResult(
         raw=raw,
         normalized=number * 1.0,
         unit=None,
         scale_multiplier=1.0,
         scale_source="assumed_1x",
-        scale_context=None if page_match is None else page_match[2],
+        scale_context=declined_context,
         flags=["scale_assumed"],
     )

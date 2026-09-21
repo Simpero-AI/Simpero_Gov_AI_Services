@@ -232,6 +232,16 @@ def test_unknown_scale_source_rejected(validator: Draft202012Validator) -> None:
     assert list(validator.iter_errors(bad)), "unknown scale_source should be rejected"
 
 
+def test_inherited_page_header_scale_source_accepted(validator: Draft202012Validator) -> None:
+    # A scale caption carried forward from a preceding page (a statement whose
+    # "(in millions)" caption sits on the page before its figures) is a first-class
+    # scale_source; the backend contract must accept it or verify would reject the
+    # claim (contract lockstep).
+    ok = json.loads(json.dumps(VALID_PDF_CLAIM))
+    ok["value"]["scale_source"] = "inherited_page_header"
+    assert not list(validator.iter_errors(ok)), "inherited_page_header must be accepted"
+
+
 def test_a_value_with_a_magnitude_must_carry_its_multiplier_and_source(
     validator: Draft202012Validator,
 ) -> None:

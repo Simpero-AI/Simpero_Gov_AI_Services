@@ -46,6 +46,7 @@ from .propose import (
     claims_from_prose,
     prose_text,
 )
+from .scale import scale_phrase_in_text
 from .schemas import PageIndex
 from .screen_criteria import assess_criteria
 from .table_extract import extract_tables, tables_on_page
@@ -797,6 +798,23 @@ def extract_claims(
     tier_claims: list[tuple[str, list[Claim]]] = []
     skipped_pages: list[SkippedPage] = []
     table_claims: list[Claim] = []
+    # A statement's scale caption ("(In millions ...)") is sometimes printed on its
+    # own title page, or on the first page of a table that continues onto the next,
+    # so the page holding the figures carries no banner of its own and the own-page
+    # scans in determine_scale find nothing (page.text is one page -- the Apple 10-K
+    # balance sheet, caption alone on the page before the figures). Carry the
+    # IMMEDIATELY-PRECEDING page's banner forward onto a banner-less page: a one-page
+    # look-back, deliberately not an unbounded document-level sticky banner, to limit
+    # cross-statement bleed. It is only a candidate -- determine_scale still applies
+    # it behind the same origin=='table' + page_header_ok gates as an own-page banner
+    # (SIM-323), so an inherited "(in thousands)" cannot silently scale an adjacent
+    # count table. result.pages is in reading order.
+    inherited_by_page: dict[int, tuple[float, str | None, str] | None] = {}
+    prev_own_banner: tuple[float, str | None, str] | None = None
+    for page in result.pages:
+        own_banner = scale_phrase_in_text(page.text)
+        inherited_by_page[page.page] = None if own_banner is not None else prev_own_banner
+        prev_own_banner = own_banner
     for page in result.pages:
         for table in tables_on_page(tables, page.page):
             try:
@@ -806,6 +824,7 @@ def extract_claims(
                     entity=entity,
                     file=file,
                     flag_log=flag_log,
+                    inherited_scale=inherited_by_page.get(page.page),
                 )
             except Exception as exc:  # noqa: BLE001 -- one bad table must not abort the document
                 # Guarded per table, not per page: a page with several tables

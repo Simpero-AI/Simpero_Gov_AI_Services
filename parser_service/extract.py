@@ -747,6 +747,7 @@ def claims_from_table(
     file: str,
     flag_log: FlagLog,
     section: str | None = None,
+    inherited_scale: tuple[float, str | None, str] | None = None,
 ) -> list[Claim]:
     """Propose one claim per numeric data cell in `table`.
 
@@ -768,6 +769,12 @@ def claims_from_table(
     line keeps the heading the document filed it under. That is what separates
     the two "Coffee Shop" rows on a P&L, and what names the unlabelled subtotal
     rows that were previously dropped for having nothing to call them.
+
+    `inherited_scale` is the nearest preceding page's scale banner, supplied by the
+    caller for a table on a page that carries no banner of its own (a statement
+    whose "(in millions)" caption sits on the page before the figures, or a table
+    that continues onto this page). It is passed to determine_scale as the lowest-
+    priority scale source; an own-page column/page header always wins.
     """
     banners = section_banners(table)
     header_block = set(_header_rows(table))
@@ -810,6 +817,7 @@ def claims_from_table(
                 flag_log=flag_log,
                 section=section,
                 page_header_ok=is_confident_currency(raw, attribute),
+                inherited_scale=inherited_scale,
                 period_year=period_year,
                 period_kind=period_kind,
                 extra_flags=extra_flags,

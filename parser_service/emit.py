@@ -635,6 +635,7 @@ def emit_pdf_claim(
     document_id: str | None = None,
     document_name: str | None = None,
     page_header_ok: bool = True,
+    inherited_scale: tuple[float, str | None, str] | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
     attribute_raw: str | None = None,
     claim_type: ClaimType = "unknown",
@@ -749,6 +750,7 @@ def emit_pdf_claim(
             table=table,
             cell=cell,
             page_header_ok=page_header_ok,
+            inherited_scale=inherited_scale,
         )
         flags.extend(scale_result.flags)
         if (
@@ -758,12 +760,16 @@ def emit_pdf_claim(
             in (
                 "column_header",
                 "page_header",
+                "inherited_page_header",
             )
         ):
             # A real scale header was found and applied, but it carried no
             # currency code ("(in Thousands)" with no "CAD"/"USD" prefix) --
             # distinct from assumed_1x (no header at all), so flagged
-            # separately: the multiplier is trusted, the currency is not.
+            # separately: the multiplier is trusted, the currency is not. An
+            # inherited banner is treated the same: the Apple "(In millions ...)"
+            # title page names no currency, so the millions multiplier binds but
+            # the currency stays ambiguous_unit for downstream resolution.
             flags.append("ambiguous_unit")
         scale_detail = scale_result.scale_context
         # The magnitude must be what the multiplier says it is. This cannot be a
@@ -833,6 +839,7 @@ def emit_pdf_table_cell_claim(
     document_id: str | None = None,
     document_name: str | None = None,
     page_header_ok: bool = True,
+    inherited_scale: tuple[float, str | None, str] | None = None,
     period_year: int | None = None,
     period_kind: PeriodKind | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
@@ -901,6 +908,7 @@ def emit_pdf_table_cell_claim(
         document_id=document_id,
         document_name=document_name,
         page_header_ok=page_header_ok,
+        inherited_scale=inherited_scale,
         period_year=period_year,
         period_kind=period_kind,
         stage=stage,

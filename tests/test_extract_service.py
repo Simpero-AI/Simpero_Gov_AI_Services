@@ -51,8 +51,11 @@ class _Result:
 
 
 class _Page:
-    def __init__(self, page: int) -> None:
+    def __init__(self, page: int, text: str = "") -> None:
         self.page = page
+        # Mirrors PageIndex.text: the cross-page scale carry-forward in
+        # extract_claims scans page.text for a scale banner, so the fake needs it.
+        self.text = text
 
 
 def _table_claim(
@@ -180,7 +183,7 @@ def test_a_bad_table_does_not_abort_the_document_and_is_reported_skipped(monkeyp
     def _fake_tables_on_page(_tables, page_no: int) -> list[str]:
         return {1: ["t1-bad", "t1-good"], 2: ["t2-good"]}[page_no]
 
-    def _fake_claims_from_table(table, page, *, entity, file, flag_log):
+    def _fake_claims_from_table(table, page, *, entity, file, flag_log, inherited_scale=None):
         if table == "t1-bad":
             raise ValueError("a malformed table")
         return [_table_claim(page.page, attribute=table)]
@@ -203,6 +206,48 @@ def test_a_bad_table_does_not_abort_the_document_and_is_reported_skipped(monkeyp
     attributes = {c["attribute"] for c in payload["claims"]}
     # t1-good survives its sibling t1-bad's failure; t2-good is untouched.
     assert attributes == {"t1-good", "t2-good"}
+
+
+def test_cross_page_scale_banner_is_carried_to_the_next_pages_table(monkeypatch) -> None:
+    # The driver seam for the Apple balance-sheet bug: a scale caption printed
+    # alone on the statement's title page (page 1) is carried forward to the
+    # caption-less data table on page 2 as inherited_scale, so determine_scale can
+    # scale figures whose own page declares no banner. Verifies extract_claims
+    # computes the banner from the preceding page and hands it to that page's
+    # claims_from_table.
+    caption = "CONSOLIDATED BALANCE SHEETS\n(In millions, except number of shares)"
+
+    class _TwoPage:
+        document = _Doc()
+        pages = [_Page(1, text=caption), _Page(2, text="Total assets 364,980")]
+        sha256 = "0" * 64
+
+    class _Page2Table:
+        page = 2
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _TwoPage())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [_Page2Table()])
+
+    received: dict[int, tuple[float, str | None, str] | None] = {}
+
+    def _capture(table, page, *, entity, file, flag_log, inherited_scale=None):
+        received[page.page] = inherited_scale
+        return []
+
+    monkeypatch.setattr(extract_service, "claims_from_table", _capture)
+
+    extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="Apple Inc.",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="aapl.pdf",
+    )
+
+    # Page 2's data table (no banner of its own) inherits page 1's "(In millions)"
+    # banner -> a 1e6 multiplier is available where there was none before.
+    assert received[2] is not None
+    assert received[2][0] == 1_000_000.0
 
 
 def test_skipped_pages_is_empty_when_nothing_failed(monkeypatch) -> None:
@@ -256,7 +301,7 @@ def test_canonicalize_attributes_maps_table_claims_end_to_end(monkeypatch) -> No
     monkeypatch.setattr(
         extract_service,
         "claims_from_table",
-        lambda table, page, *, entity, file, flag_log: [
+        lambda table, page, *, entity, file, flag_log, inherited_scale=None: [
             _table_claim(page.page, attribute="Revenue | 2019F")
         ],
     )
@@ -302,7 +347,7 @@ def test_canonicalize_attributes_skips_text_and_date_claims(monkeypatch) -> None
     monkeypatch.setattr(
         extract_service,
         "claims_from_table",
-        lambda table, page, *, entity, file, flag_log: [
+        lambda table, page, *, entity, file, flag_log, inherited_scale=None: [
             _table_claim(page.page, attribute="Revenue | 2019F", value_type="currency"),
             _table_claim(page.page, attribute="Opening Date | 2019F", value_type="date"),
             _table_claim(page.page, attribute="Current assets:", value_type="text"),
@@ -352,7 +397,7 @@ def test_percent_attribute_with_currency_value_is_failed_to_text(monkeypatch) ->
     monkeypatch.setattr(
         extract_service,
         "claims_from_table",
-        lambda table, page, *, entity, file, flag_log: [
+        lambda table, page, *, entity, file, flag_log, inherited_scale=None: [
             _table_claim(page.page, attribute="Gross Margin | 2024", value_type="currency"),
             _table_claim(page.page, attribute="Gross Margin % | 2024", value_type="percent"),
         ],
@@ -415,7 +460,7 @@ def test_canonicalize_attributes_failure_does_not_abort_the_document(monkeypatch
     monkeypatch.setattr(
         extract_service,
         "claims_from_table",
-        lambda table, page, *, entity, file, flag_log: [
+        lambda table, page, *, entity, file, flag_log, inherited_scale=None: [
             _table_claim(page.page, attribute="Revenue | 2019F")
         ],
     )
