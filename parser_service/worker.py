@@ -26,6 +26,7 @@ from .dispatch import parse_bytes
 from .document_cache import build_spaces_client
 from .errors import ParseError
 from .extract_service import ProseCredentialMissing, extract_claims
+from .llm_client import AnthropicCreditExhausted
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +237,26 @@ async def process_document(
         # same way until the worker env has a credential, and that should surface
         # as a job failure, not as per-document rejections producing no claims.
         logger.error("process_document: no Anthropic credential in worker env (audit=%s)", audit)
+        raise
+    except AnthropicCreditExhausted:
+        # An account-level billing/quota block -- a depleted credit balance or a
+        # hit usage/spend cap (llm_client.is_credit_exhausted / is_usage_limited).
+        # Same class as ProseCredentialMissing above, and handled the same way:
+        # every call fails identically until an operator acts, so this fails the
+        # SAQ job outright rather than returning a per-document "rejected", which
+        # would read on the backend as "this file is bad" when the file is fine.
+        #
+        # Logged at ERROR *before* re-raising because the raise itself reaches
+        # Alpha only as SAQ's generic FAILED status -- it carries no code or
+        # message of its own through the queue, so without this line the parser
+        # side keeps no record of why an entire deal's documents died.
+        logger.error(
+            "process_document: Anthropic account blocked (billing/quota) key=%s -- "
+            "every document will fail until credit is topped up or the usage limit "
+            "is raised/reset",
+            spaces_key,
+            exc_info=True,
+        )
         raise
     except ParseError as exc:
         logger.warning(
