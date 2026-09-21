@@ -360,6 +360,34 @@ def test_emit_pdf_claim_ambiguous_unit_when_header_has_no_currency_code() -> Non
     assert any(e.flag_type == "ambiguous_unit" for e in flag_log.entries)
 
 
+def test_emit_pdf_claim_inherited_page_header_scales_and_flags_ambiguous_unit() -> None:
+    # The figures' own page carries no scale banner (the statement's "(In millions
+    # ...)" caption sits on the page before). With the preceding page's banner
+    # supplied as inherited_scale, "364,980" resolves to ~$365B via
+    # inherited_page_header instead of the raw 365.0K; the caption names no
+    # currency, so the unit stays ambiguous_unit for downstream resolution.
+    page = make_page("Total assets 364,980", page_no=2)
+    flag_log = FlagLog()
+
+    claim = emit_pdf_claim(
+        "Apple Inc.",
+        "totalAssets",
+        "364,980",
+        page,
+        origin="table",
+        value_type="currency",
+        file="aapl.pdf",
+        flag_log=flag_log,
+        inherited_scale=(1_000_000.0, None, "(In millions, except number of shares ...)"),
+    )
+
+    assert claim.value.scale_source == "inherited_page_header"
+    assert claim.value.scale_multiplier == 1_000_000.0
+    assert claim.value.normalized == 364_980_000_000.0
+    assert claim.value.unit is None
+    assert "ambiguous_unit" in claim.flags
+
+
 def test_emit_pdf_claim_assumed_1x_flags_scale_assumed_not_ambiguous_unit() -> None:
     page = make_page("Revenue $4,000 total", page_no=1)
     flag_log = FlagLog()

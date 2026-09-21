@@ -1257,3 +1257,104 @@ def test_a_real_leading_decimal_still_parses(text: str) -> None:
 )
 def test_holds_one_number_says_whether_the_value_is_unambiguous(text: str, expected: bool) -> None:
     assert holds_one_number(text) is expected
+
+
+# --------------------------------------------------------------------------- #
+# inherited_page_header -- a scale caption on a PRECEDING page carried forward to
+# a caption-less continuation/data page (the Apple 10-K balance sheet, whose "(In
+# millions ...)" caption sits alone on the page before the figures).
+# --------------------------------------------------------------------------- #
+
+_APPLE_BALANCE_SHEET_CAPTION = (
+    "(In millions, except number of shares, which are reflected in thousands, and par value)"
+)
+
+
+def test_scale_phrase_in_text_compound_millions_except_thousands() -> None:
+    # The Apple 10-K balance-sheet caption. The trailing "except ... in thousands
+    # ... par value" clause must NOT flip the scale to thousands: the head
+    # magnitude is millions (share-count/par-value rows self-scale as counts, so
+    # they never take this banner). Locks the compound-caption behaviour the
+    # inherited tier relies on.
+    found = scale_phrase_in_text(_APPLE_BALANCE_SHEET_CAPTION)
+    assert found is not None
+    multiplier, currency, _context = found
+    assert multiplier == 1_000_000.0
+    assert currency is None
+
+
+def test_determine_scale_inherited_banner_scales_a_caption_less_page() -> None:
+    # The reported bug: the "(In millions ...)" caption is alone on the page BEFORE
+    # the balance-sheet figures, so the figures' own page carries no banner. The
+    # driver carries the preceding page's banner in as inherited_scale, and Total
+    # assets 364,980 (millions) resolves to ~$365B instead of the raw "365.0K".
+    inherited = scale_phrase_in_text(_APPLE_BALANCE_SHEET_CAPTION)
+    assert inherited is not None
+    page = _page("Total assets 364,980")  # no caption on the figures' own page
+    result = determine_scale(
+        "364,980",
+        page,
+        char_start=page.text.index("364,980"),
+        origin="table",
+        value_type="currency",
+        inherited_scale=inherited,
+    )
+    assert result.scale_source == "inherited_page_header"
+    assert result.scale_multiplier == 1_000_000.0
+    assert result.normalized == 364_980_000_000.0
+
+
+def test_determine_scale_own_page_banner_beats_inherited() -> None:
+    # An own-page banner always wins over an inherited one -- a page that declares
+    # its own scale is authoritative for its own figures, so the inherited
+    # "(in thousands)" here is ignored in favour of the own-page "(in millions)".
+    text = "(in millions)\nTotal assets 364,980"
+    page = _page(text)
+    result = determine_scale(
+        "364,980",
+        page,
+        char_start=text.index("364,980"),
+        origin="table",
+        value_type="currency",
+        inherited_scale=(1_000.0, None, "(in thousands)"),
+    )
+    assert result.scale_source == "page_header"
+    assert result.scale_multiplier == 1_000_000.0
+
+
+def test_determine_scale_inherited_declined_for_low_currency_confidence() -> None:
+    # SIM-323 guard: an inherited banner is gated by page_header_ok exactly like an
+    # own-page banner. A value that typed currency only by default (page_header_ok
+    # False) must not let an inherited "(in millions)" scale it a million-fold -- it
+    # stays a flagged assumed_1x, and the declined banner is recorded for audit.
+    page = _page("Rooms 1,309")
+    result = determine_scale(
+        "1,309",
+        page,
+        char_start=page.text.index("1,309"),
+        origin="table",
+        value_type="currency",
+        page_header_ok=False,
+        inherited_scale=(1_000_000.0, None, "(in millions)"),
+    )
+    assert result.scale_source == "assumed_1x"
+    assert result.scale_multiplier == 1.0
+    assert result.flags == ["scale_assumed"]
+    assert result.scale_context == "(in millions)"
+
+
+def test_determine_scale_no_banner_and_no_inherited_stays_assumed_1x() -> None:
+    # No own-page banner and nothing inherited: the magnitude is unknown, so the
+    # value stays a flagged assumed_1x (an audible understatement), never a
+    # confident wrong number -- the inherited tier changes nothing here.
+    page = _page("Total assets 364,980")
+    result = determine_scale(
+        "364,980",
+        page,
+        char_start=page.text.index("364,980"),
+        origin="table",
+        value_type="currency",
+    )
+    assert result.scale_source == "assumed_1x"
+    assert result.scale_multiplier == 1.0
+    assert result.flags == ["scale_assumed"]

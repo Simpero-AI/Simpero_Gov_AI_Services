@@ -193,10 +193,11 @@
             "explicit_in_value",
             "column_header",
             "page_header",
+            "inherited_page_header",
             "assumed_1x",
             "not_applicable"
           ],
-          "description": "HOW scale was determined. explicit_in_value: the token stated its own multiplier (\"$4.8M\", \"27.3%\"). column_header / page_header: read from a scale phrase, which is recorded with it. assumed_1x: nothing was found and the magnitude is UNKNOWN -- it must stay distinguishable from a known 1x, and raises the scale_assumed flag. not_applicable: a multiplier is meaningless for this value_type (a headcount, a date), which is a KNOWN 1x and raises nothing. Conflating the last two destroys the distinction this field exists to preserve: a count that borrowed explicit_in_value was claiming its own text stated a scale it never stated."
+          "description": "HOW scale was determined. explicit_in_value: the token stated its own multiplier (\"$4.8M\", \"27.3%\"). column_header / page_header: read from a scale phrase, which is recorded with it. inherited_page_header: read from a scale phrase on a PRECEDING page carried forward to a caption-less continuation/data page (a statement whose \"(in millions)\" caption sits on the page before its figures), gated identically to page_header; the phrase is recorded with it. assumed_1x: nothing was found and the magnitude is UNKNOWN -- it must stay distinguishable from a known 1x, and raises the scale_assumed flag. not_applicable: a multiplier is meaningless for this value_type (a headcount, a date), which is a KNOWN 1x and raises nothing. Conflating the last two destroys the distinction this field exists to preserve: a count that borrowed explicit_in_value was claiming its own text stated a scale it never stated."
         },
         "value_type": {
           "type": "string",
