@@ -7,6 +7,7 @@ set below is never actually dialed.
 
 import io
 import json
+import logging
 import os
 from typing import cast
 
@@ -314,6 +315,39 @@ async def test_process_document_missing_credential_raises_not_rejects(monkeypatc
         await worker.process_document(ctx=_CTX, spaces_key="deal/doc.pdf", entity="Target Co")
 
     assert stub.put_calls == []
+
+
+async def test_process_document_credit_exhausted_raises_and_logs_the_cause(
+    monkeypatch, caplog
+) -> None:
+    # An account-level billing/quota block is the same class as a missing
+    # credential -- a config/ops failure, not a bad document -- so it must raise
+    # (fail the job), never return a soft "rejected" that reads as "this file is
+    # bad". It reaches the backend only as SAQ's generic FAILED status, carrying
+    # no code or message of its own, so the parser MUST log the real cause here
+    # or nothing on this side records why a whole deal died.
+    stub = _StubS3({"deal/doc.pdf": b"document-bytes"})
+    monkeypatch.setattr(worker, "build_spaces_client", lambda settings: stub)
+    rec = _ExtractRecorder(
+        raises=worker.AnthropicCreditExhausted(
+            "Anthropic usage/spend limit reached for this account; raise or reset "
+            "the limit in the Console (or wait for it to reset) and re-run."
+        )
+    )
+    monkeypatch.setattr(worker, "extract_claims", rec)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="parser_service.worker"),
+        pytest.raises(worker.AnthropicCreditExhausted),
+    ):
+        await worker.process_document(ctx=_CTX, spaces_key="deal/doc.pdf", entity="Target Co")
+
+    assert stub.put_calls == []  # nothing written -- the run produced no claims
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "billing/quota" in logged
+    assert "deal/doc.pdf" in logged
+    # exc_info=True, so the traceback that Alpha will echo is in the record too.
+    assert any(r.exc_info for r in caplog.records)
 
 
 async def test_normalize_job_policy_gives_process_document_its_own_numbers() -> None:
