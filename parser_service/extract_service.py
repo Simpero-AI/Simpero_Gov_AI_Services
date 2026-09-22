@@ -716,12 +716,18 @@ def _scale_source_distribution(claims: list[Claim]) -> tuple[int, dict[str, int]
     magnitude-resolution failure (the whole run's figures lost their scale) rather
     than the odd unlabeled cell, and worth escalating the summary to WARNING.
     """
+    # getattr, not attribute access: this is a diagnostic SUMMARY and must never be
+    # able to raise and abort the extraction it is describing. A real ClaimValue
+    # always carries value_type/scale_source; a value object that somehow lacks
+    # them is simply not counted as currency rather than crashing the run.
     currency = [
         c
         for c in claims
-        if c.status != "missing" and c.value is not None and c.value.value_type == "currency"
+        if c.status != "missing"
+        and c.value is not None
+        and getattr(c.value, "value_type", None) == "currency"
     ]
-    dist = Counter((c.value.scale_source or "unset") for c in currency)
+    dist = Counter((getattr(c.value, "scale_source", None) or "unset") for c in currency)
     n = len(currency)
     warn = bool(n) and dist.get("assumed_1x", 0) / n >= 0.5
     return n, dict(dist), warn
