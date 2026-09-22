@@ -115,9 +115,13 @@ def find_exact_span(quote: str, text: str, *, where: str) -> tuple[int, int] | N
 
     if len(matches) > 1:
         # Ambiguous: the quote resolves at more than one place, so which instance
-        # the claim refers to is unknowable. Fail closed and log it — these are
-        # recall gaps (a real value we refused to cite) that must stay visible.
-        logger.warning(
+        # the claim refers to is unknowable. Fail closed. DEBUG, not WARNING: on a
+        # repetitive document this fires once per duplicate token -- hundreds to
+        # thousands of times -- and buries the loud signals (a credit block, the run
+        # summaries). The recall impact stays visible in AGGREGATE: the unresolved
+        # quote becomes a `missing` claim (counted in the run's emitted summary) and
+        # raises the quote_unresolved flag. Turn it back up with PARSER_LOG_LEVEL=DEBUG.
+        logger.debug(
             "Ambiguous quote not resolved in %s: %r appears more than once",
             where,
             quote,
@@ -251,7 +255,10 @@ def resolve_in_cell(quote: str, page: PageIndex, cell: TableCellRecord) -> Span 
         return None
 
     if indices != list(range(indices[0], indices[-1] + 1)):
-        logger.warning(
+        # DEBUG, not WARNING: high-volume per-cell noise on messy tables that buries
+        # the loud signals; the uncitable cell surfaces in aggregate as a `missing`
+        # claim. Raise with PARSER_LOG_LEVEL=DEBUG.
+        logger.debug(
             "Cell (%d,%d) on page %d encloses a non-contiguous char run; not citable",
             cell.row,
             cell.col,
