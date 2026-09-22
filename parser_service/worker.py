@@ -371,6 +371,15 @@ async def _recycle_worker(ctx: Context) -> None:
         os._exit(0)
 
 
+# The `saq` CLI defaults to logging.WARNING unless run with -v (saq/runner.py), so
+# this worker's INFO diagnostics -- most importantly the extract_claims scale-source
+# distribution summary -- would not reach the container logs. Raise this service's
+# own loggers to INFO at settings-import time (before SAQ configures logging) so
+# those lines are visible via `docker compose logs`, without turning on SAQ's own
+# per-job INFO chatter. Env-overridable: PARSER_LOG_LEVEL=WARNING/DEBUG.
+logging.getLogger("parser_service").setLevel(os.getenv("PARSER_LOG_LEVEL", "INFO").upper())
+
+
 settings: SettingsDict = {
     "queue": queue,
     "functions": [parse_document, process_document],
