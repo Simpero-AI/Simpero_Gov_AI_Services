@@ -18,8 +18,8 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from parser_service import extract_service
-from parser_service.emit import ClaimValue, PdfLocation
-from parser_service.scale import ValueType
+from parser_service.emit import ClaimValue, PdfLocation, Status
+from parser_service.scale import ScaleSource, ValueType
 from scripts import emit_claims
 
 # The SAME contract file the backend's verify stage validates every emitted claim
@@ -833,3 +833,51 @@ def test_completeness_sees_prose_but_never_qualitative(monkeypatch) -> None:
     assert seen["prior"] == ["from-prose"], (
         "completeness must see table+prose only -- qualitative is appended to claims after it"
     )
+
+
+def _currency_claim(
+    scale_source: ScaleSource | None, *, status: Status = "proposed"
+) -> extract_service.Claim:
+    return extract_service.Claim(
+        entity="ACME",
+        attribute="revenue",
+        value=ClaimValue(
+            raw="1", normalized=1.0, unit="$", value_type="currency", scale_source=scale_source
+        ),
+        location=PdfLocation(file="cim.pdf", page=1, char_start=0, char_end=1),
+        status=status,
+    )
+
+
+def test_scale_source_distribution_warns_when_mostly_assumed_1x() -> None:
+    # The systemic-scale-failure signal: >=50% of extracted currency figures with
+    # no resolved magnitude escalates the run summary to WARNING (the whole run's
+    # numbers will not reconcile or corroborate), not a per-cell nuisance.
+    claims = [
+        _currency_claim("assumed_1x"),
+        _currency_claim("assumed_1x"),
+        _currency_claim("page_header"),
+        _currency_claim("assumed_1x", status="missing"),  # excluded: not a real value
+        _table_claim(1, attribute="headcount", value_type="count"),  # excluded: not currency
+    ]
+    n, dist, warn = extract_service._scale_source_distribution(claims)
+    assert n == 3
+    assert dist == {"assumed_1x": 2, "page_header": 1}
+    assert warn is True
+
+
+def test_scale_source_distribution_no_warn_when_scales_resolved() -> None:
+    claims = [
+        _currency_claim("page_header"),
+        _currency_claim("inherited_page_header"),
+        _currency_claim("assumed_1x"),  # 1 of 3 -> below the 0.5 threshold
+    ]
+    n, dist, warn = extract_service._scale_source_distribution(claims)
+    assert n == 3
+    assert warn is False
+
+
+def test_scale_source_distribution_empty_never_warns() -> None:
+    # No currency figures at all (a qualitative-only deck) is not a scale failure.
+    n, dist, warn = extract_service._scale_source_distribution([])
+    assert (n, dist, warn) == (0, {}, False)
