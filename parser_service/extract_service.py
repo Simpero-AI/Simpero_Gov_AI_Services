@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .coverage import NumberMiss, document_coverage
@@ -708,6 +708,25 @@ def _audit_claims(
         )
 
 
+def _scale_source_distribution(claims: list[Claim]) -> tuple[int, dict[str, int], bool]:
+    """(currency-claim count, scale_source distribution, warn) for the run summary.
+
+    Counts only real extracted currency figures (status != "missing"); `warn` is
+    True when at least half of them fell to `assumed_1x` -- a systemic
+    magnitude-resolution failure (the whole run's figures lost their scale) rather
+    than the odd unlabeled cell, and worth escalating the summary to WARNING.
+    """
+    currency = [
+        c
+        for c in claims
+        if c.status != "missing" and c.value is not None and c.value.value_type == "currency"
+    ]
+    dist = Counter((c.value.scale_source or "unset") for c in currency)
+    n = len(currency)
+    warn = bool(n) and dist.get("assumed_1x", 0) / n >= 0.5
+    return n, dict(dist), warn
+
+
 def extract_claims(
     data: bytes,
     *,
@@ -1018,6 +1037,30 @@ def extract_claims(
         sum(timings.values()),
         workers,
     )
+
+    # Scale-source distribution over the extracted currency figures -- the one
+    # signal that makes a systemic scale-resolution failure obvious at its source.
+    # A run where most figures fell to assumed_1x means their magnitude was never
+    # resolved (e.g. a "(in millions)" caption the resolver could not reach), which
+    # downstream reads only as "nothing reconciles / EDGAR corroborates nothing".
+    # Surface it HERE, loudly, so that emptiness is never guessed at later.
+    n_currency, scale_dist, scale_warn = _scale_source_distribution(claims)
+    if scale_warn:
+        logger.warning(
+            "extract_claims scale sources: currency_claims=%d distribution=%s run_id=%s "
+            "-- >=50%% fell to assumed_1x (magnitude unresolved; these figures will not "
+            "reconcile or corroborate)",
+            n_currency,
+            scale_dist,
+            flag_log.run_id,
+        )
+    else:
+        logger.info(
+            "extract_claims scale sources: currency_claims=%d distribution=%s run_id=%s",
+            n_currency,
+            scale_dist,
+            flag_log.run_id,
+        )
 
     # A dropped page-unit is silent partial extraction -- real claims missing
     # from this run with a clean 200. The per-tier failure lines above go to
