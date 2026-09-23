@@ -334,6 +334,18 @@ def test_resolve_period_reads_the_column_header_suffix(
         # A non-month label that merely starts with a month's letters must not be
         # read as a date (word-bounded month match).
         "Marketing spend",
+        # LTM/TTM is a trailing window with no A/E/P slot -- it stays unresolved
+        # even when it carries a spelled month + year, so an LTM figure is never
+        # corroborated against EDGAR's ANNUAL fact for that year.
+        "LTM September 2020",
+        "LTM ended September 30, 2020",
+        "TTM December 2023",
+        # A variance / growth column names no single period even with a month.
+        "January 2026 vs January 2025",
+        "Change since January 2025",
+        # A merged two-date column names more than one year -- ambiguous, so it is
+        # declined rather than silently taking the older (last-listed) one.
+        "January 25, 2026 January 28, 2025",
     ],
 )
 def test_resolve_period_does_not_guess_what_it_cannot_read(column_header: str) -> None:

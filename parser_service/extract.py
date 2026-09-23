@@ -204,6 +204,16 @@ _PERIOD_KIND_BY_LETTER: dict[str, PeriodKind] = {"A": "A", "E": "E", "F": "P", "
 # an unrelated label, and only trusted alongside a four-digit year (below).
 _FISCAL_MARK = re.compile(r"\bfiscal\b", re.IGNORECASE)
 
+# A trailing-twelve-month / interim window names a period the A/E/P contract has
+# no slot for (SIM-345 deferral) -- it must stay unresolved even when it carries
+# a month + year (e.g. "LTM September 2020"), or it would be corroborated against
+# EDGAR's ANNUAL fact for that calendar year, which the LTM window is not.
+_LTM_MARK = re.compile(r"\b(?:LTM|TTM)\b", re.IGNORECASE)
+
+# A variance / growth column ("... vs ...", "Change", "Growth") names no single
+# period, so a month+year inside it must not be read as one.
+_DELTA_MARK = re.compile(r"\b(?:vs|versus|change|variance|growth|delta)\b", re.IGNORECASE)
+
 
 def resolve_period(column_header: str) -> tuple[int | None, PeriodKind | None]:
     """(period_year, period_kind) parsed from a column header -- SIM-345.
@@ -225,8 +235,10 @@ def resolve_period(column_header: str) -> tuple[int | None, PeriodKind | None]:
       figure loses its period and can never be corroborated.
 
     Returns (None, None), never a guess, when the header is not period-shaped at
-    all -- including LTM/TTM, which names a trailing period this contract has no
-    slot for yet (deferred; see the module docstring and _PERIOD_RE).
+    all; when it is LTM/TTM (a trailing period this contract has no slot for yet,
+    deferred -- see the module docstring and _PERIOD_RE); when it is a
+    variance/growth column; or when it is ambiguous (a merged header naming more
+    than one distinct year -- decline rather than pick one).
     """
     text = column_header.strip()
     had_fy_prefix = bool(_FY_PREFIX.match(text))
@@ -246,13 +258,22 @@ def resolve_period(column_header: str) -> tuple[int | None, PeriodKind | None]:
 
     # Not a bare year. Only a header that actually names a month (a date column)
     # or says "fiscal" is read as a period, so a "2025 vs 2024 Change" column
-    # stays unresolved. The four-digit year IS the period_year -- the last one in
-    # the header, so "Year Ended January 25, 2026" resolves to 2026. kind stays
-    # None, as for a bare year: the header carries no A/E/P marker to trust.
+    # stays unresolved. kind stays None, as for a bare year: the header carries no
+    # A/E/P marker to trust. (Numeric-only dates like "12/31/2024" -- no spelled
+    # month -- are deliberately not read here, to avoid pulling a year out of a
+    # footnote/ratio; a spelled month is the reliable date signal.)
     if _MONTH_NAME.search(text) or _FISCAL_MARK.search(text):
-        years = _YEAR.findall(text)
-        if years:
-            return int(years[-1]), None
+        # An LTM/TTM window or a variance/growth column names no annual period.
+        if _LTM_MARK.search(text) or _DELTA_MARK.search(text):
+            return None, None
+        # Exactly one distinct four-digit year -> that IS the period_year (the
+        # calendar year of the fiscal-year-end date). Two or more (a merged
+        # two-date column, "Jan 2026 vs Jan 2025", "... 2026 and 2025") is
+        # ambiguous -- decline rather than guess which one, never silently picking
+        # the older/newer.
+        years = set(_YEAR.findall(text))
+        if len(years) == 1:
+            return int(next(iter(years))), None
 
     return None, None
 
