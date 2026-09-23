@@ -289,6 +289,19 @@ def test_value_type_is_judged_from_the_value_and_its_attribute(
         # An unqualified year names the year with no kind -- the header does not
         # say which, so nothing is guessed.
         ("2020", 2020, None),
+        # A filed statement heads its columns with the fiscal-year-END DATE, not a
+        # bare year -- the period_year is the calendar year of that end date
+        # (what the filer's FY label and SEC EDGAR both key on). NVIDIA's FY2026
+        # ends Jan 25, 2026; Apple's FY2025 ends Sep 27, 2025.
+        ("January 25, 2026", 2026, None),
+        ("Year Ended January 25, 2026", 2026, None),
+        ("September 27, 2025", 2025, None),
+        ("Years Ended September 28, 2024", 2024, None),
+        # "FY" is stripped first, then the month+year date resolves.
+        ("FY ended January 25, 2026", 2026, None),
+        # A "Fiscal N" label, with and without extra words.
+        ("Fiscal 2026", 2026, None),
+        ("Fiscal year 2025", 2025, None),
     ],
 )
 def test_resolve_period_reads_the_column_header_suffix(
@@ -312,6 +325,27 @@ def test_resolve_period_reads_the_column_header_suffix(
         # Not period-shaped at all.
         "Hotel Rooms",
         "",
+        # A four-digit year needs a period shape around it: a bare "vs" delta
+        # column names no single period, so it stays unresolved rather than
+        # silently taking a year out of the comparison.
+        "2025 vs 2024 Change",
+        # A month with no year names no period_year -- nothing to resolve.
+        "May",
+        # A non-month label that merely starts with a month's letters must not be
+        # read as a date (word-bounded month match).
+        "Marketing spend",
+        # LTM/TTM is a trailing window with no A/E/P slot -- it stays unresolved
+        # even when it carries a spelled month + year, so an LTM figure is never
+        # corroborated against EDGAR's ANNUAL fact for that year.
+        "LTM September 2020",
+        "LTM ended September 30, 2020",
+        "TTM December 2023",
+        # A variance / growth column names no single period even with a month.
+        "January 2026 vs January 2025",
+        "Change since January 2025",
+        # A merged two-date column names more than one year -- ambiguous, so it is
+        # declined rather than silently taking the older (last-listed) one.
+        "January 25, 2026 January 28, 2025",
     ],
 )
 def test_resolve_period_does_not_guess_what_it_cannot_read(column_header: str) -> None:
