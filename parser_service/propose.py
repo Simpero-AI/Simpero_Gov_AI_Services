@@ -297,6 +297,18 @@ THE QUOTE -- it is `subject_text`, or a name appearing inside it. The single exc
 the subject company, given to you as context. Never name an entity you took from elsewhere \
 on the page: a subject the quote cannot support is a binding nothing can check.
 
+When a fact is about the SUBJECT COMPANY'S OWN relationships -- its customers, the regions \
+or markets it operates in or sells to, its investors or backers, or a past financing round \
+it raised -- the `entity` is the SUBJECT COMPANY ITSELF (the one named to you as context). \
+The customers, regions, or investors it names are the PREDICATE, not the entity: copy them \
+into `subject_text`/`predicate_text` verbatim from the quote. Do NOT manufacture an \
+aggregate entity such as "the company's customers", "the Americas segment", or a \
+comma-separated list of names -- that names no single party the quote supports, so the \
+claim is discarded exactly when these customer/geography/investor/funding facts matter most. \
+(A fact about a DISTINCT third party in its own right -- a competitor's own attribute, a \
+partner's action -- still takes that named party as its entity when the quote names it; this \
+rule is only for facts whose real subject is the subject company.)
+
 `attribute` names WHAT IS BEING ASSERTED, as a short noun phrase, with the evaluative words \
 removed: "on-site dry cleaning availability", "directors' other directorships", "target \
 customer segment", "basis of competitive advantage", "competitor collection point \
