@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Literal
+from typing import Any, Literal
 
 import anthropic
 from anthropic.types import ThinkingConfigParam
@@ -110,6 +110,22 @@ def _extract_thinking() -> ThinkingConfigParam:
     return {"type": "adaptive"}
 
 
+def _extract_sampling() -> dict[str, Any]:
+    """Sampling kwargs for a prose-family extraction call. Pins temperature=0 for
+    a REPRODUCIBLE run -- but ONLY when extended thinking is disabled, because the
+    API rejects any temperature != 1 while thinking is on. So under the adaptive
+    default this returns {} and the call is byte-identical to before; with
+    EXTRACT_THINKING=off the same page now yields the same figures every run.
+
+    Without this, an EXTRACT_THINKING=off run still sampled at the default
+    temperature 1.0, so a sentence carrying several numbers -- "we had 42,000
+    employees; 31,000 in research and development and 11,000 in sales" -- could
+    bind a different one to the same attribute (headcount 42,000 one run, 11,000
+    the next). Determinism is the operator's lever; the default is unchanged
+    pending a measured accuracy/latency comparison (see EXTRACT_MODEL/THINKING)."""
+    return {"temperature": 0} if _extract_thinking().get("type") == "disabled" else {}
+
+
 # Docling labels whose blocks carry assertions. Advisory, per text_extract's warning:
 # page_header was measured labelling a reproduced press clipping, so furniture is excluded
 # by is_boilerplate (measured, repetition-based) rather than by trusting the label.
@@ -145,6 +161,13 @@ figure over from another page.
 a named university and the subject company are all different entities. Do not default \
 everything to the subject company.
 - `attribute` names the metric in the document's own words, not a canonical vocabulary.
+- When one sentence states a TOTAL together with its parts -- "we had 42,000 employees; \
+31,000 in research and development and 11,000 in sales, marketing, operations and \
+administrative positions" -- each number is its own claim, and each takes a DISTINCT \
+attribute: the unqualified whole keeps the plain attribute ("employees"), and every \
+component is qualified by what it counts ("employees in research and development", \
+"employees in sales, marketing, operations and administrative positions"). Never give a \
+component the plain total's attribute -- a sub-count labelled as the total is a wrong figure.
 - `value_type`: currency for money, percent for a rate, count for a countable quantity, \
 date for a period, ratio for a multiple, text where there is no magnitude.
 - `claim_type`: the KIND of assertion -- numerical (a directly stated number), \
@@ -480,6 +503,7 @@ def propose_for_page(
             model=model,
             max_tokens=16000,
             thinking=_extract_thinking(),
+            **_extract_sampling(),
             # The system prompt is byte-identical across every page of every document, so it
             # is the whole cacheable prefix. The page text follows it and varies per call.
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
@@ -647,6 +671,7 @@ def propose_completion_for_page(
             model=model,
             max_tokens=16000,
             thinking=_extract_thinking(),
+            **_extract_sampling(),
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
             output_format=PageProposals,
@@ -1011,6 +1036,7 @@ def propose_assertions_for_page(
             model=model,
             max_tokens=16000,
             thinking=_extract_thinking(),
+            **_extract_sampling(),
             system=[
                 {"type": "text", "text": _ASSERTION_SYSTEM, "cache_control": {"type": "ephemeral"}}
             ],
