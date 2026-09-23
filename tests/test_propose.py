@@ -27,6 +27,7 @@ from parser_service.propose import (
     PageProposals,
     ProposedAssertion,
     ProposedClaim,
+    _extract_sampling,
     _extract_thinking,
     _normalize_attribute_label,
     assertions_from_prose,
@@ -1342,6 +1343,20 @@ def test_extract_thinking_disables_on_a_disabling_value(
     # spellings, case- and whitespace-insensitive.
     monkeypatch.setenv("EXTRACT_THINKING", value)
     assert _extract_thinking() == {"type": "disabled"}
+
+
+def test_extract_sampling_pins_temperature_zero_only_when_thinking_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With thinking OFF the extraction is made reproducible (temperature=0); the API
+    # forbids that while thinking is on, so under the adaptive default no sampling
+    # override is sent and the call is byte-identical to before.
+    monkeypatch.setenv("EXTRACT_THINKING", "off")
+    assert _extract_sampling() == {"temperature": 0}
+    monkeypatch.delenv("EXTRACT_THINKING", raising=False)
+    assert _extract_sampling() == {}
+    monkeypatch.setenv("EXTRACT_THINKING", "adaptive")
+    assert _extract_sampling() == {}
 
 
 @pytest.mark.parametrize("value", ["adaptive", "on", "garbage", "1024"])
