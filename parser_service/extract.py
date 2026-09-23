@@ -199,36 +199,62 @@ _PERIOD_RE = re.compile(
 # unresolved rather than guessing one; see resolve_period's docstring.
 _PERIOD_KIND_BY_LETTER: dict[str, PeriodKind] = {"A": "A", "E": "E", "F": "P", "P": "P"}
 
+# A "fiscal" marker: a filed statement often heads its columns "Fiscal 2026" /
+# "Fiscal year 2026" rather than a bare year. Word-bounded so it never fires on
+# an unrelated label, and only trusted alongside a four-digit year (below).
+_FISCAL_MARK = re.compile(r"\bfiscal\b", re.IGNORECASE)
+
 
 def resolve_period(column_header: str) -> tuple[int | None, PeriodKind | None]:
-    """(period_year, period_kind) parsed from a column header suffix -- SIM-345.
+    """(period_year, period_kind) parsed from a column header -- SIM-345.
 
     Document-local and unambiguous, so this needs no fiscal-year convention:
     A -> actual, E -> estimate, F/P -> projected. A bare year ("2019") resolves
     the year with no kind, since the header does not qualify it.
 
-    Returns (None, None), never a guess, when the header is not period-shaped
-    at all -- including LTM/TTM, which names a trailing period this contract
-    has no slot for yet (deferred; see the module docstring and _PERIOD_RE).
+    Two header shapes carry a period:
+    - A pitch-deck-style bare year, optionally FY-prefixed and A/E/F/P-suffixed
+      ("2024E", "FY2019", "2008E (1)") -- read by _PERIOD_RE.
+    - A FILED statement's fiscal-year-END DATE ("January 25, 2026", "Year Ended
+      September 27, 2025") or "Fiscal 2026" label -- the norm in a 10-K/10-Q,
+      where a bare year almost never appears. The period_year is the CALENDAR
+      YEAR of the stated end date, which is exactly what the filer's own FY label
+      uses (NVIDIA's FY2026 ends Jan 25, 2026; Apple's FY2025 ends Sep 27, 2025)
+      and what SEC EDGAR keys its annual facts on -- so a claim stamped this way
+      lines up with EDGAR for corroboration. Without it, every 10-K statement
+      figure loses its period and can never be corroborated.
+
+    Returns (None, None), never a guess, when the header is not period-shaped at
+    all -- including LTM/TTM, which names a trailing period this contract has no
+    slot for yet (deferred; see the module docstring and _PERIOD_RE).
     """
     text = column_header.strip()
     had_fy_prefix = bool(_FY_PREFIX.match(text))
     text = _FY_PREFIX.sub("", text, count=1)
 
     match = _PERIOD_RE.match(text)
-    if match is None:
-        return None, None
+    if match is not None:
+        year_text = match.group("year")
+        if len(year_text) == 2 and not had_fy_prefix:
+            return None, None
+        year = int(year_text)
+        if len(year_text) == 2:
+            year += 2000 if year < 69 else 1900
+        kind_letter = match.group("kind")
+        kind = _PERIOD_KIND_BY_LETTER.get(kind_letter.upper()) if kind_letter else None
+        return year, kind
 
-    year_text = match.group("year")
-    if len(year_text) == 2 and not had_fy_prefix:
-        return None, None
-    year = int(year_text)
-    if len(year_text) == 2:
-        year += 2000 if year < 69 else 1900
+    # Not a bare year. Only a header that actually names a month (a date column)
+    # or says "fiscal" is read as a period, so a "2025 vs 2024 Change" column
+    # stays unresolved. The four-digit year IS the period_year -- the last one in
+    # the header, so "Year Ended January 25, 2026" resolves to 2026. kind stays
+    # None, as for a bare year: the header carries no A/E/P marker to trust.
+    if _MONTH_NAME.search(text) or _FISCAL_MARK.search(text):
+        years = _YEAR.findall(text)
+        if years:
+            return int(years[-1]), None
 
-    kind_letter = match.group("kind")
-    kind = _PERIOD_KIND_BY_LETTER.get(kind_letter.upper()) if kind_letter else None
-    return year, kind
+    return None, None
 
 
 # --------------------------------------------------------------------------- #
