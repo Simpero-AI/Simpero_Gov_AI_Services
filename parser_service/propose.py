@@ -815,6 +815,14 @@ def propose_attribute_mappings(
                 lambda listing=listing: client.messages.parse(
                     model=model,
                     max_tokens=8000,
+                    # temperature=0: this call maps each raw table label onto a
+                    # canonical attribute (ebit, net_income, ...), which decides WHICH
+                    # cell surfaces for each financial figure. At the API default
+                    # (1.0) the mapping varies run-to-run, so the same PDF produced
+                    # different EBIT/Net Income/etc. each analysis. Greedy decoding
+                    # makes it reproducible. Valid here because this call sets no
+                    # `thinking` (the API rejects temperature != 1 with thinking on).
+                    temperature=0,
                     system=[
                         {
                             "type": "text",

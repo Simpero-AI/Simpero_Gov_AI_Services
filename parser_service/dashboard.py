@@ -141,6 +141,9 @@ def organize_claims(
         return client.messages.parse(
             model=model,
             max_tokens=2000,
+            # temperature=0 for a reproducible run over the same document (no
+            # `thinking` here, so temperature is settable).
+            temperature=0,
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
             output_format=DashboardStructure,
