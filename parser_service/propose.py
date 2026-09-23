@@ -365,8 +365,20 @@ not a figure the numeric pass already took).
   key_customer         -- a named customer, a key account, or a stated customer \
 concentration (a single customer or a few said to drive much of the business), without \
 requiring the figure.
-  geographic_presence  -- where the business operates or sells: named regions, countries, \
-markets or facilities, or a stated regional split of the business.
+  geographic_presence  -- where the business ITSELF is placed: its headquarters or \
+registered seat; the regions, countries or markets it operates in or sells to; the location \
+of its offices, data centres, plants or other facilities; or a stated split of the business \
+across regions. The geography must be the SUBJECT of the sentence -- what the claim is about \
+-- not a place name riding on some other predicate. A sentence whose real subject is a \
+financial, accounting, tax or currency fact does NOT belong here just because it names \
+"around the world", "globally", "foreign", or "the jurisdictions in which we operate": \
+"Accounts receivable ... are derived from revenues earned from customers located around the \
+world", "income taxes incurred in ... the many jurisdictions in which we operate", and "We \
+transact business globally in multiple currencies" are accounting/tax/FX statements -- class \
+each by its real subject, or propose none, but NEVER here. In contrast "We own and lease \
+office facilities and data centers around the world, primarily in Asia, Europe, and North \
+America" DOES belong, because its subject is where the facilities are, not the phrase \
+"around the world".
 
 Extract every DISTINCT checkable assertion the page makes. Do not hold yourself to a \
 handful, and do not drop a claim because the page already stated another of the same \
