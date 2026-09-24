@@ -168,6 +168,12 @@ attribute: the unqualified whole keeps the plain attribute ("employees"), and ev
 component is qualified by what it counts ("employees in research and development", \
 "employees in sales, marketing, operations and administrative positions"). Never give a \
 component the plain total's attribute -- a sub-count labelled as the total is a wrong figure.
+- A count is of the THING its own words name, never a different quantity in the same clause. \
+An employee count / headcount counts PEOPLE; a count of countries, offices, markets, \
+segments or sites is NOT a headcount even when it sits right beside the employee figure. In \
+"approximately 42,000 employees in 38 countries" the headcount is 42,000 (attribute \
+"employees") and 38 is a separate claim with attribute "countries of operation" -- never \
+attach the 38 to an employee/headcount attribute. Read the number the words actually count.
 - `value_type`: currency for money, percent for a rate, count for a countable quantity, \
 date for a period, ratio for a multiple, text where there is no magnitude.
 - `claim_type`: the KIND of assertion -- numerical (a directly stated number), \
