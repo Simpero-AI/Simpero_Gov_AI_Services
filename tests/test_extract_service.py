@@ -488,6 +488,66 @@ def test_canonicalize_attributes_failure_does_not_abort_the_document(monkeypatch
     ]
 
 
+def _one_page_stub(monkeypatch) -> None:
+    """Shared setup: a one-page doc with no tables, so a best-effort tier is the
+    only thing that can fail."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class _OnePageResult:
+        document = _Doc()
+        pages = [_Page(1)]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _OnePageResult())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda *_a, **_k: [])
+
+
+def test_deal_profile_credit_exhaustion_aborts_the_run(monkeypatch) -> None:
+    # The three best-effort tiers (deal_profile / screen_criteria / dashboard) must
+    # NOT swallow AnthropicCreditExhausted: a depleted balance dooms the whole run
+    # and has to fail loud (the "analysis paused" banner), never complete as a
+    # silent 200 with a null profile. Mirrors the per-page prose loops.
+    _one_page_stub(monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise extract_service.AnthropicCreditExhausted("balance exhausted")
+
+    monkeypatch.setattr(extract_service, "classify_deal_profile", _boom)
+
+    with pytest.raises(extract_service.AnthropicCreditExhausted):
+        extract_service.extract_claims(
+            b"%PDF-1.4 stub",
+            entity="ACME",
+            run_id="run-1",
+            correlation_id="doc-1",
+            source_file="cim.pdf",
+            deal_profile=True,
+        )
+
+
+def test_deal_profile_generic_failure_still_degrades_gracefully(monkeypatch) -> None:
+    # A non-credit failure in a best-effort tier must still degrade, not abort: the
+    # document completes with a null profile. Guards the re-raise from widening to
+    # every exception.
+    _one_page_stub(monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("transient classify error")
+
+    monkeypatch.setattr(extract_service, "classify_deal_profile", _boom)
+
+    payload = extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+        deal_profile=True,
+    )
+    assert payload["deal_profile"] is None
+
+
 def test_canonicalize_attributes_defaults_to_off(monkeypatch) -> None:
     # Table-only extraction stays credential-free unless the caller opts in --
     # this is the regression this ticket must not introduce.
