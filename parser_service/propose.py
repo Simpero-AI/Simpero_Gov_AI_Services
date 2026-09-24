@@ -110,20 +110,49 @@ def _extract_thinking() -> ThinkingConfigParam:
     return {"type": "adaptive"}
 
 
-def _extract_sampling() -> dict[str, Any]:
-    """Sampling kwargs for a prose-family extraction call. Pins temperature=0 for
-    a REPRODUCIBLE run -- but ONLY when extended thinking is disabled, because the
-    API rejects any temperature != 1 while thinking is on. So under the adaptive
-    default this returns {} and the call is byte-identical to before; with
-    EXTRACT_THINKING=off the same page now yields the same figures every run.
+# Models that removed the `temperature` parameter and return a 400 "temperature
+# is deprecated for this model" on ANY value. Sending a temperature=0 determinism
+# pin to one of these kills the whole call. The Opus-4.8 / Sonnet-5 generation
+# dropped it -- confirmed for claude-opus-4-8 (the DEFAULT_MODEL) by a live run,
+# and grouped with Sonnet-5 by the same generational change that removed
+# budget_tokens (see _extract_thinking). Matched by prefix so a versioned id
+# ("claude-sonnet-5-2026...") is covered. Haiku-4-5 and earlier still accept it
+# (the canonicalization call uses temperature=0 on Haiku), so the determinism pin
+# stays available there.
+_TEMPERATURE_UNSUPPORTED_PREFIXES = ("claude-opus-4-8", "claude-sonnet-5")
 
-    Without this, an EXTRACT_THINKING=off run still sampled at the default
-    temperature 1.0, so a sentence carrying several numbers -- "we had 42,000
-    employees; 31,000 in research and development and 11,000 in sales" -- could
-    bind a different one to the same attribute (headcount 42,000 one run, 11,000
-    the next). Determinism is the operator's lever; the default is unchanged
-    pending a measured accuracy/latency comparison (see EXTRACT_MODEL/THINKING)."""
-    return {"temperature": 0} if _extract_thinking().get("type") == "disabled" else {}
+
+def _temperature_supported(model: str) -> bool:
+    return not model.lower().startswith(_TEMPERATURE_UNSUPPORTED_PREFIXES)
+
+
+def _extract_sampling(model: str) -> dict[str, Any]:
+    """Sampling kwargs for a prose-family extraction call. Pins temperature=0 for
+    a REPRODUCIBLE run -- but ONLY when extended thinking is disabled (the API
+    rejects any temperature != 1 while thinking is on) AND the model still accepts
+    the parameter. So under the adaptive default this returns {} and the call is
+    byte-identical to before; with EXTRACT_THINKING=off on a temperature-accepting
+    model the same page yields the same figures every run.
+
+    The model gate is load-bearing, not defensive: claude-opus-4-8 (the default
+    EXTRACT_MODEL) deprecated temperature and 400s on any value, so an
+    EXTRACT_THINKING=off run on the default model would otherwise have 400'd EVERY
+    prose / completeness / qualitative call -- killing extraction wholesale. On such
+    a model determinism-via-temperature is simply unavailable; the knob's remaining
+    value is the latency cut.
+
+    Without the temperature pin (on a model that accepts it), an EXTRACT_THINKING=off
+    run sampled at the default temperature 1.0, so a sentence carrying several
+    numbers -- "we had 42,000 employees; 31,000 in research and development and
+    11,000 in sales" -- could bind a different one to the same attribute (headcount
+    42,000 one run, 11,000 the next). Determinism is the operator's lever; the
+    default is unchanged pending a measured accuracy/latency comparison (see
+    EXTRACT_MODEL/THINKING)."""
+    if _extract_thinking().get("type") != "disabled":
+        return {}
+    if not _temperature_supported(model):
+        return {}
+    return {"temperature": 0}
 
 
 # Docling labels whose blocks carry assertions. Advisory, per text_extract's warning:
@@ -521,7 +550,7 @@ def propose_for_page(
             model=model,
             max_tokens=16000,
             thinking=_extract_thinking(),
-            **_extract_sampling(),
+            **_extract_sampling(model),
             # The system prompt is byte-identical across every page of every document, so it
             # is the whole cacheable prefix. The page text follows it and varies per call.
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
@@ -689,7 +718,7 @@ def propose_completion_for_page(
             model=model,
             max_tokens=16000,
             thinking=_extract_thinking(),
-            **_extract_sampling(),
+            **_extract_sampling(model),
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
             output_format=PageProposals,
@@ -1054,7 +1083,7 @@ def propose_assertions_for_page(
             model=model,
             max_tokens=16000,
             thinking=_extract_thinking(),
-            **_extract_sampling(),
+            **_extract_sampling(model),
             system=[
                 {"type": "text", "text": _ASSERTION_SYSTEM, "cache_control": {"type": "ephemeral"}}
             ],

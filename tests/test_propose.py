@@ -1352,11 +1352,18 @@ def test_extract_sampling_pins_temperature_zero_only_when_thinking_disabled(
     # forbids that while thinking is on, so under the adaptive default no sampling
     # override is sent and the call is byte-identical to before.
     monkeypatch.setenv("EXTRACT_THINKING", "off")
-    assert _extract_sampling() == {"temperature": 0}
+    # thinking OFF + a temperature-accepting model -> reproducible (temperature=0).
+    assert _extract_sampling("claude-haiku-4-5-20251001") == {"temperature": 0}
+    # thinking OFF but a model that deprecated temperature -> must NOT send it, or the
+    # whole call 400s. This is the landmine: the default EXTRACT_MODEL is opus-4-8.
+    assert _extract_sampling("claude-opus-4-8") == {}
+    assert _extract_sampling("claude-sonnet-5") == {}
+    assert _extract_sampling("claude-sonnet-5-20260101") == {}  # versioned id, prefix-matched
+    # thinking on (the default) -> no override regardless of model.
     monkeypatch.delenv("EXTRACT_THINKING", raising=False)
-    assert _extract_sampling() == {}
+    assert _extract_sampling("claude-haiku-4-5-20251001") == {}
     monkeypatch.setenv("EXTRACT_THINKING", "adaptive")
-    assert _extract_sampling() == {}
+    assert _extract_sampling("claude-haiku-4-5-20251001") == {}
 
 
 @pytest.mark.parametrize("value", ["adaptive", "on", "garbage", "1024"])
@@ -1377,6 +1384,27 @@ def test_the_thinking_config_reaches_the_model_call(monkeypatch: pytest.MonkeyPa
     client = _StubClient([])
     propose_for_page([_block(page.text)], page, entity_hint="BarWash", file="bw.pdf", client=client)
     assert client.calls[0]["thinking"] == {"type": "disabled"}
+    # The default EXTRACT_MODEL (opus-4-8) deprecated temperature, so even with
+    # thinking off the real call must carry NO temperature -- otherwise it 400s.
+    assert "temperature" not in client.calls[0]
+
+
+def test_temperature_pin_reaches_the_call_on_a_temperature_accepting_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On a model that still accepts temperature, EXTRACT_THINKING=off does pin it.
+    monkeypatch.setenv("EXTRACT_THINKING", "off")
+    page = _page("Turnover in the Bristol venue reached 1,309 units.")
+    client = _StubClient([])
+    propose_for_page(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        model="claude-haiku-4-5-20251001",
+        client=client,
+    )
+    assert client.calls[0]["temperature"] == 0
 
 
 def test_the_extractor_model_defaults_to_opus_and_does_not_move_the_classifiers() -> None:
