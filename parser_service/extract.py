@@ -433,6 +433,18 @@ _PER_SHARE_RE = re.compile(
 # figure like "(1,234)", not a bare one/two-digit marker standing alone).
 _FOOTNOTE_MARKER = re.compile(r"\(\d{1,2}\)")
 
+# A column whose header marks its cells as PERCENTAGES even when the cells print
+# no "%" of their own: a standalone "%" token ("Gross margin %", "%", "FY26 %") or
+# a common-size statement. Such a cell ("39.3") otherwise types currency by its
+# metric-noun label and takes the "(in millions)" banner -- shipping 39.3 as
+# 39,300,000. Distinct from the "% of ..." / "% growth" re-expression columns that
+# _DERIVED_COLUMN_RE already drops; these carry a primary percentage worth keeping,
+# so they are typed percent (self-scaling), not dropped.
+_PERCENT_COLUMN_RE = re.compile(
+    r"(?:^|[\s|(/])%(?:$|[\s|)/])|\bcommon[\s-]?size\b",
+    re.IGNORECASE,
+)
+
 
 def _label_tokens(attribute: str) -> list[str]:
     """The attribute's words in order, lowercased, with camelCase split apart.
@@ -466,6 +478,13 @@ def _is_per_share(attribute: str) -> bool:
     gate. Read on the raw attribute, not tokens, so the multi-word "per ... share"
     phrase and "per ADS" survive tokenisation."""
     return _PER_SHARE_RE.search(attribute) is not None
+
+
+def _is_percent_column(column_header: str) -> bool:
+    """Whether a column header marks its cells as percentages (a standalone "%"
+    token or a common-size statement), so a bare "39.3" is read as a percent rather
+    than a currency figure that would take the table's magnitude banner."""
+    return _PERCENT_COLUMN_RE.search(column_header) is not None
 
 
 def _is_period_caption(vocabulary: set[str]) -> bool:
@@ -876,13 +895,26 @@ def claims_from_table(
         if attribute is None:
             continue
 
-        period_year, period_kind = resolve_period(_column_header(table, cell.col))
+        column_header_text = _column_header(table, cell.col)
+        period_year, period_kind = resolve_period(column_header_text)
         # A value whose column the header could not tell apart from another is
         # still emitted -- a dropped cell is invisible -- but flagged, so a
         # consumer never silently trusts its (missing or collapsed) period
         # qualifier as if the columns had been cleanly separated.
         header_unresolved = cell.col in unresolved_cols
         extra_flags = ["header_unresolved"] if header_unresolved else None
+
+        value_type = infer_value_type_for(raw, attribute)
+        # A cell in a percent-marked column ("Gross margin %", "common size") that
+        # printed no "%" of its own would otherwise type currency by its label and
+        # take the statement's magnitude banner -- "39.3" shipped as 39,300,000.
+        # Read the percent sense from the column header the cell omitted.
+        if (
+            value_type == "currency"
+            and not _CURRENCY_MARK.search(raw)
+            and _is_percent_column(column_header_text)
+        ):
+            value_type = "percent"
 
         claims.append(
             emit_pdf_table_cell_claim(
@@ -891,7 +923,7 @@ def claims_from_table(
                 table,
                 cell,
                 page,
-                value_type=infer_value_type_for(raw, attribute),
+                value_type=value_type,
                 file=file,
                 flag_log=flag_log,
                 section=section,
