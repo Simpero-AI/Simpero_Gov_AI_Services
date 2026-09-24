@@ -145,11 +145,20 @@ def parse_with_retry(call, *, page_no: int, what: str):
     handled here -- the client's own max_retries backoff covers those (see
     make_client), which is the fix for the fan-out page-loss.
 
+    Any OTHER 400 (an invalid_request_error that is not billing, not usage-cap, and
+    not grammar) is retried on the same _GRAMMAR_RETRIES budget and linear backoff.
+    These look non-retryable, but a bare "Invalid request data" 400 was MEASURED as
+    a transient -- one page of a real document 400'd 3 of 5 identical re-runs and
+    succeeded the other 2 in the same session, a flaky server-side hiccup rather than
+    a request the API will always reject. A genuinely permanent 400 exhausts the
+    budget and still surfaces, the same bounded fan-out cost the grammar path accepts.
+
     Every raise stays reachable: this narrows known transients, it never pretends
     a call succeeded.
     """
     validation_retried = False
     grammar_attempts = 0
+    bad_request_attempts = 0
     while True:
         try:
             return call()
@@ -180,14 +189,39 @@ def parse_with_retry(call, *, page_no: int, what: str):
                     "or reset the limit in the Console (or wait for it to reset) "
                     "and re-run."
                 ) from exc
-            if not is_grammar_timeout(exc) or grammar_attempts >= _GRAMMAR_RETRIES:
-                raise
-            grammar_attempts += 1
-            logger.warning(
-                "page %s: %s hit a transient grammar-compilation timeout; retry %d/%d",
-                page_no,
-                what,
-                grammar_attempts,
-                _GRAMMAR_RETRIES,
-            )
-            time.sleep(_GRAMMAR_BACKOFF_S * grammar_attempts)
+            if is_grammar_timeout(exc):
+                if grammar_attempts >= _GRAMMAR_RETRIES:
+                    raise
+                grammar_attempts += 1
+                logger.warning(
+                    "page %s: %s hit a transient grammar-compilation timeout; retry %d/%d",
+                    page_no,
+                    what,
+                    grammar_attempts,
+                    _GRAMMAR_RETRIES,
+                )
+                time.sleep(_GRAMMAR_BACKOFF_S * grammar_attempts)
+                continue
+            # A non-grammar 400 (e.g. a bare "Invalid request data" invalid_request_error)
+            # is normally non-retryable -- but it has been MEASURED as a transient: one
+            # page of the NVIDIA 10-K 400'd 3 of 5 identical re-runs and succeeded the
+            # other 2 in the same session, so this is a flaky server-side hiccup, not a
+            # request the API will always reject. Retried on the same budget/backoff as a
+            # grammar timeout (the other transient 400). A genuinely permanent 400 (a real
+            # request/schema bug) exhausts the budget and still surfaces -- the same
+            # bounded fan-out cost the grammar path already accepts. Billing/usage 400s
+            # (raised above) and grammar 400s (handled above) never reach here, so this is
+            # only the unclassified remainder.
+            if getattr(exc, "status_code", None) == 400 and bad_request_attempts < _GRAMMAR_RETRIES:
+                bad_request_attempts += 1
+                logger.warning(
+                    "page %s: %s hit a transient 400 (%s); retry %d/%d",
+                    page_no,
+                    what,
+                    type(exc).__name__,
+                    bad_request_attempts,
+                    _GRAMMAR_RETRIES,
+                )
+                time.sleep(_GRAMMAR_BACKOFF_S * bad_request_attempts)
+                continue
+            raise
