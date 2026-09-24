@@ -416,6 +416,23 @@ _SENTINEL = re.compile(r"\s*(?:N/?A|NM|[-–—]+)\s*", re.IGNORECASE)
 # Beyond this many words, the cell holds a sentence rather than a value.
 _PROSE_WORD_COUNT = 4
 
+# A per-share basis: an amount "per share" (optionally "per diluted / basic /
+# common / weighted-average / Class A share"), "per ADS/ADR", or the "EPS"
+# abbreviation. A per-share amount is currency, but it is never carried in the
+# statement's "(in millions)" magnitude -- the caption "except per share data"
+# says exactly that -- so the scaler must read it at face value rather than
+# binding a header multiplier (see scale.determine_scale's per_share gate).
+_PER_SHARE_RE = re.compile(
+    r"\bper\s+(?:[a-z]+\s+){0,3}shares?\b|\bper\s+ad[sr]s?\b|\beps\b",
+    re.IGNORECASE,
+)
+
+# A lone footnote reference in a value cell -- "(1)", "(12)". Without this guard
+# _SIGNED_NUMBER_RE reads the leading "(" as an accounting minus and emits a
+# spurious small negative currency claim (a real accounting negative is a full
+# figure like "(1,234)", not a bare one/two-digit marker standing alone).
+_FOOTNOTE_MARKER = re.compile(r"\(\d{1,2}\)")
+
 
 def _label_tokens(attribute: str) -> list[str]:
     """The attribute's words in order, lowercased, with camelCase split apart.
@@ -440,6 +457,15 @@ def _names_an_amount(tokens: list[str]) -> bool:
     # "net" counts only when it trails: "Customer list, net" is money, while
     # "Net rooms added" is a room count.
     return _TRAILING_METRIC_NOUN in tokens[1:]
+
+
+def _is_per_share(attribute: str) -> bool:
+    """Whether the label names a per-share amount (EPS, "per diluted share", a
+    price paid per share). Such a value stays currency but must never take the
+    statement's "(in millions)" header -- see scale.determine_scale's per_share
+    gate. Read on the raw attribute, not tokens, so the multi-word "per ... share"
+    phrase and "per ADS" survive tokenisation."""
+    return _PER_SHARE_RE.search(attribute) is not None
 
 
 def _is_period_caption(vocabulary: set[str]) -> bool:
@@ -840,6 +866,11 @@ def claims_from_table(
         raw = cell.text_normalized.strip()
         if not raw or not _is_a_figure(raw):
             continue
+        # A lone footnote reference -- "(1)", "(12)" -- is not a value; its
+        # leading paren would otherwise read as an accounting minus and emit a
+        # spurious small negative currency claim.
+        if _FOOTNOTE_MARKER.fullmatch(raw):
+            continue
 
         attribute = attribute_for(table, cell, banners.get(cell.row), label_col=label_col)
         if attribute is None:
@@ -850,7 +881,8 @@ def claims_from_table(
         # still emitted -- a dropped cell is invisible -- but flagged, so a
         # consumer never silently trusts its (missing or collapsed) period
         # qualifier as if the columns had been cleanly separated.
-        extra_flags = ["header_unresolved"] if cell.col in unresolved_cols else None
+        header_unresolved = cell.col in unresolved_cols
+        extra_flags = ["header_unresolved"] if header_unresolved else None
 
         claims.append(
             emit_pdf_table_cell_claim(
@@ -863,8 +895,14 @@ def claims_from_table(
                 file=file,
                 flag_log=flag_log,
                 section=section,
-                page_header_ok=is_confident_currency(raw, attribute),
+                # An unresolved column must not bind a page or inherited
+                # "(in millions)" banner: that is how an indexed stock-performance
+                # table ($100 base) inherited a neighbouring statement's billions
+                # and shipped $100B. Decline the banner (the value falls to a
+                # flagged assumed_1x) rather than scale a column we could not read.
+                page_header_ok=is_confident_currency(raw, attribute) and not header_unresolved,
                 inherited_scale=inherited_scale,
+                per_share=_is_per_share(attribute),
                 period_year=period_year,
                 period_kind=period_kind,
                 extra_flags=extra_flags,

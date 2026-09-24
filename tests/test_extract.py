@@ -19,7 +19,9 @@ import pytest
 
 from parser_service.emit import FlagLog, PdfLocation
 from parser_service.extract import (
+    _FOOTNOTE_MARKER,
     _infer_label_column,
+    _is_per_share,
     attribute_for,
     claims_from_table,
     infer_value_type_for,
@@ -664,6 +666,48 @@ def test_is_confident_currency_positive_signals_and_default() -> None:
     # default and must not be allowed to bind a page banner.
     assert not is_confident_currency("1,309", "Property Summary | Stratosphere")
     assert not is_confident_currency("80,000", "Property Summary | Aquarius")
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "Net income per diluted share | Jan 25, 2026",
+        "Diluted net income per share",
+        "Basic net income per share",
+        "Net income per common share",
+        "Average Price Paid per Share (1)",
+        "Cash dividends declared per share",
+        "Diluted EPS",
+        "Net income per ADS",
+    ],
+)
+def test_is_per_share_recognizes_a_per_share_basis(attribute: str) -> None:
+    assert _is_per_share(attribute)
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        # A share COUNT is not a per-share amount -- it must still scale normally.
+        "Shares outstanding",
+        "Weighted average shares used in diluted computation",
+        "Common shares issued and outstanding",
+        "Revenue",
+        "Total shareholders' equity",
+        "Repurchases of common stock",
+    ],
+)
+def test_is_per_share_rejects_non_per_share_labels(attribute: str) -> None:
+    assert not _is_per_share(attribute)
+
+
+def test_footnote_marker_matches_only_a_lone_reference() -> None:
+    assert _FOOTNOTE_MARKER.fullmatch("(1)")
+    assert _FOOTNOTE_MARKER.fullmatch("(12)")
+    # A real accounting negative is a full figure, not a bare marker.
+    assert not _FOOTNOTE_MARKER.fullmatch("(1,234)")
+    assert not _FOOTNOTE_MARKER.fullmatch("(123)")
+    assert not _FOOTNOTE_MARKER.fullmatch("2.94")
 
 
 def test_a_two_row_header_stacks_into_the_column_label_and_types_the_count() -> None:

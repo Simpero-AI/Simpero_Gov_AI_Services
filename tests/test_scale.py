@@ -457,6 +457,96 @@ def test_determine_scale_explicit_in_value_short_circuits_context() -> None:
     assert result.flags == []
 
 
+# --------------------------------------------------------------------------- #
+# determine_scale -- per-share exemption.
+# --------------------------------------------------------------------------- #
+
+
+def test_per_share_currency_declines_a_page_banner() -> None:
+    # NVIDIA's income statement end-to-end: "Diluted net income per share $ 2.94"
+    # under "(In millions, except per share data)". The caption's "millions" is
+    # real for the statement, but a per-share row is exempt -- read $2.94 at face
+    # value, not 2,940,000.
+    text = "(In millions, except per share data)\nDiluted net income per share $ 2.94"
+    page = _page(text)
+    result = determine_scale(
+        "$ 2.94",
+        page,
+        char_start=text.index("$ 2.94"),
+        origin="table",
+        value_type="currency",
+        per_share=True,
+    )
+
+    assert result.scale_source == "not_applicable"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 2.94
+
+
+def test_per_share_currency_declines_an_inherited_banner() -> None:
+    # The banner may arrive from a preceding page (inherited_scale); a per-share
+    # value must decline that too, not just an own-page one.
+    page = _page("Average price paid per share $ 198.89")
+    result = determine_scale(
+        "$ 198.89",
+        page,
+        char_start=page.text.index("$ 198.89"),
+        origin="table",
+        value_type="currency",
+        inherited_scale=(1_000_000_000.0, "USD", "(In billions)"),
+        per_share=True,
+    )
+
+    assert result.scale_source == "not_applicable"
+    assert result.scale_multiplier == 1.0
+    assert result.normalized == 198.89
+
+
+def test_per_share_currency_declines_a_column_header_banner() -> None:
+    # The column header carries the "(in millions)" mark (this is how NVIDIA's EPS
+    # actually mis-scaled). page_header_ok does NOT gate the column header, so the
+    # per-share exemption is the only thing that can refuse it.
+    cells = [
+        _cell(0, 0, "Metric"),
+        _cell(0, 1, "FY26 ($ in millions, except per share data)"),
+        _cell(1, 0, "Net income per diluted share"),
+        _cell(1, 1, "$ 2.94"),
+    ]
+    table = _table(cells, num_rows=2, num_cols=2)
+    page = _page("Net income per diluted share $ 2.94")
+    result = determine_scale(
+        "$ 2.94",
+        page,
+        char_start=page.text.index("$ 2.94"),
+        origin="table",
+        value_type="currency",
+        table=table,
+        cell=cells[-1],
+        per_share=True,
+    )
+
+    assert result.scale_source == "not_applicable"
+    assert result.normalized == 2.94
+
+
+def test_non_per_share_currency_still_takes_the_page_banner() -> None:
+    # Control: the exemption is off by default, so a normal currency row under the
+    # same caption still scales. Guards against the per-share gate leaking.
+    text = "(In millions, except per share data)\nNet income $ 26,000"
+    page = _page(text)
+    result = determine_scale(
+        "$ 26,000",
+        page,
+        char_start=text.index("$ 26,000"),
+        origin="table",
+        value_type="currency",
+    )
+
+    assert result.scale_source == "page_header"
+    assert result.scale_multiplier == 1_000_000.0
+    assert result.normalized == 26_000_000_000.0
+
+
 def test_determine_scale_percent_ignores_a_preceding_page_scale_header() -> None:
     # Regression for the correctness hazard this module exists to avoid: a
     # percentage on a "(in Thousands)" page must not be multiplied by 1000.
