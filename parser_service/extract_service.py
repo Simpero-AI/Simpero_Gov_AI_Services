@@ -26,6 +26,7 @@ from .dashboard import DashboardStructure, organize_claims
 from .deal_profile import DealProfile, classify_deal_profile
 from .docling_parser import parse_pdf_bytes
 from .emit import (
+    CORE_ATTRIBUTES,
     CORE_UNMAPPED,
     OPERATING_METRIC,
     Claim,
@@ -339,6 +340,11 @@ _PERCENT_ATTRIBUTES = frozenset(
     {"gross_margin", "net_margin", "ebitda_margin", "customer_concentration"}
 )
 _PERCENT_VALUE_TYPES = frozenset({"percent", "ratio"})
+# The rest of the closed core is currency (line items and disclosed dollar
+# figures); none is a percent or a ratio. A percent/ratio value that canonicalized
+# onto one of these is the mirror of the margin-as-dollars mis-extraction and is
+# failed closed the same way (see _fail_pct_type_mismatch).
+_CURRENCY_CORE_ATTRIBUTES = CORE_ATTRIBUTES - _PERCENT_ATTRIBUTES
 
 
 def _dashboard_eligible(claim: Claim) -> bool:
@@ -376,6 +382,35 @@ def _dashboard_entity_counts(claims: list[Claim]) -> dict[str, int]:
         if c.entity and _dashboard_eligible(c):
             counts[c.entity] = counts.get(c.entity, 0) + 1
     return counts
+
+
+def _fail_pct_type_mismatch(claim: Claim, raw: str, flag_log: FlagLog) -> None:
+    """Fail a claim closed when its value_type is incompatible with its canonical
+    attribute's kind. Two symmetric mis-extractions reach here: a DOLLAR figure
+    the extractor stuck a margin/concentration label on (would render in a percent
+    slot), and a PERCENT/RATIO value that canonicalized onto a currency core
+    attribute (would render as a dollar magnitude). Both are failed closed: null
+    the number so nothing renders and it drops from the headline/consistency gates,
+    keep the raw text for provenance, and never retype (inventing the missing kind
+    would fabricate). The attribute reverts to the raw document label with
+    attribute_raw cleared -- a canonical attribute paired with a null value +
+    attribute_raw violates the contract (#/$defs/canonicalAttribute) and the
+    backend verify stage rejects the whole run; this makes it an ordinary
+    uncanonicalized text claim, exactly as the value now is."""
+    claim.flags = [*claim.flags, "pct_attr_type_mismatch"]
+    claim.value.normalized = None
+    claim.value.unit = None
+    claim.value.scale_multiplier = None
+    claim.value.scale_source = None
+    claim.value.value_type = "text"
+    claim.attribute = raw
+    claim.attribute_raw = None
+    flag_log.log_all(
+        _STAGE_ATTRIBUTE_MAPPING,
+        element_id_for(claim),
+        ["pct_attr_type_mismatch"],
+        detail=raw,
+    )
 
 
 def _canonicalize_quantitative_claims(
@@ -417,42 +452,21 @@ def _canonicalize_quantitative_claims(
                 flag_log.log_all(
                     _STAGE_ATTRIBUTE_MAPPING, element_id_for(claim), extra_flags, detail=raw
                 )
-            # C / bug #2: a percentage metric that arrived with a non-percent
-            # value_type is a mis-extraction -- the extractor grabbed a stray
-            # DOLLAR figure and stuck a margin label on it (staging test: "Gross
-            # Margin -3.90M"). Fail the value closed to text so no number can
-            # render in a percent slot (a null `normalized` also drops it from the
-            # headline/consistency gates), keep the raw text for provenance, and
-            # record why. Never retype it to percent -- the value is a real dollar
-            # figure; inventing a % from it would fabricate. Reset the attribute to
-            # the document label, uncanonicalized, like any other text claim.
-            if (
-                canonical in _PERCENT_ATTRIBUTES
-                and claim.value.value_type not in _PERCENT_VALUE_TYPES
+            # A value_type incompatible with the canonical attribute's kind is a
+            # mis-extraction, in either direction -- both failed closed identically
+            # (see _fail_pct_type_mismatch):
+            #  - a percent-family attribute (margin / concentration) carrying a
+            #    NON-percent value: a stray DOLLAR figure the extractor stuck a
+            #    margin label on ("Gross Margin -3.90M"), which must never render in
+            #    a percent slot; and
+            #  - a currency core attribute carrying a PERCENT/RATIO value: a "15%"
+            #    that canonicalized onto revenue/ebit/..., which must never render as
+            #    the dollar magnitude 15.
+            pct_value = claim.value.value_type in _PERCENT_VALUE_TYPES
+            if (canonical in _PERCENT_ATTRIBUTES and not pct_value) or (
+                canonical in _CURRENCY_CORE_ATTRIBUTES and pct_value
             ):
-                claim.flags = [*claim.flags, "pct_attr_type_mismatch"]
-                claim.value.normalized = None
-                claim.value.unit = None
-                claim.value.scale_multiplier = None
-                claim.value.scale_source = None
-                claim.value.value_type = "text"
-                # Restore the raw document label AND drop the E2-ran signal: a
-                # claim carrying attribute_raw asserts canonicalization ran and the
-                # contract then requires `attribute` to be canonical
-                # (#/$defs/canonicalAttribute). We just set it back to the raw
-                # label, so leaving attribute_raw non-null (set above) emits an
-                # attribute_raw + non-canonical attribute pair the backend's verify
-                # stage rejects (ValueError: "claim N violates the contract"),
-                # aborting the whole run. Clearing it makes this an ordinary
-                # uncanonicalized text claim, exactly as the value now is.
-                claim.attribute = raw
-                claim.attribute_raw = None
-                flag_log.log_all(
-                    _STAGE_ATTRIBUTE_MAPPING,
-                    element_id_for(claim),
-                    ["pct_attr_type_mismatch"],
-                    detail=raw,
-                )
+                _fail_pct_type_mismatch(claim, raw, flag_log)
 
 
 def _assign_claim_refs(claims: list[Claim]) -> None:

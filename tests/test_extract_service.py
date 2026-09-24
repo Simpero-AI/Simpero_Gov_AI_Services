@@ -441,6 +441,50 @@ def test_percent_attribute_with_currency_value_is_failed_to_text(monkeypatch) ->
     _assert_conforms_to_contract([bad])
 
 
+def test_percent_value_on_a_currency_attribute_is_failed_to_text(monkeypatch) -> None:
+    # The mirror of the case above: a PERCENT/RATIO value whose label canonicalized
+    # onto a CURRENCY core attribute (a "15%" mapped to revenue) must never render as
+    # the dollar magnitude 15 -- fail it closed the same way.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    class _OnePageResult:
+        document = _Doc()
+        pages = [_Page(1)]
+        sha256 = "0" * 64
+
+    monkeypatch.setattr(extract_service, "parse_pdf_bytes", lambda _b: _OnePageResult())
+    monkeypatch.setattr(extract_service, "extract_tables", lambda *_a, **_k: [])
+    monkeypatch.setattr(extract_service, "tables_on_page", lambda *_a, **_k: ["t1"])
+    monkeypatch.setattr(
+        extract_service,
+        "claims_from_table",
+        lambda table, page, *, entity, file, flag_log, inherited_scale=None: [
+            _table_claim(page.page, attribute="Revenue | 2024", value_type="percent"),
+        ],
+    )
+    monkeypatch.setattr(
+        extract_service,
+        "canonicalize_attributes",
+        lambda labels: {label: ("revenue", []) for label in labels},
+    )
+
+    payload = extract_service.extract_claims(
+        b"%PDF-1.4 stub",
+        entity="ACME",
+        run_id="run-1",
+        correlation_id="doc-1",
+        source_file="cim.pdf",
+        canonicalize_attributes=True,
+    )
+
+    bad = next(c for c in payload["claims"] if "pct_attr_type_mismatch" in c.get("flags", []))
+    assert bad["attribute"] == "Revenue | 2024"  # reverted to the raw label, not "revenue"
+    assert bad["value"]["value_type"] == "text"
+    assert bad["value"].get("normalized") is None
+    assert "attribute_raw" not in bad
+    _assert_conforms_to_contract([bad])
+
+
 def test_canonicalize_attributes_failure_does_not_abort_the_document(monkeypatch) -> None:
     # Unlike the sibling tiers (table/prose/completeness), the canonicalization
     # pass had no try/except -- a transient API error discarded every
