@@ -42,6 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from typing import Any, Literal
 
 import anthropic
@@ -1095,6 +1096,66 @@ def _within_budget(proposals: list[ProposedAssertion]) -> list[ProposedAssertion
     return proposals[:MAX_ASSERTIONS_PER_PAGE]
 
 
+# Corporate-form tokens that carry no identity, dropped before comparing a
+# proposal's entity to the subject company. The model returns the subject under
+# many spellings -- "NVIDIA", "NVIDIA Corp.", "Nvidia Corporation" -- and even the
+# same spelling in a different case ("NVIDIA" vs a "nvidia" hint). A byte-exact
+# test against the hint dropped every firmographic / elided-subject assertion
+# ("the Company was founded in 1993") whose entity was not the hint verbatim.
+_ENTITY_SUFFIXES = frozenset(
+    (
+        "inc",
+        "incorporated",
+        "corp",
+        "corporation",
+        "co",
+        "company",
+        "companies",
+        "ltd",
+        "limited",
+        "llc",
+        "llp",
+        "lp",
+        "plc",
+        "sa",
+        "nv",
+        "ag",
+        "gmbh",
+        "spa",
+        "srl",
+        "bv",
+        "pte",
+        "pty",
+        "holdings",
+        "holding",
+        "group",
+    )  # fmt: skip
+)
+
+
+def _normalize_entity(name: str) -> str:
+    """A company name reduced to its identity tokens: NFKC-folded, lowercased,
+    punctuation removed, corporate suffixes dropped. Two spellings of the same
+    subject fold to the same string."""
+    folded = unicodedata.normalize("NFKC", name).casefold()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", folded) if t and t not in _ENTITY_SUFFIXES]
+    return " ".join(tokens)
+
+
+def _entity_matches_subject(entity: str, subject_hint: str) -> bool:
+    """Whether a proposal's entity names the subject company, tolerating the
+    spelling and case variance the model returns. Matches on suffix-stripped,
+    case-folded equality -- so "NVIDIA", "NVIDIA Corp." and a "nvidia" hint all
+    match -- rather than the byte-exact test that dropped every such assertion.
+    Falls back to a stripped exact match when normalization empties a name (an
+    entity that is only a corporate suffix), so the guard never widens to admit
+    an empty string."""
+    a, b = _normalize_entity(entity), _normalize_entity(subject_hint)
+    if not a or not b:
+        return entity.strip() == subject_hint.strip()
+    return a == b
+
+
 def assertions_from_prose(
     blocks: list[TextBlockRecord],
     page: PageIndex,
@@ -1132,7 +1193,8 @@ def assertions_from_prose(
         elif not contains_flexible(proposal.quote, proposal.subject_text):
             unsupported = f"subject {proposal.subject_text!r}"
         elif not (
-            contains_flexible(proposal.quote, proposal.entity) or proposal.entity == entity_hint
+            contains_flexible(proposal.quote, proposal.entity)
+            or _entity_matches_subject(proposal.entity, entity_hint)
         ):
             unsupported = f"entity {proposal.entity!r}"
         if unsupported is not None:

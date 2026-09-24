@@ -27,9 +27,11 @@ from parser_service.propose import (
     PageProposals,
     ProposedAssertion,
     ProposedClaim,
+    _entity_matches_subject,
     _extract_sampling,
     _extract_thinking,
     _normalize_attribute_label,
+    _normalize_entity,
     assertions_from_prose,
     canonicalize_attributes,
     claims_from_completeness,
@@ -833,6 +835,84 @@ def test_the_subject_company_may_be_the_entity_without_being_named() -> None:
     )
     assert len(claims) == 1
     assert claims[0].entity == "BarWash"
+
+
+@pytest.mark.parametrize(
+    ("entity_hint", "entity"),
+    [
+        ("nvidia", "NVIDIA"),  # case only -- the exact NVIDIA-run gap
+        ("NVIDIA Corporation", "NVIDIA"),  # suffix dropped
+        ("NVIDIA", "NVIDIA Corp."),  # suffix + punctuation added
+        ("BarWash", "BARWASH"),
+        ("BarWash", "BarWash, Inc."),
+    ],
+)
+def test_a_spelling_variant_of_the_subject_is_accepted_not_dropped(
+    entity_hint: str, entity: str
+) -> None:
+    # The subject-hint exception must tolerate the case/suffix variance the model
+    # returns for the subject company. A byte-exact test dropped "NVIDIA" against a
+    # "nvidia" hint, taking every firmographic / elided-subject assertion with it.
+    page = _page("Directed primarily at young people, typically students and young professionals.")
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint=entity_hint,
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(
+            [
+                _assertion(
+                    quote="Directed primarily at young people",
+                    subject_text="Directed primarily at young people",
+                    predicate_text="Directed primarily at young people",
+                    entity=entity,
+                    attribute="target customer segment",
+                    assertion_class="market_definition",
+                )
+            ]
+        ),
+    )
+    assert len(claims) == 1
+    assert claims[0].entity == entity
+
+
+def test_a_different_company_not_in_the_span_is_still_dropped() -> None:
+    # Precision is preserved: loosening the subject match to case/suffix must not
+    # admit a genuinely different company the span never names.
+    page = _page("Directed primarily at young people, typically students and young professionals.")
+    claims = assertions_from_prose(
+        [_block(page.text)],
+        page,
+        entity_hint="BarWash",
+        file="bw.pdf",
+        flag_log=FlagLog(),
+        client=_StubAssertionClient(
+            [
+                _assertion(
+                    quote="Directed primarily at young people",
+                    subject_text="Directed primarily at young people",
+                    predicate_text="Directed primarily at young people",
+                    entity="Acme Laundry Corporation",
+                    attribute="target customer segment",
+                    assertion_class="market_definition",
+                )
+            ]
+        ),
+    )
+    assert claims == []
+
+
+def test_normalize_entity_and_subject_match() -> None:
+    assert _normalize_entity("NVIDIA Corporation") == "nvidia"
+    assert _normalize_entity("Nvidia Corp.") == "nvidia"
+    assert _normalize_entity("BarWash, Inc.") == "barwash"
+    # Distinct identities do not collapse.
+    assert _normalize_entity("Acme Corporation") != _normalize_entity("Beta Corporation")
+    assert _entity_matches_subject("NVIDIA", "nvidia")
+    assert not _entity_matches_subject("Acme", "BarWash")
+    # An entity that is only a suffix normalizes empty and falls back to exact.
+    assert not _entity_matches_subject("Inc.", "BarWash")
 
 
 # Distinct, prefix-free quote tokens for the budget tests: none is a substring
