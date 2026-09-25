@@ -130,9 +130,11 @@ def assess_criteria(
         return client.messages.parse(
             model=model,
             max_tokens=2000,
-            # temperature=0 for a reproducible run over the same document (no
-            # `thinking` here, so temperature is settable).
-            temperature=0,
+            # No temperature: DEFAULT_MODEL (claude-opus-4-8) deprecated the
+            # parameter and returns 400 "temperature is deprecated for this
+            # model" on any value, which skipped this whole tier -- no per-rule
+            # Y/N verdicts were produced. Determinism now rests on the model
+            # default plus the schema-constrained (output_format) decode.
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
             output_format=CriteriaAssessment,

@@ -178,9 +178,12 @@ def classify_deal_profile(
         return client.messages.parse(
             model=model,
             max_tokens=1200,
-            # temperature=0 for a reproducible run over the same document (no
-            # `thinking` here, so temperature is settable).
-            temperature=0,
+            # No temperature: DEFAULT_MODEL (claude-opus-4-8) deprecated the
+            # parameter and returns 400 "temperature is deprecated for this
+            # model" on any value, which skipped this whole tier -- the profile
+            # came back null and the deal showed a blank sector/HQ. Determinism
+            # now rests on the model default plus the schema-constrained
+            # (output_format) decode, not on temperature=0.
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
             output_format=DealProfile,
