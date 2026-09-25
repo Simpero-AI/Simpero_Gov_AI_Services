@@ -85,11 +85,14 @@ def test_resolve_not_present_returns_none() -> None:
 def test_resolve_ambiguous_returns_none_and_logs(caplog: pytest.LogCaptureFixture) -> None:
     page = make_page("$15,295 here and $15,295 again", page_no=7)
 
-    with caplog.at_level("WARNING"):
+    # DEBUG, not WARNING: the per-quote ambiguity is high-volume noise, demoted so it
+    # cannot bury the loud signals; its recall impact is aggregated elsewhere (missing
+    # count + quote_unresolved flag). Still logged, just under DEBUG.
+    with caplog.at_level("DEBUG"):
         result = resolve("$15,295", page)
 
     assert result is None
-    assert any("Ambiguous quote" in r.message for r in caplog.records)
+    assert any("Ambiguous quote" in r.getMessage() for r in caplog.records)
     assert any("7" in r.getMessage() for r in caplog.records)
 
 
