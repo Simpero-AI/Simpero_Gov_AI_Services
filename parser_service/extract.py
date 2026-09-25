@@ -350,7 +350,7 @@ _COUNT_NOUNS = frozenset(
 # sense is meant.
 _DURATION_NOUNS = frozenset(
     """
-    years yrs tenure months days
+    years yrs tenure months days age ages
     """.split()  # noqa: SIM905 -- a word list reads better than 200 literal lines
 )
 

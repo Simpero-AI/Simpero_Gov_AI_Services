@@ -243,6 +243,14 @@ def test_vocabularies_do_not_contain_words_they_document_as_excluded() -> None:
         ("1,284", "Number of units", "count"),
         # A duration is counted, not priced.
         ("7", "ACEP Tenure (In Years)", "count"),
+        # A person's age is a span of years, not a dollar figure: a director-roster
+        # cell ("Jen-Hsun Huang | Age" -> 63) was typing currency by the fallthrough
+        # default and reading as $63 under a page banner.
+        ("63", "Jen-Hsun Huang | Age", "count"),
+        ("58", "Directors and Officers | Age", "count"),
+        # "age" is matched as a whole token, so "average"/"storage" (which merely
+        # contain the substring) are unaffected, and a real amount still wins first.
+        ("1,234", "Average Selling Price", "currency"),
         # Dates need BOTH a date label and a date-shaped value.
         ("1998", "Date Acquired", "date"),
         ("1998", "Stratosphere | Date Acquired", "date"),
