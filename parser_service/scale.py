@@ -658,6 +658,7 @@ def determine_scale(
     cell: TableCellRecord | None = None,
     page_header_ok: bool = True,
     inherited_scale: tuple[float, str | None, str] | None = None,
+    per_share: bool = False,
 ) -> ScaleResult:
     """Resolve one numeric claim's scale, per the module's resolution order.
 
@@ -693,6 +694,12 @@ def determine_scale(
     priority -- below an own-page column or page header -- and behind the same
     origin=='table' + page_header_ok gates, so it can never silently rescale a
     value the own-page banner itself would have been refused for.
+
+    `per_share` marks a currency value the caller has identified as a per-share
+    amount (EPS, "per diluted share", price paid per share). It is read at face
+    value and no header scale -- column, page, or inherited -- may bind it, since
+    a per-share figure is never carried in the statement's "(in millions)"
+    magnitude even when the surrounding rows are.
     """
     if origin == "prose" and (table is not None or cell is not None):
         raise ValueError("origin='prose' contradicts a supplied table/cell")
@@ -715,6 +722,25 @@ def determine_scale(
     number = _parse_number(raw)
     if number is None:
         raise ValueError(f"raw value {raw!r} has no numeric content to scale")
+
+    # A per-share amount (EPS, "per diluted share", an average price paid per
+    # share) is currency, but it is NEVER carried in the statement's magnitude:
+    # an income statement captioned "(In millions, except per share data)" says
+    # exactly that. The caption's "millions" still matches the column- and
+    # page-header scans below, though, so without this gate a "$ 2.94" diluted-EPS
+    # cell bound the millions multiplier and shipped 2,940,000 -- a silent
+    # 1,000,000x. The figure is complete as printed, so read it at face value (a
+    # KNOWN 1.0, not_applicable) and never let a column/page/inherited banner reach
+    # it. The caller (which holds the row label + column header) decides per_share;
+    # determine_scale sees only the cell.
+    if per_share:
+        return ScaleResult(
+            raw=raw,
+            normalized=number,
+            unit=None,
+            scale_multiplier=1.0,
+            scale_source="not_applicable",
+        )
 
     if table is not None and cell is not None:
         column_match = _column_header_scale(table, cell)

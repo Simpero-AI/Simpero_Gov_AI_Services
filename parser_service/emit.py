@@ -636,6 +636,7 @@ def emit_pdf_claim(
     document_name: str | None = None,
     page_header_ok: bool = True,
     inherited_scale: tuple[float, str | None, str] | None = None,
+    per_share: bool = False,
     stage: str = _STAGE_CLAIM_EMISSION,
     attribute_raw: str | None = None,
     claim_type: ClaimType = "unknown",
@@ -751,6 +752,7 @@ def emit_pdf_claim(
             cell=cell,
             page_header_ok=page_header_ok,
             inherited_scale=inherited_scale,
+            per_share=per_share,
         )
         flags.extend(scale_result.flags)
         if (
@@ -840,6 +842,7 @@ def emit_pdf_table_cell_claim(
     document_name: str | None = None,
     page_header_ok: bool = True,
     inherited_scale: tuple[float, str | None, str] | None = None,
+    per_share: bool = False,
     period_year: int | None = None,
     period_kind: PeriodKind | None = None,
     stage: str = _STAGE_CLAIM_EMISSION,
@@ -909,6 +912,7 @@ def emit_pdf_table_cell_claim(
         document_name=document_name,
         page_header_ok=page_header_ok,
         inherited_scale=inherited_scale,
+        per_share=per_share,
         period_year=period_year,
         period_kind=period_kind,
         stage=stage,
