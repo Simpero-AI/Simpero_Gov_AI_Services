@@ -22,6 +22,7 @@ from parser_service.extract import (
     _FOOTNOTE_MARKER,
     _infer_label_column,
     _is_per_share,
+    _is_percent_column,
     attribute_for,
     claims_from_table,
     infer_value_type_for,
@@ -708,6 +709,57 @@ def test_footnote_marker_matches_only_a_lone_reference() -> None:
     assert not _FOOTNOTE_MARKER.fullmatch("(1,234)")
     assert not _FOOTNOTE_MARKER.fullmatch("(123)")
     assert not _FOOTNOTE_MARKER.fullmatch("2.94")
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["%", "Gross margin %", "FY26 %", "Common Size", "Common-size", "as a %", "% Owned"],
+)
+def test_is_percent_column_recognizes_a_percent_header(header: str) -> None:
+    assert _is_percent_column(header)
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["Revenue", "2024", "$ in millions", "Amount", "Net sales ($)", ""],
+)
+def test_is_percent_column_rejects_a_non_percent_header(header: str) -> None:
+    assert not _is_percent_column(header)
+
+
+def test_a_percent_marked_column_types_its_cells_percent_not_scaled_currency() -> None:
+    # A "Gross margin %" column whose cell prints no "%" of its own would type
+    # currency by the metric-noun label ("Gross profit") and take the page's
+    # "(in millions)" banner -- 71.1 shipped as 71,100,000. The column header
+    # carries the percent sense the cell omitted.
+    page = make_page("(in millions) Gross margin % 71.1")
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "Gross margin %"),
+        _cell(1, 0, "Gross profit"),
+        _cell(1, 1, "71.1"),
+    ]
+    claims = claims_from_table(_table(cells), page, entity="E", file="f.pdf", flag_log=FlagLog())
+
+    assert len(claims) == 1
+    assert claims[0].value.value_type == "percent"
+    assert claims[0].value.normalized == 71.1
+
+
+def test_a_currency_cell_with_a_dollar_mark_stays_currency_under_a_percent_header() -> None:
+    # The retype only fires when the cell has no currency mark of its own: a "$"
+    # in the cell means it really is money, whatever the header reads.
+    page = make_page("Margin % $ 1,234")
+    cells = [
+        _cell(0, 0, ""),
+        _cell(0, 1, "Margin %"),
+        _cell(1, 0, "Gross profit"),
+        _cell(1, 1, "$ 1,234"),
+    ]
+    claims = claims_from_table(_table(cells), page, entity="E", file="f.pdf", flag_log=FlagLog())
+
+    assert len(claims) == 1
+    assert claims[0].value.value_type == "currency"
 
 
 def test_a_two_row_header_stacks_into_the_column_label_and_types_the_count() -> None:
