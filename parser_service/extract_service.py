@@ -973,6 +973,11 @@ def extract_claims(
                 geo_options=geo_options,
             )
         except Exception as exc:  # noqa: BLE001 -- best-effort; never abort the doc
+            # Credit exhaustion is not a per-tier miss: it dooms the whole run and
+            # must fail loud (the "analysis paused" banner), never be swallowed into
+            # a silent 200 with a null profile. Mirrors the per-page loops above.
+            if isinstance(exc, AnthropicCreditExhausted):
+                raise
             print(
                 f"tier deal_profile: classification failed and was skipped: "
                 f"{type(exc).__name__}: {exc}",
@@ -987,6 +992,9 @@ def extract_claims(
                 [p.text for p in result.pages], entity=entity, criteria=screen_criteria
             )
         except Exception as exc:  # noqa: BLE001 -- best-effort; never abort the doc
+            # Credit exhaustion must abort the run, not silently drop screening.
+            if isinstance(exc, AnthropicCreditExhausted):
+                raise
             print(
                 f"tier screen_criteria: assessment failed and was skipped: "
                 f"{type(exc).__name__}: {exc}",
@@ -1001,6 +1009,9 @@ def extract_claims(
             metrics_present = _dashboard_metrics_present(claims)
             structure = organize_claims(entity_counts, metrics_present, company=entity)
         except Exception as exc:  # noqa: BLE001 -- best-effort; the dashboard degrades gracefully
+            # Credit exhaustion must abort the run, not silently drop the dashboard.
+            if isinstance(exc, AnthropicCreditExhausted):
+                raise
             print(
                 f"tier dashboard: organization failed and was skipped: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
