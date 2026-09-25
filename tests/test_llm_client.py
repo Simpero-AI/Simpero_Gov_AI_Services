@@ -71,6 +71,14 @@ class _Grammar400(Exception):
     status_code = 400
 
 
+class _BadRequest400(Exception):
+    """Stand-in for the SDK's BadRequestError on a bare invalid_request_error: a
+    400 that is not billing, not usage-cap, and not grammar (its message never
+    says "grammar"). This is the "Invalid request data" transient."""
+
+    status_code = 400
+
+
 def test_is_grammar_timeout_gates_on_both_the_400_status_and_the_message() -> None:
     # A transient grammar-compilation 400 -> ours.
     assert is_grammar_timeout(_Grammar400("Grammar compilation timed out"))
@@ -108,6 +116,39 @@ def test_parse_with_retry_gives_up_after_the_grammar_budget(monkeypatch) -> None
     with pytest.raises(_Grammar400):
         parse_with_retry(call, page_no=1, what="numeric proposal")
     # one initial attempt plus _GRAMMAR_RETRIES retries, then the caller sees it.
+    assert calls["n"] == _GRAMMAR_RETRIES + 1
+
+
+def test_parse_with_retry_narrows_a_transient_bad_request_400(monkeypatch) -> None:
+    # A bare "Invalid request data" 400 (not billing/usage/grammar) has been seen
+    # recovering on an identical re-run, so it is retried once.
+    monkeypatch.setattr("parser_service.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _BadRequest400("Invalid request data")
+        return "ok"
+
+    assert parse_with_retry(call, page_no=1, what="numeric proposal") == "ok"
+    assert calls["n"] == 2
+
+
+def test_parse_with_retry_gives_up_on_a_persistent_bad_request_after_the_budget(
+    monkeypatch,
+) -> None:
+    # A genuinely permanent 400 exhausts the retry budget and then surfaces --
+    # bounded to the same fan-out cost the grammar path accepts.
+    monkeypatch.setattr("parser_service.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        raise _BadRequest400("Invalid request data")
+
+    with pytest.raises(_BadRequest400):
+        parse_with_retry(call, page_no=1, what="numeric proposal")
     assert calls["n"] == _GRAMMAR_RETRIES + 1
 
 
