@@ -370,6 +370,27 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
             409,
         )
 
+    settings = get_settings()
+
+    # Pre-flight check via pypdf to fast-fail on corrupt, encrypted, or too large PDFs.
+    # Runs BEFORE the cache read: the cache is keyed by content hash only, so a hit must
+    # never skip a guard (an entry written before a cap existed would bypass it forever).
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        if reader.is_encrypted:
+            raise ParseError("encrypted_pdf", "Encrypted PDFs are not supported.", 422)
+        page_count = len(reader.pages)
+        if page_count > settings.max_pages:
+            raise ParseError(
+                "pdf_too_large",
+                f"PDF has {page_count} pages; maximum allowed is {settings.max_pages}.",
+                413,
+            )
+    except (PdfReadError, ValueError, OSError) as exc:
+        if isinstance(exc, ParseError):
+            raise exc
+        raise ParseError("corrupt_pdf", "Uploaded file is not a readable PDF.", 400) from exc
+
     # Read-through: a cached finished parse for these exact bytes lets us skip
     # docling entirely -- extraction and chunking each parse the same PDF today.
     # The cache holds the finished PageIndex list AND the DoclingDocument, because
@@ -398,25 +419,6 @@ def parse_pdf_bytes(pdf_bytes: bytes, known_sha256s: set[str] | None = None) -> 
                     digest[:16],
                     exc,
                 )
-
-    settings = get_settings()
-
-    # Pre-flight check via pypdf to fast-fail on corrupt, encrypted, or too large PDFs
-    try:
-        reader = PdfReader(BytesIO(pdf_bytes))
-        if reader.is_encrypted:
-            raise ParseError("encrypted_pdf", "Encrypted PDFs are not supported.", 422)
-        page_count = len(reader.pages)
-        if page_count > settings.max_pages:
-            raise ParseError(
-                "pdf_too_large",
-                f"PDF has {page_count} pages; maximum allowed is {settings.max_pages}.",
-                413,
-            )
-    except (PdfReadError, ValueError, OSError) as exc:
-        if isinstance(exc, ParseError):
-            raise exc
-        raise ParseError("corrupt_pdf", "Uploaded file is not a readable PDF.", 400) from exc
 
     logger.info("parse start: sha256=%s pages=%d bytes=%d", digest[:16], page_count, len(pdf_bytes))
 

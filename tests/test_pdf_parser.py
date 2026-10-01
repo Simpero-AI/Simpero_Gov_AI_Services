@@ -807,3 +807,21 @@ def test_parse_cache_stale_entry_falls_through(monkeypatch):
     monkeypatch.setattr(docling_parser, "get_document_cache", lambda: _StaleCache())
     result = parse_pdf_bytes(make_text_pdf(["Revenue was 10 million dollars."]))
     assert result.pages and result.pages[0].text
+
+
+def test_parse_cache_hit_does_not_bypass_page_limit(monkeypatch):
+    # The cache is keyed by content hash only; an entry written before the cap
+    # existed (or under a higher cap) must not let an oversized PDF skip preflight.
+    class _HitCache:
+        enabled = True
+
+        def get_json(self, key):
+            return {"format": docling_parser._PARSE_CACHE_FORMAT, "pages": [], "document": None}
+
+        def put_json(self, key, document):
+            pass
+
+    monkeypatch.setattr(docling_parser, "get_document_cache", lambda: _HitCache())
+    with pytest.raises(ParseError) as exc_info:
+        parse_pdf_bytes(make_blank_pdf(page_count=111))
+    assert exc_info.value.code == "pdf_too_large"
