@@ -16,7 +16,7 @@ uv run pyright
 uv run pytest tests/ -q             # full suite
 uv run pytest tests/test_resolver.py -q            # one file
 uv run pytest tests/test_resolver.py::test_name -q # one test
-uv run --with jsonschema pytest -q contracts/test_claims_contract.py  # contract check
+uv run --with jsonschema pytest -q contracts/test_claims_contract.py contracts/test_claims_payload_contract.py  # contract check
 
 uv run uvicorn parser_service.main:app --reload --port 8001  # run locally
 ```
